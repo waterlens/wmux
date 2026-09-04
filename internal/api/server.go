@@ -10,6 +10,8 @@ import (
 
 	"github.com/waterlens/wmux/internal/app"
 	"github.com/waterlens/wmux/internal/config"
+	"github.com/waterlens/wmux/internal/sshconfig"
+	"github.com/waterlens/wmux/internal/sshx"
 	"github.com/waterlens/wmux/internal/store"
 	"github.com/waterlens/wmux/internal/terminal"
 	"github.com/waterlens/wmux/internal/transcript"
@@ -28,12 +30,22 @@ type Server struct {
 	loginRate     *failureWindow
 	mux           *http.ServeMux
 	sessionNameMu sync.Mutex
+	hostImportMu  sync.Mutex
 	sessionSpecs  sessionSpecProvider
+	sshConfig     sshConfigDiscoverer
+	probeSSH      sshHostKeyProbe
 }
 
 type sessionSpecProvider interface {
 	SessionSpec(context.Context, store.Session) (terminal.SessionSpec, error)
 }
+
+type sshConfigDiscoverer interface {
+	Discover(context.Context) (sshconfig.Result, error)
+	Resolve(context.Context, string) (sshconfig.Candidate, error)
+}
+
+type sshHostKeyProbe func(context.Context, string, string) (string, string, error)
 
 // New constructs the complete HTTP application.
 func New(cfg config.Config, database *store.Store, masterKey []byte, terminals *terminal.Manager, transcripts *transcript.Directory, logger *slog.Logger, providers ...sessionSpecProvider) *Server {
@@ -54,6 +66,8 @@ func New(cfg config.Config, database *store.Store, masterKey []byte, terminals *
 		loginRate:    newFailureWindow(6, 5*time.Minute),
 		mux:          http.NewServeMux(),
 		sessionSpecs: provider,
+		sshConfig:    sshconfig.New(cfg.SSHConfigPath),
+		probeSSH:     sshx.Probe,
 	}
 	s.routes()
 	return s
@@ -69,6 +83,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/me/password", s.sameOrigin(s.requireAuth(s.changePassword)))
 
 	s.mux.HandleFunc("GET /api/hosts", s.requireAuth(s.listHosts))
+	s.mux.HandleFunc("GET /api/hosts/ssh-config", s.requireAuth(s.discoverSSHConfig))
+	s.mux.HandleFunc("POST /api/hosts/import-ssh-config", s.sameOrigin(s.requireAuth(s.importSSHConfig)))
 	s.mux.HandleFunc("POST /api/hosts", s.sameOrigin(s.requireAuth(s.createHost)))
 	s.mux.HandleFunc("PATCH /api/hosts/{id}", s.sameOrigin(s.requireAuth(s.updateHost)))
 	s.mux.HandleFunc("DELETE /api/hosts/{id}", s.sameOrigin(s.requireAuth(s.deleteHost)))

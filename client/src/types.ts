@@ -61,6 +61,22 @@ export type HostInput = {
   passphrase?: string;
 };
 
+export type SSHConfigCandidate = {
+  alias: string;
+  address: string;
+  port: number;
+  username: string;
+  hasIdentityFile: boolean;
+  unsupported: string[];
+  existingHostId?: string | undefined;
+};
+
+export type SSHConfigDiscovery = {
+  available: boolean;
+  source: string;
+  candidates: SSHConfigCandidate[];
+};
+
 export type SessionInput = {
   name: string;
   kind: SessionKind;

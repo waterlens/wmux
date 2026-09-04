@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ActionMenu, Button, Input, Modal } from './UI';
+import { ActionMenu, Button, ConfirmDialog, Input, Modal } from './UI';
 
 afterEach(cleanup);
 
@@ -57,26 +57,62 @@ describe('Modal', () => {
 });
 
 describe('ActionMenu and Button', () => {
-  it('opens independently of focus and closes with Escape', async () => {
+  function Menu() {
+    const [open, setOpen] = useState(false);
+    return (
+      <ActionMenu open={open} onOpenChange={setOpen} label="更多操作" trigger={<span>…</span>}>
+        <button role="menuitem" disabled>
+          不可用
+        </button>
+        <button role="menuitem">重命名</button>
+        <button role="menuitem">重启</button>
+        <button role="menuitem">删除</button>
+      </ActionMenu>
+    );
+  }
+
+  it('focuses the first enabled item and cycles with menu navigation keys', async () => {
     const user = userEvent.setup();
-
-    function Menu() {
-      const [open, setOpen] = useState(false);
-      return (
-        <ActionMenu open={open} onOpenChange={setOpen} label="更多操作" trigger={<span>…</span>}>
-          <button role="menuitem">重命名</button>
-        </ActionMenu>
-      );
-    }
-
     render(<Menu />);
     const trigger = screen.getByRole('button', { name: '更多操作' });
     fireEvent.click(trigger);
     expect(trigger.getAttribute('aria-expanded')).toBe('true');
     const menu = screen.getByRole('menu');
     expect(menu.hidden).toBe(false);
+    expect(trigger.getAttribute('aria-controls')).toBe(menu.id);
+
+    const rename = screen.getByRole('menuitem', { name: '重命名' });
+    const restart = screen.getByRole('menuitem', { name: '重启' });
+    const remove = screen.getByRole('menuitem', { name: '删除' });
+    await waitFor(() => expect(document.activeElement).toBe(rename));
+
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(restart);
+    await user.keyboard('{End}');
+    expect(document.activeElement).toBe(remove);
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(rename);
+    await user.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(remove);
+    await user.keyboard('{Home}');
+    expect(document.activeElement).toBe(rename);
+  });
+
+  it('closes with Escape or the trigger and restores trigger focus', async () => {
+    const user = userEvent.setup();
+    render(<Menu />);
+    const trigger = screen.getByRole('button', { name: '更多操作' });
+    fireEvent.click(trigger);
+    const menu = screen.getByRole('menu');
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: '重命名' })));
 
     await user.keyboard('{Escape}');
+    expect(menu.hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger);
+
+    fireEvent.click(trigger);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: '重命名' })));
+    fireEvent.click(trigger);
     expect(menu.hidden).toBe(true);
     expect(document.activeElement).toBe(trigger);
   });
@@ -87,5 +123,25 @@ describe('ActionMenu and Button', () => {
     expect(button.textContent).toContain('启动会话');
     expect(button.getAttribute('aria-busy')).toBe('true');
     expect(button.hasAttribute('disabled')).toBe(true);
+  });
+});
+
+describe('ConfirmDialog', () => {
+  it('shows only the caller-provided consequence for a dangerous action', () => {
+    render(
+      <ConfirmDialog
+        open
+        title="删除记录？"
+        description="将删除这条记录。"
+        confirmLabel="删除"
+        danger
+        onCancel={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('将删除这条记录。')).toBeTruthy();
+    expect(screen.queryByText('这个操作无法撤销。')).toBeNull();
+    expect(screen.getByRole('button', { name: '删除' }).classList.contains('button--danger')).toBe(true);
   });
 });

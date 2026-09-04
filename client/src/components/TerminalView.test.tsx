@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_INPUT_FRAME_BYTES } from '../terminalProtocol';
 import type { Session, TerminalPreferences } from '../types';
 import { TerminalView } from './TerminalView';
+
+const styles = readFileSync('client/src/styles.css', 'utf8');
 
 const fontHarness = vi.hoisted(() => ({ loadFonts: vi.fn() }));
 
@@ -165,16 +168,17 @@ function outputFrame(sequence: bigint, value: string): ArrayBuffer {
   return packet.buffer;
 }
 
-function renderTerminal(notify = vi.fn()) {
+function renderTerminal(notify = vi.fn(), onTerminate = vi.fn()) {
   return {
     notify,
+    onTerminate,
     ...render(
       <TerminalView
         session={session}
         active
         preferences={preferences}
         onRestart={() => undefined}
-        onTerminate={() => undefined}
+        onTerminate={onTerminate}
         notify={notify}
       />,
     ),
@@ -216,6 +220,50 @@ async function finishFontLoading(): Promise<void> {
 }
 
 describe('TerminalView transport boundaries', () => {
+  it('uses a quiet status indicator and an accessible icon-only terminate tool', async () => {
+    const onTerminate = vi.fn();
+    const { container } = renderTerminal(vi.fn(), onTerminate);
+
+    const identity = container.querySelector('.terminal-identity');
+    const status = container.querySelector('.live-status');
+    expect(identity?.querySelector('.connection-dot')).not.toBeNull();
+    expect(identity?.textContent).toContain('测试会话');
+    expect(status?.textContent).toBe('正在连接');
+    expect(status?.querySelector('.spin')).not.toBeNull();
+    expect(status?.getAttribute('role')).toBe('status');
+    expect(status?.getAttribute('aria-live')).toBe('polite');
+    expect(status?.getAttribute('aria-atomic')).toBe('true');
+
+    const terminate = screen.getByRole('button', { name: '结束会话 测试会话' });
+    expect(terminate.getAttribute('title')).toBe('结束会话');
+    expect(terminate.classList.contains('tool-button')).toBe(true);
+    expect(terminate.classList.contains('terminate-session-button')).toBe(true);
+    expect(terminate.textContent).toBe('');
+    fireEvent.click(terminate);
+    expect(onTerminate).toHaveBeenCalledWith(session);
+
+    expect(styles).toMatch(/\.terminate-session-button\s*\{[^}]*color:\s*var\(--danger\)/s);
+    expect(styles).toMatch(
+      /\.terminate-session-button:hover\s*\{[^}]*background:\s*var\(--danger-soft\)[^}]*color:\s*var\(--danger-hover\)/s,
+    );
+
+    await finishFontLoading();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error('terminal transport was not initialized');
+
+    act(() => socket.emitOpen());
+    expect(status?.textContent).toBe('已连接');
+    expect(status?.querySelector('svg')).toBeNull();
+
+    act(() => socket.emitMessage('{"type":"state","status":"error"}'));
+    expect(status?.textContent).toBe('连接错误');
+    expect(status?.querySelector('svg')).toBeNull();
+
+    act(() => socket.emitMessage('{"type":"state","status":"exited"}'));
+    expect(status?.textContent).toBe('已退出');
+    expect(status?.querySelector('svg')).toBeNull();
+  });
+
   it('waits for webfonts before opening xterm or creating the WebSocket', async () => {
     renderTerminal();
     const terminal = xtermHarness.FakeTerminal.instances[0];

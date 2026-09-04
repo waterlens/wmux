@@ -18,6 +18,7 @@ import {
 import { type FormEvent, useState } from 'react';
 import { api, errorMessage } from '../api';
 import type { AuthType, Host, HostInput } from '../types';
+import { SSHConfigImport } from './SSHConfigImport';
 import { ActionMenu, Button, ConfirmDialog, EmptyState, Field, Input, Modal, Textarea } from './UI';
 
 type HostManagerProps = {
@@ -120,9 +121,12 @@ export function HostManager({ hosts, onHostsChange, onStartSession, notify }: Ho
           <h1>SSH 主机</h1>
           <p>安全地保存连接信息，并验证每台主机的身份。</p>
         </div>
-        <Button tone="primary" onClick={openCreate}>
-          <Plus size={17} /> 添加主机
-        </Button>
+        <div className="manager-header__actions">
+          <SSHConfigImport onImported={upsert} notify={notify} />
+          <Button tone="primary" onClick={openCreate}>
+            <Plus size={17} /> 添加主机
+          </Button>
+        </div>
       </header>
 
       {hosts.length === 0 ? (
@@ -226,14 +230,6 @@ export function HostManager({ hosts, onHostsChange, onStartSession, notify }: Ho
           ))}
         </div>
       )}
-
-      <div className="manager-hint">
-        <Network size={18} />
-        <div>
-          <strong>主机密钥校验始终开启</strong>
-          <p>wmux 不会静默接受新指纹。主机重装或密钥变化后，需要你重新确认。</p>
-        </div>
-      </div>
 
       {editorOpen && (
         <HostEditor
@@ -376,7 +372,6 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
     <Modal
       open={open}
       title={host ? '编辑 SSH 主机' : '添加 SSH 主机'}
-      description={host ? '留空认证字段可保留当前凭据。' : '凭据由 wmux 服务加密保管。'}
       onClose={onClose}
       footer={
         <>
@@ -487,7 +482,7 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
           </Field>
         ) : (
           <>
-            <Field label="私钥" hint={host?.hasSecret ? '留空以保留已保存的私钥' : '支持 OpenSSH PEM 格式'}>
+            <Field label="私钥" hint={host?.hasSecret ? '留空以保留已保存的私钥' : undefined}>
               <Textarea
                 className="key-textarea"
                 value={privateKey}
@@ -508,12 +503,6 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
           </>
         )}
 
-        {!host && (
-          <div className="info-callout">
-            <ShieldCheck size={17} />
-            <span>保存后还需要探测并确认主机指纹，才能建立终端连接。</span>
-          </div>
-        )}
         {host?.fingerprint && (
           <div className="success-callout">
             <CheckCircle2 size={17} />

@@ -19,6 +19,12 @@ services:
       # WMUX_TRUST_PROXY: "true"
     volumes:
       - wmux-data:/data
+      # Optional SSH config discovery. Use explicit host paths and keep these
+      # mounts read-only; UID 10001 must be able to read/traverse them. Mount
+      # only config text and actual Include fragments, never the whole ~/.ssh,
+      # IdentityFile/private keys, or known_hosts.
+      # - /absolute/path/to/.ssh/config:/home/wmux/.ssh/config:ro
+      # - /absolute/path/to/.ssh/config.d:/home/wmux/.ssh/config.d:ro
 
 volumes:
   wmux-data:

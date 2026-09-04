@@ -61,3 +61,77 @@ describe('API error handling', () => {
     expect(expired).toHaveBeenCalledOnce();
   });
 });
+
+describe('SSH config API contract', () => {
+  it('validates discovered hosts and imports one alias explicitly', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            available: true,
+            source: '~/.ssh/config',
+            candidates: [
+              {
+                alias: 'workbox',
+                address: 'workbox.internal',
+                port: 2200,
+                username: 'dev',
+                hasIdentityFile: true,
+                unsupported: [],
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: 'host_imported',
+            name: 'workbox',
+            address: 'workbox.internal',
+            port: 2200,
+            username: 'dev',
+            authType: 'agent',
+            hasSecret: false,
+            createdAt: '2026-09-04T00:00:00Z',
+            updatedAt: '2026-09-04T00:00:00Z',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+    globalThis.fetch = fetchMock;
+
+    await expect(api.sshConfigHosts()).resolves.toMatchObject({
+      available: true,
+      candidates: [{ alias: 'workbox', hasIdentityFile: true }],
+    });
+    await expect(api.importSSHConfigHost('workbox')).resolves.toMatchObject({
+      id: 'host_imported',
+      authType: 'agent',
+      hasSecret: false,
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/hosts/import-ssh-config',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ alias: 'workbox' }) }),
+    );
+  });
+
+  it('rejects malformed discovery metadata', async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            available: true,
+            source: '~/.ssh/config',
+            candidates: [{ alias: 'broken', address: 'host', port: 70_000, username: 'dev' }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+
+    await expect(api.sshConfigHosts()).rejects.toMatchObject({ status: 502, code: 'invalid_response' });
+  });
+});

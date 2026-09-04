@@ -52,6 +52,26 @@ type hostResponse struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
+type sshConfigImportInput struct {
+	Alias string `json:"alias"`
+}
+
+type sshConfigCandidateResponse struct {
+	Alias           string   `json:"alias"`
+	Address         string   `json:"address"`
+	Port            int      `json:"port"`
+	Username        string   `json:"username"`
+	HasIdentityFile bool     `json:"hasIdentityFile"`
+	Unsupported     []string `json:"unsupported"`
+	ExistingHostID  string   `json:"existingHostId,omitempty"`
+}
+
+type sshConfigResponse struct {
+	Available  bool                         `json:"available"`
+	Source     string                       `json:"source"`
+	Candidates []sshConfigCandidateResponse `json:"candidates"`
+}
+
 type sessionInput struct {
 	Name        string `json:"name"`
 	Kind        string `json:"kind"`

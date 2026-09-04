@@ -31,6 +31,7 @@ type Config struct {
 	DatabasePath  string
 	MasterKeyPath string
 	RecordingsDir string
+	SSHConfigPath string
 	PublicURL     string
 	CookieSecure  bool
 	TrustProxy    bool
@@ -66,6 +67,13 @@ func FromLookupEnv(lookup func(string) (string, bool)) (Config, error) {
 	dataDir, err = filepath.Abs(filepath.Clean(dataDir))
 	if err != nil {
 		return Config{}, fmt.Errorf("resolve WMUX_DATA_DIR: %w", err)
+	}
+	sshConfigPath := strings.TrimSpace(valueOr(lookup, "WMUX_SSH_CONFIG", ""))
+	if sshConfigPath != "" {
+		sshConfigPath, err = filepath.Abs(filepath.Clean(sshConfigPath))
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve WMUX_SSH_CONFIG: %w", err)
+		}
 	}
 
 	publicURL := strings.TrimSpace(valueOr(lookup, "WMUX_PUBLIC_URL", ""))
@@ -105,6 +113,7 @@ func FromLookupEnv(lookup func(string) (string, bool)) (Config, error) {
 		DatabasePath:  filepath.Join(dataDir, "wmux.db"),
 		MasterKeyPath: filepath.Join(dataDir, "master.key"),
 		RecordingsDir: filepath.Join(dataDir, "recordings"),
+		SSHConfigPath: sshConfigPath,
 		PublicURL:     publicURL,
 		CookieSecure:  cookieSecure,
 		TrustProxy:    trustProxy,

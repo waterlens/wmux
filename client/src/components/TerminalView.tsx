@@ -8,7 +8,6 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
-  Check,
   Clipboard,
   Copy,
   Eraser,
@@ -572,12 +571,10 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
           </div>
         </div>
         <div className="terminal-toolbar__actions">
-          <span className={`live-status ${statusClass}`}>
+          <span className={`live-status ${statusClass}`} role="status" aria-live="polite" aria-atomic="true">
             {(liveStatus === 'connecting' || liveStatus === 'reconnecting') && (
               <LoaderCircle className="spin" size={13} />
             )}
-            {liveStatus === 'running' && <Check size={13} />}
-            {(liveStatus === 'error' || liveStatus === 'exited') && <AlertTriangle size={13} />}
             {statusText[liveStatus]}
           </span>
           <button className="tool-button desktop-only" onClick={() => void copySelection()} title="复制选中内容">
@@ -600,16 +597,15 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
           >
             <Maximize2 size={16} />
           </button>
-          <Button
-            className="terminate-session-button"
-            size="sm"
-            tone="danger"
+          <button
+            type="button"
+            className="tool-button terminate-session-button"
             onClick={() => onTerminate(session)}
+            title="结束会话"
             aria-label={`结束会话 ${session.name}`}
           >
-            <Square size={13} />
-            <span>结束</span>
-          </Button>
+            <Square size={16} />
+          </button>
         </div>
       </header>
 

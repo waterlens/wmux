@@ -9,6 +9,7 @@ wmux 是一个面向个人自托管场景的 Web 终端：在浏览器中管理�
 - `tmux` / `screen` 持久化；不可用时可降级为直接 PTY
 - 单写多读：同一 session 可在多个设备打开，并显式接管输入权
 - SSH 密码、加密私钥及 `SSH_AUTH_SOCK` 三种认证方式
+- 发现运行用户的 OpenSSH config，并由管理员显式导入候选主机
 - SSH host key 指纹探测、人工信任及变更拒绝
 - SQLite 元数据、加密凭据与有上限的终端历史文件
 - 首次初始化、密码登录、会话过期及登录限流
@@ -39,6 +40,16 @@ docker compose up -d --build
 
 镜像内置 `tmux`，数据保存在 `wmux-data` volume。注意：容器中的“本机”是容器本身，不是 Docker 宿主机；重启整个容器会保留会话元数据和历史，但会结束容器内的本机进程。若希望控制宿主机并让本机会话跨 wmux 服务重启继续运行，推荐在宿主机原生运行 wmux，或把宿主机作为 SSH 主机添加。
 
+## 从 OpenSSH config 导入主机
+
+wmux 可以只读发现其运行系统账户的 `~/.ssh/config`；也可通过 `WMUX_SSH_CONFIG` 指向另一份配置文件。这里的 `~`、`%d` 和相对 `Include` 都以该账户记录的 home 为准，不受服务进程的 `HOME` 环境变量影响。发现结果不会自动写入数据库或连接网络，只有登录后的管理员显式选择别名并导入时，wmux 才会重新解析该别名并创建主机记录。
+
+导入只复制别名、地址、端口和用户名，认证方式固定为 SSH agent。`IdentityFile` 只会显示“已配置”的提示，其路径和文件内容不会进入 API 或数据库；导入也不会读取私钥、复制密码、探测网络或自动信任 host key。首次连接仍需可用的 agent 或之后手工配置凭据，并通过 wmux 独立的指纹探测与确认流程。`ProxyJump`、`ProxyCommand` 等会改变连接路径或执行外部命令的配置目前不支持，相应候选不会被导入。
+
+解析遵循 OpenSSH 的大小写敏感 `Host` 匹配、通配/否定规则、首值优先和 Include 顺序。为避免 discovery 执行本地命令，首版只安全应用 `Match all`，其他 `Match` 条件均忽略；条件 `Include` 会在解析已知别名时按需读取，但其中新声明的别名不会额外出现在候选列表中。
+
+Docker 部署不要挂载整个宿主机 `~/.ssh`，否则 Web 本地 shell 也可能读取其中的私钥和 `known_hosts`。若需发现配置，只分别只读挂载主 config 以及它实际引用的配置片段，例如 compose 文件中的注释示例；不要挂载 `IdentityFile`、私钥或 `known_hosts`。容器以 UID `10001` 运行，宿主文件及其父目录必须允许该 UID 读取和遍历。
+
 ## 安全地远程访问
 
 推荐通过 WireGuard、Tailscale 或其他私有网络访问。远程地址仍应在 wmux 前配置 HTTPS：除 `localhost` 等浏览器认可的本机来源外，工具栏的复制/粘贴依赖 Secure Context，普通私网 IP 的 HTTP 页面无法获得浏览器剪贴板权限。若需要域名访问，请设置：
@@ -64,6 +75,7 @@ WMUX_TRUST_PROXY=true
 | `WMUX_TRUST_PROXY` | `false` | 是否信任反向代理提供的协议及客户端地址 |
 | `WMUX_SESSION_TTL` | `168h` | 登录有效期 |
 | `WMUX_LOG_LEVEL` | `info` | 日志级别：`debug`、`info`、`warn` 或 `error` |
+| `WMUX_SSH_CONFIG` | 空（`~/.ssh/config`） | 用于只读发现候选主机的 OpenSSH config 路径 |
 
 数据目录权限会被收紧到 `0700`，其中 `master.key` 为 `0600`。SSH 密码、私钥和 passphrase 使用该主密钥通过 AES-256-GCM 加密。备份时必须同时保存数据库和主密钥；丢失主密钥后加密凭据无法恢复。
 

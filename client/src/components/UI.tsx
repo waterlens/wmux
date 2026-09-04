@@ -78,7 +78,7 @@ type ModalProps = {
   description?: string | undefined;
   size?: 'sm' | 'md' | 'lg';
   onClose: () => void;
-  children: ReactNode;
+  children?: ReactNode | undefined;
   footer?: ReactNode | undefined;
 };
 
@@ -207,8 +207,17 @@ type ActionMenuProps = {
   children: ReactNode;
 };
 
+function enabledMenuItems(container: HTMLElement | null): HTMLElement[] {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll<HTMLElement>('[role="menuitem"]')).filter(
+    (item) => !item.hidden && item.getAttribute('aria-disabled') !== 'true' && !item.matches(':disabled'),
+  );
+}
+
 export function ActionMenu({ open, onOpenChange, label, className = '', trigger, children }: ActionMenuProps) {
+  const menuId = useId();
   const menuRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const changeRef = useRef(onOpenChange);
 
@@ -218,14 +227,41 @@ export function ActionMenu({ open, onOpenChange, label, className = '', trigger,
 
   useEffect(() => {
     if (!open) return undefined;
+    enabledMenuItems(popoverRef.current ?? menuRef.current)[0]?.focus();
+
     const onPointerDown = (event: PointerEvent) => {
       if (!menuRef.current?.contains(event.target as Node)) changeRef.current(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        changeRef.current(false);
+        triggerRef.current?.focus();
+        return;
+      }
+      if (
+        !menuRef.current?.contains(event.target as Node) ||
+        (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End')
+      )
+        return;
+
+      const items = enabledMenuItems(popoverRef.current ?? menuRef.current);
+      if (!items.length) return;
       event.preventDefault();
-      changeRef.current(false);
-      triggerRef.current?.focus();
+      event.stopPropagation();
+      const current = items.indexOf(document.activeElement as HTMLElement);
+      const nextIndex =
+        event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? items.length - 1
+            : event.key === 'ArrowDown'
+              ? (current + 1) % items.length
+              : current <= 0
+                ? items.length - 1
+                : current - 1;
+      items[nextIndex]?.focus();
     };
     document.addEventListener('pointerdown', onPointerDown, true);
     document.addEventListener('keydown', onKeyDown, true);
@@ -244,11 +280,16 @@ export function ActionMenu({ open, onOpenChange, label, className = '', trigger,
         aria-label={label}
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => onOpenChange(!open)}
+        aria-controls={menuId}
+        onClick={() => {
+          const nextOpen = !open;
+          changeRef.current(nextOpen);
+          if (!nextOpen) triggerRef.current?.focus();
+        }}
       >
         {trigger}
       </button>
-      <div className="action-menu__popover" role="menu" hidden={!open}>
+      <div ref={popoverRef} id={menuId} className="action-menu__popover" role="menu" hidden={!open}>
         {children}
       </div>
     </div>
@@ -293,14 +334,7 @@ export function ConfirmDialog({
           </Button>
         </>
       }
-    >
-      {danger && (
-        <div className="warning-callout">
-          <AlertCircle size={18} />
-          <span>这个操作无法撤销。</span>
-        </div>
-      )}
-    </Modal>
+    />
   );
 }
 

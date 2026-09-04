@@ -14,10 +14,12 @@ import (
 
 func TestFromLookupEnv(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "private")
+	sshConfigPath := filepath.Join(t.TempDir(), "ssh", "config")
 	values := map[string]string{
 		"WMUX_HOST":        "::1",
 		"WMUX_PORT":        "9999",
 		"WMUX_DATA_DIR":    dataDir,
+		"WMUX_SSH_CONFIG":  sshConfigPath,
 		"WMUX_PUBLIC_URL":  "https://terminal.example.test/",
 		"WMUX_TRUST_PROXY": "true",
 		"WMUX_SESSION_TTL": "12h",
@@ -40,6 +42,9 @@ func TestFromLookupEnv(t *testing.T) {
 	}
 	if cfg.DatabasePath != filepath.Join(dataDir, "wmux.db") {
 		t.Fatalf("DatabasePath = %q", cfg.DatabasePath)
+	}
+	if cfg.SSHConfigPath != sshConfigPath {
+		t.Fatalf("SSHConfigPath = %q", cfg.SSHConfigPath)
 	}
 	if err := cfg.Ensure(); err != nil {
 		t.Fatalf("Ensure: %v", err)

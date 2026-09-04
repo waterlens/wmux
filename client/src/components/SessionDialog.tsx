@@ -1,4 +1,4 @@
-import { Command, Server, Sparkles, TerminalSquare } from 'lucide-react';
+import { Command, Server, TerminalSquare } from 'lucide-react';
 import { type FormEvent, useMemo, useState } from 'react';
 import { api, errorMessage } from '../api';
 import type { Host, PersistenceMode, Session, SessionInput, SessionKind } from '../types';
@@ -67,7 +67,6 @@ export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, o
     <Modal
       open={open}
       title="新建会话"
-      description="进程将在浏览器关闭后继续运行。"
       onClose={onClose}
       footer={
         <>
@@ -164,12 +163,7 @@ export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, o
           </div>
         </Field>
 
-        <div className="info-callout">
-          <Sparkles size={17} />
-          <span>
-            {persistence === 'none' ? '这个会话会在服务连接终止时结束。' : '断线后会自动重连，并补发缺失的终端输出。'}
-          </span>
-        </div>
+        {persistence === 'none' && <p className="persistence-note">不持久化会话会在服务连接终止时结束。</p>}
         {error && (
           <div className="form-error" role="alert">
             {error}

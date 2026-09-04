@@ -14,7 +14,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { persistenceLabel, sessionStatusLabel, sessionStatusTone } from '../sessionStatus';
 import type { Host, Session, User } from '../types';
 import { ActionMenu, Button } from './UI';
@@ -59,6 +59,7 @@ export function Sidebar({
   const [query, setQuery] = useState('');
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const groupItemsPrefix = useId();
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -137,21 +138,25 @@ export function Sidebar({
       <div className="sidebar__scroll">
         <div className="sidebar-section-title">
           <span>会话</span>
-          <span>{sessions.length}</span>
         </div>
 
         {groups.map((group) => {
           const collapsed = collapsedGroups.has(group.id);
+          const itemsID = `${groupItemsPrefix}-${group.id}`;
           return (
             <section className="session-group" key={group.id}>
-              <button className="session-group__header" onClick={() => toggleGroup(group.id)}>
+              <button
+                className="session-group__header"
+                aria-expanded={!collapsed}
+                aria-controls={itemsID}
+                onClick={() => toggleGroup(group.id)}
+              >
                 {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                 {group.icon === 'local' ? <TerminalSquare size={14} /> : <Server size={14} />}
                 <span>{group.label}</span>
-                <em>{group.sessions.length}</em>
               </button>
               {!collapsed && (
-                <div className="session-group__items">
+                <div id={itemsID} className="session-group__items">
                   {group.sessions.length === 0 ? (
                     <span className="session-group__empty">暂无会话</span>
                   ) : (
@@ -226,23 +231,26 @@ export function Sidebar({
       </div>
 
       <footer className="sidebar__footer">
-        <button className={`sidebar-nav ${currentView === 'home' ? 'is-active' : ''}`} onClick={onHome}>
-          <TerminalSquare size={17} />
-          <span>终端会话</span>
-        </button>
-        <button className={`sidebar-nav ${currentView === 'hosts' ? 'is-active' : ''}`} onClick={onHosts}>
-          <Server size={17} />
-          <span>SSH 主机</span>
-          <em>{hosts.length}</em>
-        </button>
-        <button className="sidebar-nav" onClick={onSettings}>
-          <span className="user-avatar">{user.username.slice(0, 1).toUpperCase()}</span>
-          <span className="sidebar-nav__user">
-            <strong>{user.username}</strong>
-            <small>管理员</small>
-          </span>
-          <Settings size={16} />
-        </button>
+        <div className="sidebar-footer-nav">
+          <button className={`sidebar-nav ${currentView === 'home' ? 'is-active' : ''}`} onClick={onHome}>
+            <TerminalSquare size={17} />
+            <span>终端会话</span>
+          </button>
+          <button className={`sidebar-nav ${currentView === 'hosts' ? 'is-active' : ''}`} onClick={onHosts}>
+            <Server size={17} />
+            <span>SSH 主机</span>
+          </button>
+        </div>
+        <div className="sidebar-account">
+          <button className="sidebar-nav sidebar-account__button" onClick={onSettings}>
+            <span className="user-avatar">{user.username.slice(0, 1).toUpperCase()}</span>
+            <span className="sidebar-nav__user">
+              <strong>{user.username}</strong>
+              <small>管理员</small>
+            </span>
+            <Settings size={16} />
+          </button>
+        </div>
       </footer>
     </aside>
   );

@@ -159,7 +159,11 @@ func (s *Server) probeHost(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreError(w, err, "SSH 主机不存在")
 		return
 	}
-	fingerprint, algorithm, err := sshx.Probe(r.Context(), sshAddress(host.Address, host.Port), host.Username)
+	probe := s.probeSSH
+	if probe == nil {
+		probe = sshx.Probe
+	}
+	fingerprint, algorithm, err := probe(r.Context(), sshAddress(host.Address, host.Port), host.Username)
 	if err != nil {
 		s.upstreamError(w, "探测 SSH 主机指纹", "ssh_probe_failed", "无法读取 SSH 主机指纹，请检查地址和网络连接", err)
 		return
@@ -179,7 +183,11 @@ func (s *Server) trustHost(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreError(w, err, "SSH 主机不存在")
 		return
 	}
-	actual, _, err := sshx.Probe(r.Context(), sshAddress(host.Address, host.Port), host.Username)
+	probe := s.probeSSH
+	if probe == nil {
+		probe = sshx.Probe
+	}
+	actual, _, err := probe(r.Context(), sshAddress(host.Address, host.Port), host.Username)
 	if err != nil {
 		s.upstreamError(w, "重新探测 SSH 主机指纹", "ssh_probe_failed", "无法再次读取 SSH 主机指纹，请检查地址和网络连接", err)
 		return

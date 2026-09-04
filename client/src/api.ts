@@ -28,6 +28,22 @@ const hostSchema = z.object({
   updatedAt: z.string(),
 });
 
+const sshConfigCandidateSchema = z.object({
+  alias: z.string(),
+  address: z.string(),
+  port: z.number().int().min(1).max(65_535),
+  username: z.string(),
+  hasIdentityFile: z.boolean(),
+  unsupported: z.array(z.string()),
+  existingHostId: z.string().optional(),
+});
+
+const sshConfigDiscoverySchema = z.object({
+  available: z.boolean(),
+  source: z.string(),
+  candidates: z.array(sshConfigCandidateSchema),
+});
+
 const sessionSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -139,6 +155,9 @@ export const api = {
     request('/api/me/password', z.undefined(), { method: 'POST', body: body({ currentPassword, newPassword }) }),
 
   hosts: () => request('/api/hosts', z.array(hostSchema)),
+  sshConfigHosts: () => request('/api/hosts/ssh-config', sshConfigDiscoverySchema),
+  importSSHConfigHost: (alias: string) =>
+    request('/api/hosts/import-ssh-config', hostSchema, { method: 'POST', body: body({ alias }) }),
   createHost: (input: HostInput) => request('/api/hosts', hostSchema, { method: 'POST', body: body(input) }),
   updateHost: (id: string, input: Partial<HostInput>) =>
     request(`/api/hosts/${encodeURIComponent(id)}`, hostSchema, { method: 'PATCH', body: body(input) }),
@@ -167,6 +186,11 @@ const publicMessages: Partial<Record<string, string>> = {
   host_untrusted: '请先验证并信任 SSH 主机指纹。',
   host_in_use: '仍有会话使用这台主机，暂时无法删除。',
   fingerprint_changed: '主机指纹在确认期间发生变化，请重新验证。',
+  host_exists: '这台 SSH 主机已经导入。',
+  ssh_config_host_not_found: 'SSH config 中已找不到这台主机，请刷新后重试。',
+  ssh_config_unsupported: '这台主机使用了 wmux 暂不支持的 SSH 代理配置。',
+  ssh_config_invalid: 'SSH config 中的主机配置无效。',
+  ssh_config_unavailable: '暂时无法读取 SSH config。',
   terminal_unavailable: '终端服务暂时不可用，请稍后重试。',
   ssh_probe_failed: '无法读取 SSH 主机指纹，请检查主机地址与网络连接。',
   ssh_test_failed: '无法连接到 SSH 主机，请检查地址、端口和认证信息。',
@@ -184,4 +208,11 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '发生未知错误。';
 }
 
-export const schemas = { statusSchema, userSchema, hostSchema, sessionSchema };
+export const schemas = {
+  statusSchema,
+  userSchema,
+  hostSchema,
+  sshConfigCandidateSchema,
+  sshConfigDiscoverySchema,
+  sessionSchema,
+};

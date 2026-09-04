@@ -61,6 +61,16 @@ The isolated local and SSH tmux servers enable mouse handling and advertise nati
 
 Creating a host does not silently trust it. wmux first probes the public host key and shows its SHA-256 fingerprint. Trusting it stores that fingerprint. Every authenticated connection compares the presented key to the stored value; a changed key is rejected until the user probes and explicitly trusts the new fingerprint.
 
+## OpenSSH config discovery
+
+The authenticated discovery endpoint reads the config of the operating-system account running wmux, or the explicit path selected with `WMUX_SSH_CONFIG`. Account-home lookup, `%d`, `~` and relative `Include` paths use the account database rather than the process `HOME` environment. It expands active `Include` files in lexical order and applies case-sensitive literal `Host` aliases, wildcard/negated patterns and OpenSSH's first-value rules. Discovery is read-only: it does not mutate SQLite, read `IdentityFile` contents, contact a host or trust a fingerprint. `IdentityFile` is exposed only as a boolean so local key paths never enter the browser response.
+
+Includes remain lazy syntax-tree nodes: resolution opens them only when the current `Host` or safely supported `Match all` block is active. Other `Match` conditions are fail-closed and `Match exec` is never executed. Candidate enumeration follows global, universal `Host *` and `Match all` includes; an alias declared only inside any other conditional include is intentionally not enumerated.
+
+Import accepts only an alias, reloads the config at the mutation boundary and stores the resolved alias, address, port and username with SSH-agent authentication. The duplicate check and insert are serialized because SQLite intentionally has no unique connection-tuple constraint. `ProxyJump` and `ProxyCommand` candidates remain visible but disabled until the Go SSH transport can reproduce those connection semantics. Fingerprint probing and trust continue through the normal explicit host workflow after import.
+
+Container deployments should mount only the config text and required `Include` fragments read-only. Private keys, `known_hosts` and the rest of `~/.ssh` are outside this discovery boundary.
+
 ## HTTP security
 
 - Passwords use a versioned scrypt hash with a random salt.

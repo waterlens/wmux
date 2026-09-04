@@ -391,7 +391,7 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title={`结束「${deleteTarget?.name ?? '会话'}」？`}
-        description="这会结束后台 shell，并删除该会话及其终端历史。若只想隐藏终端，请使用标签上的 ×。"
+        description="将结束进程并删除终端历史。"
         confirmLabel="结束会话"
         danger
         busy={deleting}

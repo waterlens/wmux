@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -24,6 +24,7 @@ const executablePath = await findChrome();
 let browser;
 let pasteBytes = 0;
 let replayIsolation = 'not-run';
+let sshConfigImport = 'not-run';
 
 try {
   if (!baseURL) {
@@ -34,6 +35,33 @@ try {
     const port = await availablePort();
     baseURL = `http://127.0.0.1:${port}`;
     ownedDataDir = await mkdtemp(join(tmpdir(), 'wmux-browser-data-'));
+    const sshConfigDir = join(ownedDataDir, 'ssh-config');
+    const sshConfigIncludes = join(sshConfigDir, 'config.d');
+    const sshConfigPath = join(sshConfigDir, 'config');
+    await mkdir(sshConfigIncludes, { recursive: true });
+    await writeFile(
+      sshConfigPath,
+      `Include "${join(sshConfigIncludes, '*.conf')}"
+Host review-*
+  User inherited-user
+  Port 2200
+Host *
+  User fallback-user
+  Port 22
+`,
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(sshConfigIncludes, 'hosts.conf'),
+      `Host review-box
+  HostName 192.0.2.44
+  IdentityFile /private/wmux-browser-must-not-read
+Host proxy-box
+  HostName 192.0.2.45
+  ProxyJump bastion
+`,
+      { mode: 0o600 },
+    );
     ownedServer = spawn(binary, [], {
       cwd: projectDir,
       env: {
@@ -41,6 +69,7 @@ try {
         WMUX_HOST: '127.0.0.1',
         WMUX_PORT: String(port),
         WMUX_DATA_DIR: ownedDataDir,
+        WMUX_SSH_CONFIG: sshConfigPath,
         WMUX_PUBLIC_URL: baseURL,
         WMUX_LOG_LEVEL: 'warn',
       },
@@ -108,9 +137,110 @@ try {
   await page.getByRole('heading', { name: '终端会话' }).waitFor();
   await page.screenshot({ path: join(outputDir, 'dashboard.png'), fullPage: true });
 
+  const desktopSidebarActions = page.locator('.sidebar__header-actions button:visible');
+  if ((await desktopSidebarActions.count()) !== 1) {
+    throw new Error(`desktop sidebar exposed ${await desktopSidebarActions.count()} header actions`);
+  }
+  if ((await desktopSidebarActions.first().getAttribute('aria-label')) !== '收起侧栏') {
+    throw new Error('desktop sidebar did not expose only the collapse action');
+  }
+  const sidebarCounterCount = await page
+    .locator('.sidebar-section-title > span:not(:first-child), .session-group__header em, .sidebar-nav > em')
+    .count();
+  if (sidebarCounterCount !== 0) throw new Error(`sidebar still exposes ${sidebarCounterCount} numeric counters`);
+  const accountDivider = await page.locator('.sidebar-account').evaluate((element) => {
+    const style = globalThis.getComputedStyle(element);
+    return { width: style.borderTopWidth, style: style.borderTopStyle };
+  });
+  if (accountDivider.width === '0px' || accountDivider.style === 'none') {
+    throw new Error(`sidebar account area has no divider: ${JSON.stringify(accountDivider)}`);
+  }
+
   await page.getByRole('button', { name: /管理 SSH 主机/ }).click();
   await page.getByRole('heading', { name: 'SSH 主机' }).waitFor();
   await page.screenshot({ path: join(outputDir, 'hosts.png'), fullPage: true });
+
+  for (const redundantText of [
+    '主机密钥校验始终开启',
+    'wmux 不会静默接受新指纹。主机重装或密钥变化后，需要你重新确认。',
+  ]) {
+    if (await page.getByText(redundantText, { exact: true }).count()) {
+      throw new Error(`host manager still exposes redundant copy: ${redundantText}`);
+    }
+  }
+
+  await page.getByRole('button', { name: '添加主机', exact: true }).click();
+  const hostEditor = page.getByRole('dialog', { name: '添加 SSH 主机' });
+  await hostEditor.waitFor();
+  for (const redundantText of ['凭据由 wmux 服务加密保管。', '支持 OpenSSH PEM 格式']) {
+    if (await hostEditor.getByText(redundantText, { exact: true }).count()) {
+      throw new Error(`host editor still exposes redundant copy: ${redundantText}`);
+    }
+  }
+  if (await hostEditor.getByText(/保存后还需要探测并确认主机指纹/).count()) {
+    throw new Error('host editor still duplicates the post-save fingerprint flow');
+  }
+  await hostEditor.getByRole('button', { name: '关闭' }).click();
+
+  if (ownedServer) {
+    const discovery = await page.evaluate(async () => {
+      const response = await fetch('/api/hosts/ssh-config', { credentials: 'same-origin' });
+      return { status: response.status, body: await response.json() };
+    });
+    const reviewHost = discovery.body.candidates?.find((candidate) => candidate.alias === 'review-box');
+    const proxyHost = discovery.body.candidates?.find((candidate) => candidate.alias === 'proxy-box');
+    if (
+      discovery.status !== 200 ||
+      !discovery.body.available ||
+      reviewHost?.address !== '192.0.2.44' ||
+      reviewHost?.username !== 'inherited-user' ||
+      reviewHost?.port !== 2200 ||
+      reviewHost?.hasIdentityFile !== true ||
+      reviewHost?.unsupported?.length !== 0
+    ) {
+      throw new Error(`SSH config Include/inheritance discovery failed: ${JSON.stringify(discovery)}`);
+    }
+    if (!proxyHost?.unsupported?.includes('ProxyJump')) {
+      throw new Error(`ProxyJump was not marked unsupported: ${JSON.stringify(proxyHost)}`);
+    }
+    if (JSON.stringify(discovery).includes('wmux-browser-must-not-read')) {
+      throw new Error('SSH config discovery leaked an IdentityFile path');
+    }
+
+    await page.getByRole('button', { name: '从 SSH config 导入主机' }).click();
+    const importDialog = page.getByRole('dialog', { name: '从 SSH config 导入' });
+    await importDialog.waitFor();
+    await importDialog.getByText('inherited-user@192.0.2.44:2200', { exact: true }).waitFor();
+    await page.screenshot({ path: join(outputDir, 'ssh-config-import.png'), fullPage: true });
+    const proxyImport = importDialog.getByRole('button', { name: '导入 proxy-box' });
+    if (!(await proxyImport.isDisabled()) || !(await importDialog.getByText('暂不支持 ProxyJump').count())) {
+      throw new Error('unsupported ProxyJump candidate remained importable or unlabeled');
+    }
+
+    const probeRequests = [];
+    const recordProbe = (request) => {
+      if (/\/api\/hosts\/[^/]+\/probe$/.test(new URL(request.url()).pathname)) probeRequests.push(request.url());
+    };
+    page.on('request', recordProbe);
+    const importedResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/hosts/import-ssh-config',
+    );
+    await importDialog.getByRole('button', { name: '导入 review-box' }).click();
+    const imported = await importedResponse;
+    if (imported.status() !== 201) throw new Error(`SSH config import returned ${imported.status()}`);
+    await importDialog.getByRole('button', { name: 'review-box 已导入' }).waitFor();
+    sshConfigImport = 'review-box';
+    await importDialog.getByRole('button', { name: '完成' }).click();
+    const importedCard = page.locator('.host-card').filter({ has: page.getByRole('heading', { name: 'review-box' }) });
+    await importedCard.getByText('待验证指纹', { exact: true }).waitFor();
+    if (!(await importedCard.getByRole('button', { name: '新建会话' }).isDisabled())) {
+      throw new Error('imported SSH host was trusted without fingerprint verification');
+    }
+    page.off('request', recordProbe);
+    if (probeRequests.length)
+      throw new Error(`SSH config import unexpectedly probed a host: ${probeRequests.join(', ')}`);
+  }
 
   await page
     .locator('.sidebar__footer')
@@ -126,6 +256,14 @@ try {
     .first()
     .click();
   const dialog = page.getByRole('dialog', { name: '新建会话' });
+  if (await dialog.getByText('进程将在浏览器关闭后继续运行。', { exact: true }).count()) {
+    throw new Error('new-session dialog still repeats browser-close persistence copy');
+  }
+  if (await dialog.getByText(/断线后会自动重连/).count()) {
+    throw new Error('new-session dialog still shows the default reconnect callout');
+  }
+  await dialog.getByLabel('持久化方式').selectOption('none');
+  await dialog.getByText('不持久化会话会在服务连接终止时结束。', { exact: true }).waitFor();
   await dialog.getByLabel('会话名称').fill('浏览器验收');
   await dialog.getByLabel('持久化方式').selectOption(ownedServer ? 'tmux' : 'none');
   await page.evaluate(() => {
@@ -143,6 +281,42 @@ try {
   await page.locator('.terminal-view.is-active .xterm-helper-textarea').waitFor();
   await page.getByText('已连接', { exact: true }).waitFor();
   await page.locator('.terminal-view.is-active[data-replay-complete="true"]').waitFor();
+
+  const stableStatusIcons = await page.locator('.terminal-view.is-active .live-status svg').count();
+  if (stableStatusIcons !== 0)
+    throw new Error(`stable terminal status still has ${stableStatusIcons} duplicate icon(s)`);
+  if ((await page.locator('.terminal-view.is-active .connection-dot').count()) !== 1) {
+    throw new Error('terminal toolbar does not expose exactly one connection status dot');
+  }
+  const terminateButton = page.getByRole('button', { name: '结束会话 浏览器验收' });
+  if ((await terminateButton.getAttribute('title')) !== '结束会话') {
+    throw new Error('icon-only terminate action has no tooltip');
+  }
+  const toolButtonStyles = await page.evaluate(() => {
+    const root = globalThis.document.querySelector('.terminal-view.is-active');
+    const copy = root?.querySelector('.tool-button[title="复制选中内容"]');
+    const terminate = root?.querySelector('.terminate-session-button');
+    if (!(copy instanceof globalThis.HTMLElement) || !(terminate instanceof globalThis.HTMLElement)) return null;
+    const copyStyle = globalThis.getComputedStyle(copy);
+    const terminateStyle = globalThis.getComputedStyle(terminate);
+    return {
+      copy: { width: copyStyle.width, height: copyStyle.height },
+      terminate: {
+        width: terminateStyle.width,
+        height: terminateStyle.height,
+        background: terminateStyle.backgroundColor,
+        color: terminateStyle.color,
+      },
+    };
+  });
+  if (
+    !toolButtonStyles ||
+    toolButtonStyles.copy.width !== toolButtonStyles.terminate.width ||
+    toolButtonStyles.copy.height !== toolButtonStyles.terminate.height ||
+    !['rgba(0, 0, 0, 0)', 'transparent'].includes(toolButtonStyles.terminate.background)
+  ) {
+    throw new Error(`terminate action is not a same-size transparent tool button: ${JSON.stringify(toolButtonStyles)}`);
+  }
 
   if (ownedServer) {
     if (!delayedTerminalFonts.length) throw new Error('terminal font requests were not observed');
@@ -173,9 +347,10 @@ try {
 
   const terminalInput = page.locator('.terminal-view.is-active .xterm-helper-textarea');
   await terminalInput.focus();
-  await page.keyboard.type("printf 'WMUX_BROWSER_OK\\n'", { delay: 10 });
+  const commandMarker = 'WMUX_BROWSER_OUTPUT_OK';
+  await page.keyboard.type(encodedPythonCommand(`print('${commandMarker}')`), { delay: 1 });
   await page.keyboard.press('Enter');
-  await page.locator('.terminal-view.is-active .xterm-rows').filter({ hasText: 'WMUX_BROWSER_OK' }).waitFor();
+  await page.locator('.terminal-view.is-active .xterm-rows > div').filter({ hasText: commandMarker }).waitFor();
 
   await page.screenshot({ path: join(outputDir, 'desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -188,6 +363,13 @@ try {
   if (!mobileTerminal || mobileTerminal.width < 300 || mobileTerminal.height < 500) {
     throw new Error(`mobile terminal collapsed: ${JSON.stringify(mobileTerminal)}`);
   }
+  await page.getByRole('button', { name: '打开侧栏' }).click();
+  const mobileClose = page.getByRole('button', { name: '关闭侧栏' });
+  await mobileClose.waitFor();
+  if (!(await mobileClose.isVisible()) || (await page.getByRole('button', { name: '收起侧栏' }).isVisible())) {
+    throw new Error('mobile sidebar did not exclusively expose its close action');
+  }
+  await mobileClose.click();
   await page.screenshot({ path: join(outputDir, 'mobile.png'), fullPage: true });
 
   if (ownedServer) {
@@ -281,6 +463,12 @@ finally:
   await page.getByRole('button', { name: /结束会话 浏览器验收/ }).click();
   const confirmDialog = page.getByRole('dialog', { name: /结束「浏览器验收」/ });
   await confirmDialog.waitFor();
+  if ((await confirmDialog.getByText('将结束进程并删除终端历史。', { exact: true }).count()) !== 1) {
+    throw new Error('session confirmation does not contain one concrete consequence');
+  }
+  if (await confirmDialog.getByText('这个操作无法撤销。', { exact: true }).count()) {
+    throw new Error('session confirmation still contains the generic duplicate warning');
+  }
   const deletedResponse = page.waitForResponse(
     (response) => response.request().method() === 'DELETE' && response.url().includes('/api/sessions/'),
   );
@@ -301,7 +489,7 @@ finally:
     `${JSON.stringify(
       {
         ok: true,
-        commandOutput: 'WMUX_BROWSER_OK',
+        commandOutput: commandMarker,
         screenshots: outputDir,
         chrome: executablePath,
         version: buildStatus.version,
@@ -311,6 +499,7 @@ finally:
         terminalFontRequests: delayedTerminalFonts.length,
         pasteBytes,
         replayIsolation,
+        sshConfigImport,
         uiTerminationStatus: deleted.status(),
         remainingSessions: remaining.length,
       },
