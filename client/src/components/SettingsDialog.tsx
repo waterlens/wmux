@@ -325,6 +325,12 @@ export function SettingsDialog({
                   <span>部署方式</span>
                   <strong>自托管</strong>
                 </div>
+                <div className="about-meta">
+                  <span>开源字体与组件</span>
+                  <a href="/third-party-notices.txt" target="_blank" rel="noreferrer">
+                    查看第三方许可
+                  </a>
+                </div>
               </section>
             )}
           </div>

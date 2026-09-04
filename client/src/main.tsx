@@ -1,4 +1,5 @@
 import '@fontsource-variable/jetbrains-mono';
+import '@fontsource-variable/jetbrains-mono/wght-italic.css';
 import '@fontsource-variable/manrope';
 import '@xterm/xterm/css/xterm.css';
 import { StrictMode } from 'react';

@@ -116,6 +116,18 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		delivered = frame.Sequence
 	}
+	// Attach takes the transcript snapshot and installs the live subscriber
+	// under the same runtime lock.  Sending this marker before we start reading
+	// Frames therefore gives clients an exact replay/live boundary: every
+	// binary frame before it is durable history and every binary frame after it
+	// was published after that snapshot.
+	delivered = attachment.LatestSequence
+	if err := writeSocketJSON(r.Context(), connection, socketEvent{
+		Type:     "replay_end",
+		Sequence: delivered,
+	}); err != nil {
+		return
+	}
 
 	readDone := make(chan error, 1)
 	controlOut := make(chan socketEvent, 16)

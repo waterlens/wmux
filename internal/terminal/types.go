@@ -49,6 +49,7 @@ var (
 	ErrNotWriter        = errors.New("terminal: client does not hold the write lease")
 	ErrAttachmentClosed = errors.New("terminal: attachment is closed")
 	ErrUnavailable      = errors.New("terminal: backend is unavailable")
+	ErrSessionActive    = errors.New("terminal: session is still active")
 )
 
 // Credential deliberately exposes no secret serialization contract. Session

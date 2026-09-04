@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,6 +33,10 @@ type liveAPIFixture struct {
 }
 
 func newLiveAPIFixture(t *testing.T, ctx context.Context) *liveAPIFixture {
+	return newLiveAPIFixtureWithReplayLimit(t, ctx, 1)
+}
+
+func newLiveAPIFixtureWithReplayLimit(t *testing.T, ctx context.Context, replayLimit int) *liveAPIFixture {
 	t.Helper()
 	dir := t.TempDir()
 	database, err := store.Open(ctx, filepath.Join(dir, "wmux.db"))
@@ -49,7 +54,7 @@ func newLiveAPIFixture(t *testing.T, ctx context.Context) *liveAPIFixture {
 		Repository:   repository,
 		Callbacks:    repository,
 		Transcripts:  recordings,
-		ReplayLimit:  1,
+		ReplayLimit:  replayLimit,
 		ReconnectMin: 5 * time.Millisecond,
 		ReconnectMax: 20 * time.Millisecond,
 	})
@@ -66,6 +71,144 @@ func newLiveAPIFixture(t *testing.T, ctx context.Context) *liveAPIFixture {
 		_ = database.Close()
 	})
 	return fixture
+}
+
+func TestTerminalWebSocketReplayBoundarySeparatesHistoryFromLiveOutput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fixture := newLiveAPIFixtureWithReplayLimit(t, ctx, 128)
+	id := createSessionForTest(t, ctx, fixture, map[string]any{
+		"name": "Replay boundary", "kind": "local", "command": "cat", "persistence": "none",
+	})
+
+	writer := dialTerminalForTest(t, ctx, fixture, id, 0)
+	defer writer.CloseNow()
+	if event := readSocketEventForTest(t, ctx, writer); event.Type != "hello" {
+		t.Fatalf("first WebSocket message = %q, want hello", event.Type)
+	}
+	if event := awaitSocketEvent(t, ctx, writer, "replay_end", nil); event.Sequence != 0 {
+		t.Fatalf("initial replay boundary = %d, want 0", event.Sequence)
+	}
+	waitForTerminalState(t, ctx, fixture.manager, id, terminal.StateRunning)
+
+	history := "WMUX_HISTORY_BEGIN\x1b[5nWMUX_HISTORY_END\n"
+	historySequence, historyOutput := sendAndCollectOutput(t, ctx, writer, history, "\x1b[5nWMUX_HISTORY_END", 0)
+	if !bytes.Contains(historyOutput, []byte("\x1b[5n")) {
+		t.Fatalf("live history %q does not contain CSI 5n", historyOutput)
+	}
+
+	replay := dialTerminalForTest(t, ctx, fixture, id, 0)
+	defer replay.CloseNow()
+	if event := readSocketEventForTest(t, ctx, replay); event.Type != "hello" {
+		t.Fatalf("first replay WebSocket message = %q, want hello", event.Type)
+	}
+
+	// This output is produced after Attach captured its transcript snapshot. It
+	// may already be queued while the initial replay is being written, but must
+	// never cross the explicit boundary or reuse a replay sequence.
+	live := "WMUX_LIVE_AFTER_ATTACH\n"
+	if err := writer.Write(ctx, websocket.MessageBinary, append([]byte{clientInputFrame}, []byte(live)...)); err != nil {
+		t.Fatal(err)
+	}
+
+	var replayOutput bytes.Buffer
+	var liveOutput bytes.Buffer
+	seenSequences := make(map[uint64]struct{})
+	nextSequence := uint64(1)
+	boundary := uint64(0)
+	replaying := true
+	for !bytes.Contains(liveOutput.Bytes(), []byte(strings.TrimSpace(live))) {
+		messageType, payload, err := replay.Read(ctx)
+		if err != nil {
+			t.Fatalf("read replay stream: %v", err)
+		}
+		switch messageType {
+		case websocket.MessageText:
+			var event socketEvent
+			if err := json.Unmarshal(payload, &event); err != nil {
+				t.Fatalf("decode replay event: %v", err)
+			}
+			if replaying {
+				if event.Type != "replay_end" {
+					t.Fatalf("event %q appeared between hello and replay_end", event.Type)
+				}
+				boundary = event.Sequence
+				replaying = false
+			}
+		case websocket.MessageBinary:
+			if len(payload) < 9 || payload[0] != serverOutputFrame {
+				t.Fatalf("invalid terminal output frame: %x", payload)
+			}
+			sequence := binary.BigEndian.Uint64(payload[1:9])
+			if _, duplicate := seenSequences[sequence]; duplicate {
+				t.Fatalf("terminal sequence %d was delivered more than once", sequence)
+			}
+			if sequence != nextSequence {
+				t.Fatalf("terminal sequence jumped from %d to %d", nextSequence-1, sequence)
+			}
+			seenSequences[sequence] = struct{}{}
+			nextSequence++
+			if replaying {
+				replayOutput.Write(payload[9:])
+			} else {
+				if sequence <= boundary {
+					t.Fatalf("live sequence %d did not follow replay boundary %d", sequence, boundary)
+				}
+				liveOutput.Write(payload[9:])
+			}
+		}
+	}
+	if replaying {
+		t.Fatal("live output arrived before replay_end")
+	}
+	if boundary != historySequence {
+		t.Fatalf("replay_end sequence = %d, want snapshot sequence %d", boundary, historySequence)
+	}
+	if !bytes.Contains(replayOutput.Bytes(), []byte("\x1b[5n")) {
+		t.Fatalf("initial replay %q does not contain the stale CSI 5n query", replayOutput.Bytes())
+	}
+}
+
+func TestTerminalWebSocketReadLimitBoundary(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fixture := newLiveAPIFixture(t, ctx)
+	id := createSessionForTest(t, ctx, fixture, map[string]any{
+		"name": "Read limit", "kind": "local", "command": "cat", "persistence": "none",
+	})
+
+	connection := dialTerminalForTest(t, ctx, fixture, id, 0)
+	defer connection.CloseNow()
+	if event := readSocketEventForTest(t, ctx, connection); event.Type != "hello" {
+		t.Fatalf("first WebSocket message = %q, want hello", event.Type)
+	}
+	awaitSocketEvent(t, ctx, connection, "replay_end", nil)
+
+	// SetReadLimit is inclusive. Keep this boundary explicit because terminal
+	// input reserves one byte for its binary frame type, so callers may send at
+	// most maxSocketMessage-1 input bytes in a single message.
+	exact := paddedSocketControlForTest(maxSocketMessage)
+	if err := connection.Write(ctx, websocket.MessageText, exact); err != nil {
+		t.Fatalf("write exact-limit message: %v", err)
+	}
+	if event := awaitSocketEvent(t, ctx, connection, "error", nil); event.Message != "不支持的终端控制消息" {
+		t.Fatalf("exact-limit response = %#v", event)
+	}
+
+	oversized := paddedSocketControlForTest(maxSocketMessage + 1)
+	if err := connection.Write(ctx, websocket.MessageText, oversized); err != nil {
+		t.Fatalf("write oversized message: %v", err)
+	}
+	for {
+		_, _, err := connection.Read(ctx)
+		if err == nil {
+			continue
+		}
+		if status := websocket.CloseStatus(err); status != websocket.StatusMessageTooBig {
+			t.Fatalf("oversized message close status = %v, want %v (error: %v)", status, websocket.StatusMessageTooBig, err)
+		}
+		break
+	}
 }
 
 func TestTerminalWebSocketControlReplayAndShutdownReason(t *testing.T) {
@@ -170,6 +313,86 @@ func TestSessionPatchRestartAndDeleteLifecycle(t *testing.T) {
 	}
 	if _, err := fixture.database.GetSession(ctx, id); err != store.ErrNotFound {
 		t.Fatalf("deleted session lookup error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteDormantPersistentSSHSessionsWithoutContactingUnreachableHost(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fixture := newLiveAPIFixture(t, ctx)
+
+	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/hosts", map[string]any{
+		"name": "unreachable", "address": "127.0.0.1", "port": 1,
+		"username": "owner", "authType": "password", "password": "secret-value",
+	})
+	if response.StatusCode != http.StatusCreated {
+		failResponse(t, response)
+	}
+	var host hostResponse
+	decodeResponse(t, response, &host)
+	storedHost, err := fixture.database.GetHost(ctx, host.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedHost.Fingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	if _, err := fixture.database.UpdateHost(ctx, storedHost); err != nil {
+		t.Fatal(err)
+	}
+
+	hostID := host.ID
+	if err := fixture.database.SaveRuntimeSession(ctx, store.Session{
+		ID: "ses_dormant_exited", Name: "dormant exited", Kind: store.SessionKindSSH, HostID: &hostID,
+		Persistence: "tmux", Backend: "tmux", BackendName: terminal.BackendName("ses_dormant_exited"),
+		Status: store.SessionStatusExited, Cols: 120, Rows: 36,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.SaveRuntimeSession(ctx, store.Session{
+		ID: "ses_dormant_error", Name: "dormant error", Kind: store.SessionKindSSH, HostID: &hostID,
+		Persistence: "tmux", Backend: "tmux", BackendName: terminal.BackendName("ses_dormant_error"),
+		Status: store.SessionStatusConnecting, Cols: 120, Rows: 36,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpdateSessionRuntime(ctx, "ses_dormant_error", store.SessionStatusError, "tmux", terminal.BackendName("ses_dormant_error"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.manager.Restore(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"ses_dormant_exited", "ses_dormant_error"} {
+		status, err := fixture.manager.Status(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != terminal.StateExited {
+			t.Fatalf("restored session %s state = %s, want exited", id, status.State)
+		}
+
+		response = doJSONForTest(t, ctx, fixture, http.MethodDelete, "/api/sessions/"+id, nil)
+		response.Body.Close()
+		if response.StatusCode != http.StatusNoContent {
+			t.Fatalf("delete dormant session %s returned %d, want %d", id, response.StatusCode, http.StatusNoContent)
+		}
+		if _, err := fixture.manager.Status(id); !errors.Is(err, terminal.ErrSessionNotFound) {
+			t.Fatalf("manager retained deleted session %s: %v", id, err)
+		}
+		if _, err := fixture.database.GetSession(ctx, id); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("database retained deleted session %s: %v", id, err)
+		}
+	}
+
+	response = doJSONForTest(t, ctx, fixture, http.MethodDelete, "/api/hosts/"+host.ID, nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete formerly referenced host returned %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+
+	response = doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/sessions/ses_dormant_exited/restart", nil)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("restart deleted session returned %d, want %d", response.StatusCode, http.StatusNotFound)
 	}
 }
 
@@ -283,6 +506,47 @@ func dialTerminalForTest(t *testing.T, ctx context.Context, fixture *liveAPIFixt
 	return connection
 }
 
+func readSocketEventForTest(t *testing.T, ctx context.Context, connection *websocket.Conn) socketEvent {
+	t.Helper()
+	messageType, payload, err := connection.Read(ctx)
+	if err != nil {
+		t.Fatalf("read WebSocket event: %v", err)
+	}
+	if messageType != websocket.MessageText {
+		t.Fatalf("WebSocket message type = %v, want text", messageType)
+	}
+	var event socketEvent
+	if err := json.Unmarshal(payload, &event); err != nil {
+		t.Fatalf("decode WebSocket event: %v", err)
+	}
+	return event
+}
+
+func paddedSocketControlForTest(size int) []byte {
+	prefix := []byte(`{"type":"unsupported"}`)
+	payload := bytes.Repeat([]byte{' '}, size)
+	copy(payload, prefix)
+	return payload
+}
+
+func waitForTerminalState(t *testing.T, ctx context.Context, manager *terminal.Manager, sessionID string, wanted terminal.SessionState) {
+	t.Helper()
+	for {
+		status, err := manager.Status(sessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State == wanted {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("terminal state = %s, want %s: %v", status.State, wanted, ctx.Err())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 func awaitSocketEvent(t *testing.T, ctx context.Context, connection *websocket.Conn, eventType string, accept func(socketEvent) bool) socketEvent {
 	t.Helper()
 	for {
@@ -320,6 +584,34 @@ func sendAndAwaitOutput(t *testing.T, ctx context.Context, connection *websocket
 		sequence := binary.BigEndian.Uint64(message[1:9])
 		if sequence > after && bytes.Contains(message[9:], []byte(strings.TrimSpace(input))) {
 			return sequence
+		}
+	}
+}
+
+func sendAndCollectOutput(t *testing.T, ctx context.Context, connection *websocket.Conn, input, marker string, after uint64) (uint64, []byte) {
+	t.Helper()
+	payload := append([]byte{clientInputFrame}, []byte(input)...)
+	if err := connection.Write(ctx, websocket.MessageBinary, payload); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	lastSequence := after
+	for {
+		messageType, message, err := connection.Read(ctx)
+		if err != nil {
+			t.Fatalf("read terminal output: %v; output=%q", err, output.Bytes())
+		}
+		if messageType != websocket.MessageBinary || len(message) < 9 || message[0] != serverOutputFrame {
+			continue
+		}
+		sequence := binary.BigEndian.Uint64(message[1:9])
+		if sequence <= after {
+			continue
+		}
+		lastSequence = sequence
+		output.Write(message[9:])
+		if bytes.Contains(output.Bytes(), []byte(marker)) {
+			return lastSequence, output.Bytes()
 		}
 	}
 }

@@ -36,7 +36,7 @@ Only one wmux process may hold a data directory at a time. A cross-process lock 
 
 The endpoint is `/ws/sessions/{id}?since={sequence}` and uses the authenticated HTTP-only cookie.
 
-Client binary input starts with byte `0x00`; all remaining bytes are terminal input. Server binary output starts with byte `0x01`, followed by an unsigned 64-bit big-endian sequence number and the terminal bytes.
+Client binary input starts with byte `0x00`; all remaining bytes are terminal input. Text input is UTF-8 encoded, while xterm binary events preserve each raw 8-bit byte. The browser splits large input into messages that remain below the server's 128 KiB read limit. Server binary output starts with byte `0x01`, followed by an unsigned 64-bit big-endian sequence number and the terminal bytes.
 
 Control messages use JSON:
 
@@ -45,9 +45,17 @@ Control messages use JSON:
 {"type":"take_control"}
 ```
 
-The server sends `hello`, `state`, `writer`, `disconnect` and `error` messages. The first attachment receives the write lease. Another attachment may explicitly take it; both clients receive the writer change immediately and input from read-only attachments is ignored. When `since` predates retained output, `hello.sequence` reports the oldest available sequence and `hello.truncated` is true.
+The server sends `hello`, zero or more replay frames, then `replay_end` before any queued live frame. It also sends `state`, `writer`, `disconnect` and `error` messages. The browser keeps input disabled until every replay write has drained through xterm's parser; this prevents historical device-status queries from generating replies in the current PTY and establishes the boundary required by any future side-effecting terminal protocol.
+
+The first attachment receives the write lease. Another attachment may explicitly take it; both clients receive the writer change immediately and input from read-only attachments is ignored. When `since` predates retained output, `hello.sequence` reports the oldest available sequence and `hello.truncated` is true.
 
 Attachment closure is explicit: a real process exit sends `state: exited` and closes normally; `disconnect` with `reason: server_shutdown` closes with code 1012, while `reason: evicted` closes with code 1013. Browsers reconnect for the latter two and never suggest restarting (and therefore killing) a persistent backend merely because the transport was interrupted.
+
+## Terminal compatibility and side effects
+
+The browser waits for its bundled terminal fonts before opening xterm, uses JetBrains Mono with italic faces plus a Nerd-symbol fallback, and activates xterm's Unicode 11 width tables. Application-cursor and modifier state is respected by the mobile special-key row. The application UI stays light, while the terminal theme is left unset so ANSI colors continue to come from xterm and programs running inside it.
+
+The isolated local and SSH tmux servers enable mouse handling and advertise native OSC 8 hyperlink support when the installed tmux version accepts that feature. Arbitrary tmux passthrough remains disabled. OSC 52 clipboard writes, remote file transfer, desktop notifications, terminal graphics and Kitty keyboard extensions are intentionally unsupported until wmux has an explicit permission, active-tab, multi-client and resource-limit policy for each side effect.
 
 ## SSH trust
 

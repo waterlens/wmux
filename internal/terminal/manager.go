@@ -251,6 +251,32 @@ func (m *Manager) Terminate(ctx context.Context, sessionID string) error {
 	return err
 }
 
+// Discard forgets an exited session, or one stopped at a permanent launch
+// error, without contacting or killing its configured backend. It is intended
+// for deleting inactive metadata when the remote host is no longer reachable.
+func (m *Manager) Discard(sessionID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.ShutdownTimeout)
+	defer cancel()
+	return m.DiscardContext(ctx, sessionID)
+}
+
+// DiscardContext is Discard with a caller-provided cleanup deadline.
+func (m *Manager) DiscardContext(ctx context.Context, sessionID string) error {
+	s, err := m.session(sessionID)
+	if err != nil {
+		return err
+	}
+	if err := s.discard(ctx); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.sessions[sessionID] == s {
+		delete(m.sessions, sessionID)
+	}
+	m.mu.Unlock()
+	return nil
+}
+
 // Close detaches all backend clients. Persistent tmux/screen sessions are not
 // killed and remain Active in Repository for the next Restore.
 func (m *Manager) Close() error {
@@ -331,6 +357,8 @@ type runtimeSession struct {
 
 	mu          sync.Mutex
 	operationMu sync.Mutex
+	resizeMu    sync.Mutex
+	saveMu      sync.Mutex
 	state       SessionState
 	lastErr     string
 	resolved    Persistence
@@ -433,14 +461,25 @@ func (s *runtimeSession) run() {
 		}
 		everRan = true
 		attempt = 0
-		s.mu.Lock()
-		resolvedChanged := s.resolved != resolved
-		s.resolved = resolved
-		s.backend = b
-		s.lastErr = ""
-		s.mu.Unlock()
+		resolvedChanged, resizeErr := s.activateBackend(b, resolved, spec.Cols, spec.Rows)
 		if resolvedChanged {
 			s.save(true)
+		}
+		if resizeErr != nil {
+			_ = b.Close()
+			if !s.waitIfTerminating() {
+				return
+			}
+			if b.Reconnectable(resizeErr) {
+				s.setState(StateDisconnected, resizeErr)
+				if s.waitForRetry(attempt) {
+					attempt++
+					continue
+				}
+				return
+			}
+			s.finishExited(resizeErr)
+			return
 		}
 		s.setState(StateRunning, nil)
 
@@ -473,6 +512,42 @@ func (s *runtimeSession) run() {
 		s.finishExited(backendErr)
 		return
 	}
+}
+
+// activateBackend closes the gap between the immutable launch snapshot and
+// resize requests received while launcher.start is in progress. resizeMu
+// orders this reconciliation with Attachment.Resize, so an older size can
+// never be applied after a newer one.
+func (s *runtimeSession) activateBackend(b backend, resolved Persistence, launchCols, launchRows uint16) (bool, error) {
+	s.resizeMu.Lock()
+	defer s.resizeMu.Unlock()
+	s.mu.Lock()
+	if err := s.ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return false, err
+	}
+	if s.closed {
+		s.mu.Unlock()
+		return false, ErrClosed
+	}
+	resolvedChanged := s.resolved != resolved
+	s.resolved = resolved
+	s.backend = b
+	s.lastErr = ""
+	cols, rows := s.cols, s.rows
+	s.mu.Unlock()
+	if cols == launchCols && rows == launchRows {
+		return resolvedChanged, nil
+	}
+	if err := b.Resize(cols, rows); err != nil {
+		s.mu.Lock()
+		if s.backend == b {
+			s.backend = nil
+		}
+		s.mu.Unlock()
+		return resolvedChanged, fmt.Errorf("terminal: apply current size %dx%d: %w", cols, rows, err)
+	}
+	return resolvedChanged, nil
 }
 
 func (s *runtimeSession) handleStartError(err error, everRan bool, attempt *int) bool {
@@ -705,6 +780,9 @@ func (s *runtimeSession) statusLocked() SessionStatus {
 func (s *runtimeSession) record(active bool) SessionRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed || s.state == StateExited || s.state == StateTerminated {
+		active = false
+	}
 	hostID := ""
 	if s.spec.Host != nil {
 		hostID = s.spec.Host.ID
@@ -730,6 +808,11 @@ func (s *runtimeSession) save(active bool) {
 	if s.manager.cfg.Repository == nil {
 		return
 	}
+	// Preserve write order for this session. In particular, an older
+	// SaveSession(active=true) may not complete after termination's inactive
+	// record and resurrect the session on the next process start.
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.manager.cfg.Repository.SaveSession(ctx, s.record(active)); err != nil {
@@ -913,6 +996,38 @@ func (s *runtimeSession) terminate(ctx context.Context) error {
 	s.save(false)
 	_ = s.log.Close()
 	return nil
+}
+
+func (s *runtimeSession) discard(ctx context.Context) error {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
+	if s.state != StateExited && s.state != StateError {
+		s.mu.Unlock()
+		return ErrSessionActive
+	}
+	s.closed = true
+	b := s.backend
+	started := s.started
+	s.cancel()
+	s.mu.Unlock()
+	s.closeClients(AttachmentExited)
+	if b != nil {
+		_ = b.Close()
+	}
+	s.signal()
+	if started {
+		select {
+		case <-s.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.log.Close()
 }
 
 func (s *runtimeSession) shutdown(ctx context.Context) error {

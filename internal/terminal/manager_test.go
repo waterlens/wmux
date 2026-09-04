@@ -376,6 +376,7 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	if status, err := firstManager.Status(id); err != nil || status.Persistence != PersistenceTmux {
 		t.Fatalf("first manager status = %+v, %v; want tmux", status, err)
 	}
+	assertIsolatedTmuxInteractionOptions(t, tmuxPath, cleanupLauncher)
 	if _, err := firstAttachment.Write([]byte("printf 'before-tmux-restore\\n'\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -410,6 +411,40 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	}
 	if err := exec.Command(tmuxPath, cleanupLauncher.tmuxArgs("has-session", "-t", "="+name)...).Run(); err == nil {
 		t.Fatal("tmux session survived explicit Terminate")
+	}
+}
+
+func assertIsolatedTmuxInteractionOptions(t *testing.T, path string, l launcher) {
+	t.Helper()
+	global := func(option string) (string, error) {
+		output, err := exec.Command(path, l.tmuxArgs("show-options", "-gv", option)...).CombinedOutput()
+		return strings.TrimSpace(string(output)), err
+	}
+	for option, want := range map[string]string{"mouse": "on", "status": "off", "prefix": "None"} {
+		got, err := global(option)
+		if err != nil || got != want {
+			t.Fatalf("isolated tmux option %s = %q, %v; want %q", option, got, err, want)
+		}
+	}
+	wheelBinding, err := exec.Command(path, l.tmuxArgs("list-keys", "-T", "root")...).CombinedOutput()
+	if err != nil || !strings.Contains(string(wheelBinding), "WheelUpPane") {
+		t.Fatalf("isolated tmux wheel binding unavailable: %q, %v", wheelBinding, err)
+	}
+	features, err := global("terminal-features")
+	if err != nil {
+		t.Fatalf("query isolated tmux terminal-features: %v", err)
+	}
+	if count := strings.Count(features, "xterm*:hyperlinks"); count != 1 {
+		// Distinguish an old tmux that safely rejects the feature from a
+		// compatible tmux where wmux failed to configure it.
+		probe := exec.Command(path, l.tmuxArgs("set-option", "-as", "terminal-features", tmuxHyperlinkFeatures)...)
+		if probeErr := probe.Run(); probeErr == nil {
+			t.Fatalf("compatible tmux did not configure hyperlinks exactly once; value %q", features)
+		}
+	}
+	output, err := exec.Command(path, l.tmuxArgs("show-options", "-Apgv", "allow-passthrough")...).CombinedOutput()
+	if err == nil && strings.TrimSpace(string(output)) != "off" {
+		t.Fatalf("isolated tmux allow-passthrough = %q, want off", output)
 	}
 }
 

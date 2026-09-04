@@ -1,0 +1,51 @@
+wmux third-party notices
+========================
+
+Symbols Nerd Font Mono
+----------------------
+
+wmux includes SymbolsNerdFontMono-Regular.woff2, converted without glyph
+changes from SymbolsNerdFontMono-Regular.ttf in the official Nerd Fonts
+v3.5.1 release:
+
+https://github.com/ryanoasis/nerd-fonts/releases/tag/v3.5.1
+
+The symbols aggregate Codicons, Devicons, Font Awesome, Font Awesome
+Extension, Font Logos, Material Design Icons, Octicons, Seti, Pomicons,
+Powerline symbols, IEC power symbols, and Weather Icons. Those glyph sets
+retain their respective MIT, Apache-2.0, CC BY 4.0, and SIL OFL 1.1 terms.
+The official Symbols Only README is the authoritative attribution table and
+reports Font Logos as unlicensed:
+
+https://github.com/ryanoasis/nerd-fonts/blob/v3.5.1/patched-fonts/NerdFontsSymbolsOnly/README.md
+
+Official Nerd Fonts license source:
+
+https://github.com/ryanoasis/nerd-fonts/blob/v3.5.1/LICENSE
+
+Nerd Fonts license:
+
+The MIT License (MIT)
+
+Copyright (c) 2014 Ryan L McIntyre
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Bundled WOFF2 SHA-256:
+b9e4e6812ea40d1a4679ecc349a74d38792acc8382f235c30b69a820bfef4109

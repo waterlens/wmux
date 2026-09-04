@@ -400,6 +400,11 @@ func (l launcher) remoteAttachCommand(spec SessionSpec, resolved Persistence, na
 			tmux + " set-option -g status off",
 			tmux + " set-option -g prefix None",
 			tmux + " set-option -g prefix2 None",
+			tmux + " set-option -g mouse on",
+			// OSC 8 is native in newer tmux. Unknown terminal features on an
+			// older remote are deliberately non-fatal; passthrough stays off.
+			"if ! " + tmux + " show-options -gqv terminal-features 2>/dev/null | grep -Fq -- " + shellQuote("xterm*:hyperlinks") + "; then " +
+				tmux + " set-option -as terminal-features " + shellQuote(tmuxHyperlinkFeatures) + " 2>/dev/null || :; fi",
 			"exec " + tmux + " attach-session -t " + target,
 		}
 		return strings.Join(parts, "; ")

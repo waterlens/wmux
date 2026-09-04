@@ -1,0 +1,336 @@
+// @vitest-environment jsdom
+
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MAX_INPUT_FRAME_BYTES } from '../terminalProtocol';
+import type { Session, TerminalPreferences } from '../types';
+import { TerminalView } from './TerminalView';
+
+const fontHarness = vi.hoisted(() => ({ loadFonts: vi.fn() }));
+
+const xtermHarness = vi.hoisted(() => {
+  type DataHandler = (value: string) => void;
+
+  class FakeTerminal {
+    static instances: FakeTerminal[] = [];
+
+    options: Record<string, unknown>;
+    cols = 80;
+    rows = 24;
+    modes = { applicationCursorKeysMode: false };
+    unicode = { activeVersion: '6' };
+    dataHandler: DataHandler = () => undefined;
+    binaryHandler: DataHandler = () => undefined;
+    writeCallbacks: Array<(() => void) | undefined> = [];
+    writeValues: Array<string | Uint8Array> = [];
+    open = vi.fn();
+    focus = vi.fn();
+    clear = vi.fn();
+    dispose = vi.fn();
+    getSelection = vi.fn(() => 'selected');
+    paste = vi.fn((value: string) => this.dataHandler(value));
+
+    constructor(options: Record<string, unknown>) {
+      this.options = { ...options };
+      FakeTerminal.instances.push(this);
+    }
+
+    loadAddon(): void {}
+
+    onData(handler: DataHandler): { dispose(): void } {
+      this.dataHandler = handler;
+      return { dispose: () => undefined };
+    }
+
+    onBinary(handler: DataHandler): { dispose(): void } {
+      this.binaryHandler = handler;
+      return { dispose: () => undefined };
+    }
+
+    write(value: string | Uint8Array, callback?: () => void): void {
+      this.writeValues.push(value);
+      this.writeCallbacks.push(callback);
+    }
+
+    emitData(value: string): void {
+      this.dataHandler(value);
+    }
+
+    emitBinary(value: string): void {
+      this.binaryHandler(value);
+    }
+
+    drainWrite(index = 0): void {
+      this.writeCallbacks[index]?.();
+    }
+  }
+
+  class FakeFitAddon {
+    fit = vi.fn();
+  }
+
+  class FakeUnicode11Addon {}
+  class FakeWebLinksAddon {}
+
+  return { FakeFitAddon, FakeTerminal, FakeUnicode11Addon, FakeWebLinksAddon };
+});
+
+vi.mock('@xterm/addon-web-fonts', () => ({ loadFonts: fontHarness.loadFonts }));
+vi.mock('@xterm/xterm', () => ({ Terminal: xtermHarness.FakeTerminal }));
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: xtermHarness.FakeFitAddon }));
+vi.mock('@xterm/addon-unicode11', () => ({ Unicode11Addon: xtermHarness.FakeUnicode11Addon }));
+vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: xtermHarness.FakeWebLinksAddon }));
+
+type SocketEvent = { data?: unknown; code?: number };
+type SocketListener = (event: SocketEvent) => void;
+
+class FakeWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static instances: FakeWebSocket[] = [];
+
+  readonly url: string;
+  binaryType = '';
+  readyState = FakeWebSocket.CONNECTING;
+  sent: Array<string | ArrayBuffer> = [];
+  private listeners = new Map<string, Set<SocketListener>>();
+
+  constructor(url: string | URL) {
+    this.url = String(url);
+    FakeWebSocket.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: SocketListener): void {
+    const listeners = this.listeners.get(type) ?? new Set<SocketListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  send(value: string | ArrayBuffer): void {
+    this.sent.push(value);
+  }
+
+  close(): void {
+    this.readyState = FakeWebSocket.CLOSED;
+  }
+
+  emitOpen(): void {
+    this.readyState = FakeWebSocket.OPEN;
+    this.emit('open', {});
+  }
+
+  emitMessage(data: string | ArrayBuffer): void {
+    this.emit('message', { data });
+  }
+
+  private emit(type: string, event: SocketEvent): void {
+    this.listeners.get(type)?.forEach((listener) => listener(event));
+  }
+}
+
+class FakeResizeObserver {
+  observe(): void {}
+  disconnect(): void {}
+}
+
+const session: Session = {
+  id: 'session-1',
+  name: '测试会话',
+  kind: 'local',
+  cwd: '~',
+  persistence: 'auto',
+  status: 'running',
+  cols: 80,
+  rows: 24,
+  createdAt: '2026-01-01T00:00:00Z',
+  updatedAt: '2026-01-01T00:00:00Z',
+};
+
+const preferences: TerminalPreferences = {
+  fontSize: 14,
+  cursorStyle: 'block',
+  cursorBlink: true,
+  scrollback: 10_000,
+  theme: 'light',
+};
+
+function outputFrame(sequence: bigint, value: string): ArrayBuffer {
+  const output = new TextEncoder().encode(value);
+  const packet = new Uint8Array(new ArrayBuffer(9 + output.length));
+  packet[0] = 1;
+  new DataView(packet.buffer).setBigUint64(1, sequence, false);
+  packet.set(output, 9);
+  return packet.buffer;
+}
+
+function renderTerminal(notify = vi.fn()) {
+  return {
+    notify,
+    ...render(
+      <TerminalView
+        session={session}
+        active
+        preferences={preferences}
+        onRestart={() => undefined}
+        onTerminate={() => undefined}
+        notify={notify}
+      />,
+    ),
+  };
+}
+
+let releaseFonts: (faces: FontFace[]) => void;
+
+beforeEach(() => {
+  xtermHarness.FakeTerminal.instances.length = 0;
+  FakeWebSocket.instances.length = 0;
+  vi.stubGlobal('WebSocket', FakeWebSocket);
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { readText: vi.fn(async () => ''), writeText: vi.fn(async () => undefined) },
+  });
+  const fonts = new Promise<FontFace[]>((resolve) => {
+    releaseFonts = resolve;
+  });
+  fontHarness.loadFonts.mockReset();
+  fontHarness.loadFonts.mockImplementation(() => fonts);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+async function finishFontLoading(): Promise<void> {
+  await act(async () => {
+    releaseFonts([]);
+    await Promise.resolve();
+  });
+  await waitFor(() =>
+    expect(screen.getByText('测试会话').closest('.terminal-view')?.getAttribute('data-terminal-ready')).toBe('true'),
+  );
+}
+
+describe('TerminalView transport boundaries', () => {
+  it('waits for webfonts before opening xterm or creating the WebSocket', async () => {
+    renderTerminal();
+    const terminal = xtermHarness.FakeTerminal.instances[0];
+    expect(terminal).toBeDefined();
+    expect(terminal?.open).not.toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(0);
+
+    await finishFontLoading();
+    expect(terminal?.open).toHaveBeenCalledOnce();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(terminal?.unicode.activeVersion).toBe('11');
+    expect(terminal?.options.allowProposedApi).toBe(true);
+    expect(terminal?.options.theme).toBeUndefined();
+  });
+
+  it('suppresses replay replies until write callbacks drain, then sends text, binary, and paste safely', async () => {
+    const largePaste = '你😀'.repeat(30_000);
+    const readText = vi.fn(async () => largePaste);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText, writeText: vi.fn(async () => undefined) },
+    });
+    renderTerminal();
+    await finishFontLoading();
+
+    const terminal = xtermHarness.FakeTerminal.instances[0];
+    const socket = FakeWebSocket.instances[0];
+    expect(terminal).toBeDefined();
+    expect(socket).toBeDefined();
+    if (!terminal || !socket) throw new Error('terminal transport was not initialized');
+
+    act(() => {
+      socket.emitOpen();
+      socket.emitMessage('{"type":"hello","status":"running","writer":true}');
+      socket.emitMessage(outputFrame(1n, 'history\x1b[5n'));
+      socket.emitMessage('{"type":"replay_end","sequence":1}');
+      terminal.emitData('\x1b[0n');
+      terminal.emitBinary(String.fromCharCode(0x80, 0xff));
+    });
+    expect(socket.sent.filter((value) => value instanceof ArrayBuffer)).toHaveLength(0);
+    expect(terminal.options.disableStdin).toBe(true);
+
+    act(() => terminal.drainWrite());
+    await waitFor(() =>
+      expect(screen.getByText('测试会话').closest('.terminal-view')?.getAttribute('data-replay-complete')).toBe('true'),
+    );
+    expect(terminal.options.disableStdin).toBe(false);
+
+    act(() => {
+      terminal.emitData('live');
+      terminal.emitBinary(String.fromCharCode(0x80, 0xff));
+    });
+    let frames = socket.sent.filter((value): value is ArrayBuffer => value instanceof ArrayBuffer);
+    const [textFrame, binaryFrame] = frames;
+    expect(textFrame).toBeDefined();
+    expect(binaryFrame).toBeDefined();
+    if (!textFrame || !binaryFrame) throw new Error('expected text and binary frames');
+    expect(new TextDecoder().decode(new Uint8Array(textFrame).subarray(1))).toBe('live');
+    expect([...new Uint8Array(binaryFrame)]).toEqual([0, 0x80, 0xff]);
+
+    fireEvent.click(screen.getByRole('button', { name: '粘贴' }));
+    await waitFor(() => expect(terminal.paste).toHaveBeenCalledWith(largePaste));
+    expect(readText).toHaveBeenCalledOnce();
+    frames = socket.sent.filter((value): value is ArrayBuffer => value instanceof ArrayBuffer).slice(2);
+    expect(frames.length).toBeGreaterThan(1);
+    expect(frames.every((frame) => frame.byteLength <= MAX_INPUT_FRAME_BYTES)).toBe(true);
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    expect(frames.map((frame) => decoder.decode(new Uint8Array(frame).subarray(1))).join('')).toBe(largePaste);
+  });
+
+  it('explains why clipboard buttons cannot work on an insecure HTTP origin', async () => {
+    Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
+    const notify = vi.fn();
+    renderTerminal(notify);
+    await finishFontLoading();
+
+    fireEvent.click(screen.getByRole('button', { name: '粘贴' }));
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('不是安全上下文'), 'error');
+    expect(navigator.clipboard.readText).not.toHaveBeenCalled();
+  });
+
+  it('uses the current xterm cursor mode and consumes mobile Ctrl/Alt modifiers once', async () => {
+    renderTerminal();
+    await finishFontLoading();
+    const terminal = xtermHarness.FakeTerminal.instances[0];
+    const socket = FakeWebSocket.instances[0];
+    if (!terminal || !socket) throw new Error('terminal transport was not initialized');
+
+    act(() => {
+      socket.emitOpen();
+      socket.emitMessage('{"type":"hello","status":"running","writer":true}');
+    });
+
+    terminal.modes.applicationCursorKeysMode = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Ctrl' }));
+    act(() => terminal.emitData('\x1b[0n'));
+    expect(screen.getByRole('button', { name: 'Ctrl' }).className).toBe('is-active');
+    expect(socket.sent.filter((value) => value instanceof ArrayBuffer)).toHaveLength(0);
+
+    act(() => socket.emitMessage('{"type":"replay_end","sequence":0}'));
+    await waitFor(() =>
+      expect(screen.getByText('测试会话').closest('.terminal-view')?.getAttribute('data-replay-complete')).toBe('true'),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '向左' }));
+    fireEvent.click(screen.getByRole('button', { name: '向上' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Alt' }));
+    fireEvent.click(screen.getByRole('button', { name: '向右' }));
+
+    const frames = socket.sent.filter((value): value is ArrayBuffer => value instanceof ArrayBuffer);
+    const decoder = new TextDecoder();
+    expect(frames.map((frame) => decoder.decode(new Uint8Array(frame).subarray(1)))).toEqual([
+      '\x1b[1;5D',
+      '\x1bOA',
+      '\x1b[1;3C',
+    ]);
+  });
+});

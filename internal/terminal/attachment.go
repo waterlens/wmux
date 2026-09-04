@@ -131,22 +131,44 @@ func (a *Attachment) Resize(cols, rows uint16) error {
 		return ErrAttachmentClosed
 	}
 	s := a.session
+	s.resizeMu.Lock()
+	// Wait for any older whole-record repository save to finish before
+	// publishing a newer desired size to the runtime. The HTTP adapter owns
+	// the dedicated size update, but this barrier prevents a stale terminal
+	// SaveSession snapshot from completing after that update and overwriting it.
+	s.saveMu.Lock()
 	s.mu.Lock()
 	if s.clients[a.clientID] != a.client {
 		s.mu.Unlock()
+		s.saveMu.Unlock()
+		s.resizeMu.Unlock()
 		return ErrAttachmentClosed
 	}
 	if s.writerID != a.clientID {
 		s.mu.Unlock()
+		s.saveMu.Unlock()
+		s.resizeMu.Unlock()
 		return ErrNotWriter
+	}
+	if s.closed || s.terminating {
+		s.mu.Unlock()
+		s.saveMu.Unlock()
+		s.resizeMu.Unlock()
+		return ErrUnavailable
 	}
 	s.cols, s.rows = cols, rows
 	b := s.backend
 	s.mu.Unlock()
-	if b == nil {
-		return ErrUnavailable
+	s.saveMu.Unlock()
+	var resizeErr error
+	if b != nil {
+		resizeErr = b.Resize(cols, rows)
 	}
-	return b.Resize(cols, rows)
+	s.resizeMu.Unlock()
+	if b == nil {
+		return nil
+	}
+	return resizeErr
 }
 
 func (a *Attachment) TakeControl() error {

@@ -39,6 +39,8 @@ type launcher struct {
 	screenMu   *sync.Mutex
 }
 
+const tmuxHyperlinkFeatures = ",xterm*:hyperlinks"
+
 func newLauncher(cfg Config) launcher {
 	name := unsafeSessionName.ReplaceAllString(cfg.MuxName, "-")
 	name = strings.Trim(name, "-")

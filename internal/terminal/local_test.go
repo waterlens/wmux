@@ -92,6 +92,43 @@ func TestLocalMuxConfigurationIsIsolated(t *testing.T) {
 	}
 }
 
+func TestConfigureLocalTmuxEnablesMouseAndSafelyProbesHyperlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("capture helper is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "commands")
+	tool := filepath.Join(dir, "tmux")
+	script := []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$WMUX_CAPTURE_PATH\"\ncase \"$*\" in *'set-option -as terminal-features'*) exit 1;; esac\n")
+	if err := os.WriteFile(tool, script, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WMUX_CAPTURE_PATH", capture)
+	l := newLauncher(Config{MuxName: "isolated"})
+	if err := l.configureLocalTmux(context.Background(), tool); err != nil {
+		t.Fatalf("optional hyperlink support broke an older tmux: %v", err)
+	}
+	contents, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := string(contents)
+	for _, wanted := range []string{
+		"-L isolated -f /dev/null set-option -g status off",
+		"-L isolated -f /dev/null set-option -g prefix None",
+		"-L isolated -f /dev/null set-option -g mouse on",
+		"-L isolated -f /dev/null show-options -gqv terminal-features",
+		"-L isolated -f /dev/null set-option -as terminal-features " + tmuxHyperlinkFeatures,
+	} {
+		if !strings.Contains(commands, wanted) {
+			t.Fatalf("tmux configuration commands %q do not contain %q", commands, wanted)
+		}
+	}
+	if strings.Contains(commands, "allow-passthrough") {
+		t.Fatalf("tmux configuration enabled passthrough: %q", commands)
+	}
+}
+
 func TestExpandLocalHome(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

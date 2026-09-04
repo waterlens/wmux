@@ -1,3 +1,19 @@
+@font-face {
+  font-family: 'Symbols Nerd Font Mono';
+  src: url('./assets/SymbolsNerdFontMono-Regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Symbols Nerd Font Mono';
+  src: url('./assets/SymbolsNerdFontMono-Regular.woff2') format('woff2');
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: block;
+}
+
 :root {
   color-scheme: light;
   font-family:
@@ -11,7 +27,7 @@
   --mobile-layout: 0;
   --app-height: 100dvh;
   --font-sans: 'Manrope Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono Variable', 'SFMono-Regular', Consolas, monospace;
+  --font-mono: 'JetBrains Mono Variable', 'Symbols Nerd Font Mono', 'SFMono-Regular', Consolas, monospace;
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
   --text-md: 1rem;
@@ -1936,6 +1952,14 @@ code {
 }
 .about-meta > span {
   color: var(--text-muted);
+}
+.about-meta > a {
+  color: var(--accent);
+  font-weight: var(--weight-semibold);
+  text-decoration: none;
+}
+.about-meta > a:hover {
+  text-decoration: underline;
 }
 
 /* Transient feedback */

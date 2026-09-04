@@ -2,18 +2,43 @@ import { describe, expect, it } from 'vitest';
 import {
   applyTerminalModifiers,
   decodeTerminalOutput,
-  encodeTerminalInput,
+  encodeCursorKey,
+  encodeTerminalBinaryFrames,
+  encodeTerminalTextFrames,
   isPermanentSocketClose,
+  MAX_INPUT_FRAME_BYTES,
   normalizeLiveStatus,
   parseControlMessage,
+  ReplayBarrier,
   websocketAddress,
 } from './terminalProtocol';
 
 describe('terminal binary protocol', () => {
   it('encodes UTF-8 input with the client frame discriminator', () => {
-    const packet = new Uint8Array(encodeTerminalInput('你好'));
+    const [frame] = encodeTerminalTextFrames('你好');
+    expect(frame).toBeDefined();
+    if (!frame) throw new Error('missing encoded text frame');
+    const packet = new Uint8Array(frame);
     expect(packet[0]).toBe(0);
     expect(new TextDecoder().decode(packet.slice(1))).toBe('你好');
+  });
+
+  it('chunks large text below 128 KiB without splitting UTF-8 code points', () => {
+    const value = `${'a'.repeat(MAX_INPUT_FRAME_BYTES - 4)}😀你好`;
+    const frames = encodeTerminalTextFrames(value);
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+
+    expect(frames.length).toBeGreaterThan(1);
+    expect(frames.every((frame) => frame.byteLength <= MAX_INPUT_FRAME_BYTES)).toBe(true);
+    expect(frames.map((frame) => decoder.decode(new Uint8Array(frame).subarray(1))).join('')).toBe(value);
+  });
+
+  it('keeps onBinary code units as raw 8-bit bytes', () => {
+    const binary = String.fromCharCode(0x00, 0x7f, 0x80, 0xff);
+    const [frame] = encodeTerminalBinaryFrames(binary);
+    expect(frame).toBeDefined();
+    if (!frame) throw new Error('missing encoded binary frame');
+    expect([...new Uint8Array(frame)]).toEqual([0, 0x00, 0x7f, 0x80, 0xff]);
   });
 
   it('decodes a big-endian output sequence and payload', () => {
@@ -32,6 +57,42 @@ describe('terminal binary protocol', () => {
     expect(applyTerminalModifiers('c', true, false)).toBe('\x03');
     expect(applyTerminalModifiers(' ', true, true)).toBe('\x1b\x00');
     expect(applyTerminalModifiers('hello', true, false)).toBe('hello');
+  });
+
+  it('uses DEC application cursor mode and xterm modifier parameters', () => {
+    expect(encodeCursorKey('up', false, false, false)).toBe('\x1b[A');
+    expect(encodeCursorKey('up', true, false, false)).toBe('\x1bOA');
+    expect(encodeCursorKey('left', true, true, false)).toBe('\x1b[1;5D');
+    expect(encodeCursorKey('right', false, false, true)).toBe('\x1b[1;3C');
+    expect(encodeCursorKey('down', true, true, true)).toBe('\x1b[1;7B');
+  });
+
+  it('does not open replay input until every queued xterm write drains', () => {
+    const barrier = new ReplayBarrier();
+    barrier.reset();
+    const first = barrier.trackReplayWrite();
+    const second = barrier.trackReplayWrite();
+
+    expect(barrier.endReplay()).toBe(false);
+    expect(barrier.isOpen()).toBe(false);
+    expect(first()).toBe(false);
+    expect(barrier.isOpen()).toBe(false);
+    expect(second()).toBe(true);
+    expect(barrier.isOpen()).toBe(true);
+  });
+
+  it('ignores a delayed write callback from an older socket generation', () => {
+    const barrier = new ReplayBarrier();
+    barrier.reset();
+    const staleWrite = barrier.trackReplayWrite();
+    barrier.reset();
+    const currentWrite = barrier.trackReplayWrite();
+    expect(barrier.endReplay()).toBe(false);
+
+    expect(staleWrite()).toBe(false);
+    expect(barrier.isOpen()).toBe(false);
+    expect(currentWrite()).toBe(true);
+    expect(barrier.isOpen()).toBe(true);
   });
 });
 
@@ -52,6 +113,10 @@ describe('terminal control protocol', () => {
       writer: false,
     });
     expect(parseControlMessage('{"type":"writer","writable":true}')).toMatchObject({ writer: true });
+    expect(parseControlMessage('{"type":"replay_end","sequence":42}')).toEqual({
+      type: 'replay_end',
+      sequence: 42,
+    });
     expect(parseControlMessage('not json')).toBeNull();
   });
 

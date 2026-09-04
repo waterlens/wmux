@@ -1,4 +1,5 @@
 import { FitAddon } from '@xterm/addon-fit';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal } from '@xterm/xterm';
 import {
@@ -25,13 +26,18 @@ import { api, ApiError, signalAuthExpired } from '../api';
 import {
   applyTerminalModifiers,
   decodeTerminalOutput,
-  encodeTerminalInput,
+  encodeCursorKey,
+  encodeTerminalBinaryFrames,
+  encodeTerminalTextFrames,
   isPermanentSocketClose,
   normalizeLiveStatus,
   parseControlMessage,
+  ReplayBarrier,
   websocketAddress,
+  type CursorDirection,
   type LiveStatus,
 } from '../terminalProtocol';
+import { openTerminalAfterFonts, TERMINAL_SYSTEM_FONT_FAMILY } from '../terminalFonts';
 import type { Session, TerminalPreferences } from '../types';
 import { Button } from './UI';
 
@@ -69,22 +75,35 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
   const ctrlRef = useRef(false);
   const altRef = useRef(false);
   const sendInputRef = useRef<(value: string) => void>(() => undefined);
+  const sendBinaryRef = useRef<(value: string) => void>(() => undefined);
+  const sendExactInputRef = useRef<(value: string) => void>(() => undefined);
   const connectRef = useRef<() => void>(() => undefined);
+  const preferencesRef = useRef(preferences);
+  const [replayBarrier] = useState(() => new ReplayBarrier());
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const [writer, setWriter] = useState<boolean | null>(null);
   const [ctrl, setCtrl] = useState(false);
   const [alt, setAlt] = useState(false);
   const [lastError, setLastError] = useState('');
+  const [terminalReady, setTerminalReady] = useState(false);
+  const [replayComplete, setReplayComplete] = useState(false);
 
   useEffect(() => {
     activeRef.current = active;
   }, [active]);
 
-  const setWriterState = useCallback((value: boolean | null) => {
-    writerRef.current = value;
-    setWriter(value);
-    if (terminalRef.current) terminalRef.current.options.disableStdin = value === false;
-  }, []);
+  useEffect(() => {
+    preferencesRef.current = preferences;
+  }, [preferences]);
+
+  const setWriterState = useCallback(
+    (value: boolean | null) => {
+      writerRef.current = value;
+      setWriter(value);
+      if (terminalRef.current) terminalRef.current.options.disableStdin = value === false || !replayBarrier.isOpen();
+    },
+    [replayBarrier],
+  );
 
   const updateStatus = useCallback((status: LiveStatus) => {
     liveStatusRef.current = status;
@@ -112,41 +131,68 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
     const mount = mountRef.current;
     if (!mount) return undefined;
 
+    let disposed = false;
+    let inputDisposable: { dispose(): void } | undefined;
+    let binaryDisposable: { dispose(): void } | undefined;
+    let resizeObserver: ResizeObserver | undefined;
+
     const terminal = new Terminal({
-      allowProposedApi: false,
+      // Unicode providers are still exposed through xterm's proposed API.
+      allowProposedApi: true,
       allowTransparency: true,
       convertEol: false,
-      disableStdin: false,
+      disableStdin: true,
       drawBoldTextInBrightColors: true,
-      fontFamily: '"JetBrains Mono Variable", "SFMono-Regular", Consolas, monospace',
+      fontFamily: TERMINAL_SYSTEM_FONT_FAMILY,
       fontWeight: '400',
       fontWeightBold: '600',
       letterSpacing: 0,
       lineHeight: 1.18,
       macOptionIsMeta: true,
       minimumContrastRatio: 4.5,
+      rescaleOverlappingGlyphs: true,
       rightClickSelectsWord: true,
       scrollOnUserInput: true,
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+    terminal.loadAddon(new Unicode11Addon());
+    terminal.unicode.activeVersion = '11';
     terminal.loadAddon(
       new WebLinksAddon((_event, uri) => {
         window.open(uri, '_blank', 'noopener,noreferrer');
       }),
     );
-    terminal.open(mount);
-    terminalRef.current = terminal;
-    fitRef.current = fitAddon;
 
-    const inputDisposable = terminal.onData((data) => sendInputRef.current(data));
-    const resizeObserver = new ResizeObserver(() => fit());
-    resizeObserver.observe(mount);
-    window.setTimeout(fit, 0);
+    void openTerminalAfterFonts(
+      (fontFamily) => {
+        const currentPreferences = preferencesRef.current;
+        terminal.options.fontFamily = fontFamily;
+        terminal.options.fontSize = currentPreferences.fontSize;
+        terminal.options.cursorStyle = currentPreferences.cursorStyle;
+        terminal.options.cursorBlink = currentPreferences.cursorBlink;
+        terminal.options.scrollback = currentPreferences.scrollback;
+        terminal.open(mount);
+        terminalRef.current = terminal;
+        fitRef.current = fitAddon;
+        inputDisposable = terminal.onData((data) => sendInputRef.current(data));
+        binaryDisposable = terminal.onBinary((data) => sendBinaryRef.current(data));
+        resizeObserver = new ResizeObserver(() => fit());
+        resizeObserver.observe(mount);
+        setTerminalReady(true);
+      },
+      () => {
+        fit();
+        if (activeRef.current) terminal.focus();
+      },
+      () => disposed,
+    );
 
     return () => {
-      resizeObserver.disconnect();
-      inputDisposable.dispose();
+      disposed = true;
+      resizeObserver?.disconnect();
+      inputDisposable?.dispose();
+      binaryDisposable?.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
@@ -173,6 +219,7 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
   }, [active, fit]);
 
   useEffect(() => {
+    if (!terminalReady) return undefined;
     shouldReconnectRef.current = true;
 
     function clearReconnectTimer() {
@@ -182,11 +229,51 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
       }
     }
 
+    function finishReplay() {
+      const terminal = terminalRef.current;
+      if (terminal) terminal.options.disableStdin = writerRef.current === false;
+      setReplayComplete(true);
+      window.setTimeout(fit, 0);
+    }
+
+    function resetReplay() {
+      replayBarrier.reset();
+      setReplayComplete(false);
+      const terminal = terminalRef.current;
+      if (terminal) terminal.options.disableStdin = true;
+    }
+
+    function canSendInput(): boolean {
+      const socket = socketRef.current;
+      return (
+        replayBarrier.isOpen() && writerRef.current !== false && Boolean(socket && socket.readyState === WebSocket.OPEN)
+      );
+    }
+
+    function sendFrames(frames: ArrayBuffer[]) {
+      const socket = socketRef.current;
+      if (!canSendInput() || !socket) return;
+      for (const frame of frames) socket.send(frame);
+    }
+
+    function clearOneShotModifiers() {
+      if (ctrlRef.current) {
+        ctrlRef.current = false;
+        setCtrl(false);
+      }
+      if (altRef.current) {
+        altRef.current = false;
+        setAlt(false);
+      }
+    }
+
     function connect() {
       clearReconnectTimer();
       const current = socketRef.current;
       if (current && (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING))
         current.close();
+      resetReplay();
+      setWriterState(null);
       updateStatus(reconnectAttemptsRef.current ? 'reconnecting' : 'connecting');
       setLastError('');
 
@@ -195,17 +282,38 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
       socketRef.current = socket;
 
       socket.addEventListener('open', () => {
+        if (socketRef.current !== socket) return;
         reconnectAttemptsRef.current = 0;
         updateStatus('running');
         fit();
       });
 
       socket.addEventListener('message', (event) => {
+        if (socketRef.current !== socket) return;
         if (event.data instanceof ArrayBuffer) {
           const frame = decodeTerminalOutput(event.data);
           if (!frame) return;
           if (frame.sequence > lastSequenceRef.current) lastSequenceRef.current = frame.sequence;
-          if (frame.output.length) terminalRef.current?.write(frame.output);
+          const terminal = terminalRef.current;
+          if (!frame.output.length || !terminal) return;
+          if (replayBarrier.isCollectingReplay()) {
+            const completeWrite = replayBarrier.trackReplayWrite();
+            try {
+              terminal.write(frame.output, () => {
+                if (completeWrite()) finishReplay();
+              });
+            } catch {
+              // Roll the pending count back even when xterm rejects a write;
+              // otherwise this connection could remain read-only forever.
+              if (completeWrite()) finishReplay();
+              setLastError('终端输出解析失败，请重新连接。');
+              updateStatus('error');
+            }
+          } else {
+            // xterm queues this behind all replay writes. Their callbacks open
+            // the barrier before this live frame can trigger device replies.
+            terminal.write(frame.output);
+          }
           return;
         }
 
@@ -217,13 +325,22 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
             updateStatus(status);
             if (status === 'exited') shouldReconnectRef.current = false;
           }
-          if (message.type === 'writer' || message.type === 'hello' || message.type === 'state') {
+          if (typeof message.sequence === 'number' && message.sequence > lastSequenceRef.current) {
+            lastSequenceRef.current = message.sequence;
+          }
+          if (
+            message.type === 'writer' ||
+            message.type === 'hello' ||
+            message.type === 'state' ||
+            message.type === 'replay_end'
+          ) {
             const writable = message.writer;
             if (typeof writable === 'boolean') {
               setWriterState(writable);
               if (writable) window.setTimeout(fit, 0);
             }
           }
+          if (message.type === 'replay_end' && replayBarrier.endReplay()) finishReplay();
           if (message.type === 'hello' && message.truncated) {
             notify('较早的终端输出已被清理，当前显示最近记录', 'info');
           }
@@ -241,8 +358,25 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
       });
 
       socket.addEventListener('close', (event) => {
-        if (socketRef.current === socket) socketRef.current = null;
+        if (socketRef.current !== socket) return;
+        socketRef.current = null;
+        resetReplay();
         if (!shouldReconnectRef.current || liveStatusRef.current === 'exited') {
+          return;
+        }
+        if (isPermanentSocketClose(event.code)) {
+          shouldReconnectRef.current = false;
+          setWriterState(false);
+          updateStatus('error');
+          setLastError('此会话当前不可连接，请刷新会话列表或检查会话配置。');
+          void api
+            .status()
+            .then((status) => {
+              if (!status.authenticated) signalAuthExpired();
+            })
+            .catch((reason: unknown) => {
+              if (reason instanceof ApiError && reason.status === 401) signalAuthExpired();
+            });
           return;
         }
         void api
@@ -252,13 +386,6 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
             if (!status.authenticated) {
               shouldReconnectRef.current = false;
               signalAuthExpired();
-              return;
-            }
-            if (isPermanentSocketClose(event.code)) {
-              shouldReconnectRef.current = false;
-              setWriterState(false);
-              updateStatus('error');
-              setLastError('此会话当前不可连接，请刷新会话列表或检查会话配置。');
               return;
             }
             setWriterState(null);
@@ -281,6 +408,7 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
       });
 
       socket.addEventListener('error', () => {
+        if (socketRef.current !== socket) return;
         setLastError('实时连接不可用，正在重试');
       });
     }
@@ -288,31 +416,34 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
     connectRef.current = connect;
 
     sendInputRef.current = (value: string) => {
-      const socket = socketRef.current;
-      if (writerRef.current === false) return;
-      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      // During replay this can be a device reply generated by historical
+      // output. Bail out before encoding or consuming sticky UI modifiers.
+      if (!canSendInput()) return;
       const output = applyTerminalModifiers(value, ctrlRef.current, altRef.current);
-      if (ctrlRef.current) {
-        ctrlRef.current = false;
-        setCtrl(false);
-      }
-      if (altRef.current) {
-        altRef.current = false;
-        setAlt(false);
-      }
-      socket.send(encodeTerminalInput(output));
+      clearOneShotModifiers();
+      sendFrames(encodeTerminalTextFrames(output));
+    };
+    sendExactInputRef.current = (value: string) => {
+      if (canSendInput()) sendFrames(encodeTerminalTextFrames(value));
+    };
+    sendBinaryRef.current = (value: string) => {
+      if (canSendInput()) sendFrames(encodeTerminalBinaryFrames(value));
     };
 
     connect();
     return () => {
       shouldReconnectRef.current = false;
       connectRef.current = () => undefined;
+      sendInputRef.current = () => undefined;
+      sendExactInputRef.current = () => undefined;
+      sendBinaryRef.current = () => undefined;
       clearReconnectTimer();
+      replayBarrier.reset();
       const socket = socketRef.current;
       socketRef.current = null;
       if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, 'view closed');
     };
-  }, [fit, notify, session.id, setWriterState, updateStatus]);
+  }, [fit, notify, replayBarrier, session.id, setWriterState, terminalReady, updateStatus]);
 
   function manualReconnect() {
     shouldReconnectRef.current = true;
@@ -333,14 +464,48 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
     terminalRef.current?.focus();
   }
 
+  function clearToolbarModifiers() {
+    ctrlRef.current = false;
+    altRef.current = false;
+    setCtrl(false);
+    setAlt(false);
+  }
+
+  function sendCursor(direction: CursorDirection) {
+    const terminal = terminalRef.current;
+    const value = encodeCursorKey(
+      direction,
+      terminal?.modes.applicationCursorKeysMode ?? false,
+      ctrlRef.current,
+      altRef.current,
+    );
+    clearToolbarModifiers();
+    sendExactInputRef.current(value);
+    terminal?.focus();
+  }
+
+  function availableClipboard(): Clipboard | null {
+    if (!window.isSecureContext) {
+      notify('当前来源不是安全上下文；剪贴板功能需要 HTTPS（localhost 或回环地址除外）。', 'error');
+      return null;
+    }
+    if (!navigator.clipboard) {
+      notify('当前浏览器不支持剪贴板 API，请使用系统复制或粘贴快捷键。', 'error');
+      return null;
+    }
+    return navigator.clipboard;
+  }
+
   async function copySelection() {
+    const clipboard = availableClipboard();
+    if (!clipboard) return;
     const value = terminalRef.current?.getSelection();
     if (!value) {
       notify('先在终端中选择要复制的内容', 'info');
       return;
     }
     try {
-      await navigator.clipboard.writeText(value);
+      await clipboard.writeText(value);
       notify('已复制选中内容', 'success');
     } catch {
       notify('浏览器未授予剪贴板权限', 'error');
@@ -349,9 +514,18 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
 
   async function pasteClipboard() {
     if (writer === false) return;
+    const clipboard = availableClipboard();
+    if (!clipboard) return;
+    if (!replayComplete) {
+      notify('终端历史仍在同步，请稍后再粘贴。', 'info');
+      return;
+    }
     try {
-      const value = await navigator.clipboard.readText();
-      if (value) sendInputRef.current(value);
+      const value = await clipboard.readText();
+      if (value) {
+        clearToolbarModifiers();
+        terminalRef.current?.paste(value);
+      }
     } catch {
       notify('浏览器未授予剪贴板权限', 'error');
     }
@@ -378,7 +552,12 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
         : 'is-pending';
 
   return (
-    <div className={`terminal-view ${active ? 'is-active' : ''}`} aria-hidden={!active}>
+    <div
+      className={`terminal-view ${active ? 'is-active' : ''}`}
+      aria-hidden={!active}
+      data-terminal-ready={terminalReady}
+      data-replay-complete={replayComplete}
+    >
       <header className="terminal-toolbar">
         <div className="terminal-identity">
           <span className={`connection-dot ${statusClass}`} />
@@ -435,9 +614,29 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
       </header>
 
       <div className="terminal-canvas-wrap">
-        <div ref={mountRef} className="terminal-canvas" onClick={() => terminalRef.current?.focus()} />
+        <div
+          ref={mountRef}
+          className="terminal-canvas"
+          data-terminal-ready={terminalReady}
+          data-replay-complete={replayComplete}
+          onClick={() => terminalRef.current?.focus()}
+        />
 
-        {writer === false && liveStatus === 'running' && (
+        {!terminalReady && (
+          <div className="terminal-loader" role="status">
+            <span />
+            <p>正在载入终端字体…</p>
+          </div>
+        )}
+
+        {terminalReady && !replayComplete && liveStatus === 'running' && (
+          <div className="read-only-banner" role="status">
+            <LoaderCircle className="spin" size={14} />
+            <span>正在同步历史输出…</span>
+          </div>
+        )}
+
+        {replayComplete && writer === false && liveStatus === 'running' && (
           <div className="read-only-banner">
             <Lock size={14} />
             <span>另一个设备正在输入</span>
@@ -481,16 +680,16 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
         <button onClick={() => sendSpecial('|')}>|</button>
         <button onClick={() => sendSpecial('/')}>/</button>
         <button onClick={() => sendSpecial('-')}>-</button>
-        <button aria-label="向左" onClick={() => sendSpecial('\x1b[D')}>
+        <button aria-label="向左" onClick={() => sendCursor('left')}>
           <ArrowLeft size={16} />
         </button>
-        <button aria-label="向下" onClick={() => sendSpecial('\x1b[B')}>
+        <button aria-label="向下" onClick={() => sendCursor('down')}>
           <ArrowDown size={16} />
         </button>
-        <button aria-label="向上" onClick={() => sendSpecial('\x1b[A')}>
+        <button aria-label="向上" onClick={() => sendCursor('up')}>
           <ArrowUp size={16} />
         </button>
-        <button aria-label="向右" onClick={() => sendSpecial('\x1b[C')}>
+        <button aria-label="向右" onClick={() => sendCursor('right')}>
           <ArrowRight size={16} />
         </button>
         <button aria-label="复制选中内容" onClick={() => void copySelection()}>

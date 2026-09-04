@@ -153,7 +153,7 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.terminals != nil {
-		if err := s.terminals.Terminate(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
+		if err := s.stopTerminalSession(r.Context(), id); err != nil {
 			s.upstreamError(w, "结束终端会话", "terminal_stop_failed", "暂时无法结束后台会话；会话仍已保留，请稍后重试", err)
 			return
 		}
@@ -181,7 +181,7 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreError(w, err, "终端会话不存在")
 		return
 	}
-	if err := s.terminals.Terminate(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
+	if err := s.stopTerminalSession(r.Context(), id); err != nil {
 		s.upstreamError(w, "结束待重启会话", "terminal_stop_failed", "暂时无法重启后台会话，请稍后重试", err)
 		return
 	}
@@ -206,6 +206,30 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, publicSession(restarted))
+}
+
+// stopTerminalSession preserves the destructive semantics for an active
+// backend, while allowing terminal metadata that is already exited (or stuck
+// at a permanent launch error) to be removed without contacting an
+// unreachable host. DiscardContext rejects active sessions, so this decision
+// remains inside Manager rather than trusting a potentially stale DB status.
+func (s *Server) stopTerminalSession(ctx context.Context, id string) error {
+	if s.terminals == nil {
+		return nil
+	}
+	err := s.terminals.DiscardContext(ctx, id)
+	switch {
+	case err == nil, errors.Is(err, terminal.ErrSessionNotFound):
+		return nil
+	case errors.Is(err, terminal.ErrSessionActive):
+		err = s.terminals.Terminate(ctx, id)
+		if err == nil || errors.Is(err, terminal.ErrSessionNotFound) {
+			return nil
+		}
+		return err
+	default:
+		return err
+	}
 }
 
 func (s *Server) availableSessionName(ctx context.Context, base string) (string, error) {

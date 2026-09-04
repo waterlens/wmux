@@ -128,6 +128,7 @@ func (l launcher) configureLocalTmux(ctx context.Context, path string) error {
 		{"set-option", "-g", "status", "off"},
 		{"set-option", "-g", "prefix", "None"},
 		{"set-option", "-g", "prefix2", "None"},
+		{"set-option", "-g", "mouse", "on"},
 	}
 	for _, setting := range settings {
 		if output, err := exec.CommandContext(ctx, path, l.tmuxArgs(setting...)...).CombinedOutput(); err != nil {
@@ -135,6 +136,18 @@ func (l launcher) configureLocalTmux(ctx context.Context, path string) error {
 				return ctx.Err()
 			}
 			return permanentStartError(fmt.Errorf("terminal: configure isolated tmux server: %w: %s", err, strings.TrimSpace(string(output))))
+		}
+	}
+	// tmux gained native OSC 8 support after terminal-features already
+	// existed. Treat an unknown feature as an optional capability so older
+	// tmux releases keep working; never enable allow-passthrough as a fallback.
+	features, queryErr := exec.CommandContext(ctx, path, l.tmuxArgs("show-options", "-gqv", "terminal-features")...).CombinedOutput()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if queryErr == nil && !bytes.Contains(features, []byte("xterm*:hyperlinks")) {
+		if _, err := exec.CommandContext(ctx, path, l.tmuxArgs("set-option", "-as", "terminal-features", tmuxHyperlinkFeatures)...).CombinedOutput(); err != nil && ctx.Err() != nil {
+			return ctx.Err()
 		}
 	}
 	return nil

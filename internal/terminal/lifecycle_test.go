@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -232,6 +233,297 @@ func TestWriteContextCancelsBlockedBackendWrite(t *testing.T) {
 	}
 }
 
+type sizeRecordingBackend struct {
+	*backendStub
+	mu      sync.Mutex
+	sizes   [][2]uint16
+	resized chan [2]uint16
+}
+
+type closeBlockedResizeBackend struct {
+	*backendStub
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (b *closeBlockedResizeBackend) Resize(uint16, uint16) error {
+	b.once.Do(func() { close(b.entered) })
+	<-b.closed
+	return io.ErrClosedPipe
+}
+
+func (b *sizeRecordingBackend) Resize(cols, rows uint16) error {
+	size := [2]uint16{cols, rows}
+	b.mu.Lock()
+	b.sizes = append(b.sizes, size)
+	b.mu.Unlock()
+	select {
+	case b.resized <- size:
+	default:
+	}
+	return nil
+}
+
+func TestResizeDuringConnectingIsAcceptedReconciledAndRetained(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	recorder := &sizeRecordingBackend{
+		backendStub: newBackendStub(),
+		resized:     make(chan [2]uint16, 1),
+	}
+	var launchedCols, launchedRows atomic.Int32
+	launcher := &launcherStub{startFunc: func(_ context.Context, spec SessionSpec, _ Persistence) (backend, Persistence, error) {
+		launchedCols.Store(int32(spec.Cols))
+		launchedRows.Store(int32(spec.Rows))
+		close(entered)
+		<-release
+		return recorder, PersistenceTmux, nil
+	}}
+	manager := managerWithLauncher(t, launcher)
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := manager.Create(ctx, SessionSpec{ID: "connecting-resize", Persistence: PersistenceTmux, Cols: 120, Rows: 36}); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	a, err := manager.Attach(ctx, "connecting-resize", "browser", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Resize(200, 50); err != nil {
+		t.Fatalf("Resize while connecting: %v", err)
+	}
+	s, err := manager.session("connecting-resize")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := s.record(true)
+	if record.Cols != 200 || record.Rows != 50 {
+		t.Fatalf("runtime persistence snapshot size = %dx%d, want 200x50", record.Cols, record.Rows)
+	}
+	close(release)
+	waitRunning(t, ctx, manager, "connecting-resize")
+	select {
+	case size := <-recorder.resized:
+		if size != [2]uint16{200, 50} {
+			t.Fatalf("reconciled backend size = %v, want [200 50]", size)
+		}
+	case <-ctx.Done():
+		t.Fatal("new backend never received the connecting-time resize")
+	}
+	if launchedCols.Load() != 120 || launchedRows.Load() != 36 {
+		t.Fatalf("probe did not exercise a stale launch snapshot: %dx%d", launchedCols.Load(), launchedRows.Load())
+	}
+}
+
+func TestTerminateUnblocksConcurrentActivationAndResize(t *testing.T) {
+	launchEntered := make(chan struct{})
+	launchRelease := make(chan struct{})
+	b := &closeBlockedResizeBackend{backendStub: newBackendStub(), entered: make(chan struct{})}
+	manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
+		close(launchEntered)
+		<-launchRelease
+		return b, PersistenceTmux, nil
+	}})
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := manager.Create(ctx, SessionSpec{ID: "resize-terminate", Persistence: PersistenceTmux, Cols: 120, Rows: 36}); err != nil {
+		t.Fatal(err)
+	}
+	<-launchEntered
+	a, err := manager.Attach(ctx, "resize-terminate", "browser", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Resize(200, 50); err != nil {
+		t.Fatal(err)
+	}
+	close(launchRelease)
+	select {
+	case <-b.entered:
+	case <-ctx.Done():
+		t.Fatal("backend activation never began size reconciliation")
+	}
+	resizeStarted := make(chan struct{})
+	resizeDone := make(chan error, 1)
+	go func() {
+		close(resizeStarted)
+		resizeDone <- a.Resize(220, 60)
+	}()
+	<-resizeStarted
+	terminateDone := make(chan error, 1)
+	go func() { terminateDone <- manager.Terminate(ctx, "resize-terminate") }()
+	if err := <-terminateDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-resizeDone:
+		if !errors.Is(err, ErrUnavailable) && !errors.Is(err, ErrAttachmentClosed) {
+			t.Fatalf("concurrent Resize error = %v, want closed/unavailable", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("concurrent Resize remained blocked after Terminate")
+	}
+}
+
+func TestResizeWaitsOutOlderRepositorySnapshot(t *testing.T) {
+	repository := &orderedSaveRepository{secondStart: make(chan struct{}), release: make(chan struct{})}
+	b := newBackendStub()
+	manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
+		return b, PersistenceTmux, nil
+	}}, func(cfg *Config) { cfg.Repository = repository })
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := manager.Create(ctx, SessionSpec{ID: "resize-save-order", Persistence: PersistenceAuto, Cols: 120, Rows: 36}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := manager.Attach(ctx, "resize-save-order", "browser", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-repository.secondStart:
+	case <-ctx.Done():
+		t.Fatal("resolved-backend save did not start")
+	}
+	resized := make(chan error, 1)
+	go func() { resized <- a.Resize(200, 50) }()
+	select {
+	case err := <-resized:
+		t.Fatalf("Resize returned before the older repository snapshot completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(repository.release)
+	if err := <-resized; err != nil {
+		t.Fatal(err)
+	}
+	s, err := manager.session("resize-save-order")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := s.record(true)
+	if record.Cols != 200 || record.Rows != 50 {
+		t.Fatalf("runtime size after save barrier = %dx%d, want 200x50", record.Cols, record.Rows)
+	}
+}
+
+type finiteReadBackend struct {
+	*backendStub
+	reader *bytes.Reader
+}
+
+func (b *finiteReadBackend) Read(p []byte) (int, error) { return b.reader.Read(p) }
+func (*finiteReadBackend) Wait(context.Context) error   { return nil }
+
+func TestConsumeBoundsLargeOutputFrames(t *testing.T) {
+	data := bytes.Repeat([]byte("wmux-output-"), 10<<10)
+	b := &finiteReadBackend{backendStub: newBackendStub(), reader: bytes.NewReader(data)}
+	manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
+		return b, PersistenceNone, nil
+	}})
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := manager.Create(ctx, SessionSpec{ID: "bounded-output", Persistence: PersistenceNone}); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, ctx, manager, "bounded-output", StateExited)
+	a, err := manager.Attach(ctx, "bounded-output", "replay", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Initial) < 2 {
+		t.Fatalf("large output produced %d frame(s), want multiple bounded frames", len(a.Initial))
+	}
+	joined := make([]byte, 0, len(data))
+	for _, frame := range a.Initial {
+		if len(frame.Data) > 32<<10 {
+			t.Fatalf("output frame has %d bytes, want at most 32 KiB", len(frame.Data))
+		}
+		joined = append(joined, frame.Data...)
+	}
+	if !bytes.Equal(joined, data) {
+		t.Fatalf("bounded output replay has %d bytes, want %d", len(joined), len(data))
+	}
+}
+
+type orderedSaveRepository struct {
+	mu          sync.Mutex
+	calls       int
+	records     []SessionRecord
+	secondStart chan struct{}
+	release     chan struct{}
+}
+
+func (r *orderedSaveRepository) SaveSession(_ context.Context, record SessionRecord) error {
+	r.mu.Lock()
+	r.calls++
+	call := r.calls
+	r.mu.Unlock()
+	if call == 2 {
+		close(r.secondStart)
+		<-r.release
+	}
+	r.mu.Lock()
+	r.records = append(r.records, record)
+	r.mu.Unlock()
+	return nil
+}
+
+func (*orderedSaveRepository) ListSessions(context.Context) ([]SessionRecord, error) {
+	return nil, nil
+}
+
+func (*orderedSaveRepository) LoadHost(context.Context, string) (HostSpec, error) {
+	return HostSpec{}, errors.New("unexpected host load")
+}
+
+func TestTerminationCannotBeOverwrittenByOlderActiveSave(t *testing.T) {
+	repository := &orderedSaveRepository{secondStart: make(chan struct{}), release: make(chan struct{})}
+	b := newBackendStub()
+	killStarted := make(chan struct{})
+	manager := managerWithLauncher(t, &launcherStub{
+		startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
+			return b, PersistenceTmux, nil
+		},
+		terminateFunc: func(context.Context, SessionSpec, Persistence) error {
+			close(killStarted)
+			return nil
+		},
+	}, func(cfg *Config) { cfg.Repository = repository })
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := manager.Create(ctx, SessionSpec{ID: "save-order", Persistence: PersistenceAuto}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-repository.secondStart:
+	case <-ctx.Done():
+		t.Fatal("resolved-backend active save did not start")
+	}
+	terminated := make(chan error, 1)
+	go func() { terminated <- manager.Terminate(ctx, "save-order") }()
+	select {
+	case <-killStarted:
+	case <-ctx.Done():
+		t.Fatal("Terminate did not reach the exact backend kill")
+	}
+	close(repository.release)
+	if err := <-terminated; err != nil {
+		t.Fatal(err)
+	}
+	repository.mu.Lock()
+	records := append([]SessionRecord(nil), repository.records...)
+	repository.mu.Unlock()
+	if len(records) < 3 || records[len(records)-1].Active {
+		t.Fatalf("save order ended with an active record: %+v", records)
+	}
+}
+
 type repositoryStub struct {
 	mu    sync.Mutex
 	host  HostSpec
@@ -306,6 +598,50 @@ func TestPermanentHostErrorWaitsForRefreshAndReloadsHost(t *testing.T) {
 		t.Fatalf("starts=%d host loads=%d, want fresh load per attempt", starts.Load(), repository.loadCount())
 	}
 	_ = attachment.Close()
+}
+
+func TestDiscardRemovesOnlyInactiveRuntimeWithoutBackendTermination(t *testing.T) {
+	var terminations atomic.Int32
+	manager := managerWithLauncher(t, &launcherStub{
+		startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
+			return nil, "", permanentStartError(errors.New("host unavailable"))
+		},
+		terminateFunc: func(context.Context, SessionSpec, Persistence) error {
+			terminations.Add(1)
+			return nil
+		},
+	})
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = manager.Create(ctx, SessionSpec{ID: "discard-error", Persistence: PersistenceTmux})
+	waitState(t, ctx, manager, "discard-error", StateError)
+	a, err := manager.Attach(ctx, "discard-error", "browser", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.DiscardContext(ctx, "discard-error"); err != nil {
+		t.Fatal(err)
+	}
+	if terminations.Load() != 0 {
+		t.Fatal("Discard invoked destructive backend termination")
+	}
+	if _, err := manager.Status("discard-error"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("Status after Discard = %v, want ErrSessionNotFound", err)
+	}
+	if reason := awaitCloseReason(t, ctx, a); reason != AttachmentExited {
+		t.Fatalf("discard close reason = %q, want exited", reason)
+	}
+
+	runningBackend := newBackendStub()
+	manager.launcher = &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
+		return runningBackend, PersistenceTmux, nil
+	}}
+	_, _ = manager.Create(ctx, SessionSpec{ID: "discard-running", Persistence: PersistenceTmux})
+	waitRunning(t, ctx, manager, "discard-running")
+	if err := manager.DiscardContext(ctx, "discard-running"); !errors.Is(err, ErrSessionActive) {
+		t.Fatalf("Discard running session error = %v, want ErrSessionActive", err)
+	}
 }
 
 func TestAttachmentCloseReasonsAndWriterNotifications(t *testing.T) {

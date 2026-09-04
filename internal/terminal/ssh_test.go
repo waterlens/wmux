@@ -90,7 +90,7 @@ func TestRemoteAttachCommandQuotesValues(t *testing.T) {
 		Args:  []string{"-l", "argument with spaces"},
 		Env:   map[string]string{"SAFE_NAME": "a'b"},
 	}, PersistenceTmux, "wmux-safe")
-	for _, wanted := range []string{"tmux -L 'wmux' -f /dev/null new-session -d", "SAFE_NAME", "/tmp/a", "/bin/zsh", "argument with spaces", "status off", "prefix None"} {
+	for _, wanted := range []string{"tmux -L 'wmux' -f /dev/null new-session -d", "SAFE_NAME", "/tmp/a", "/bin/zsh", "argument with spaces", "status off", "prefix None", "mouse on", "terminal-features", "xterm*:hyperlinks"} {
 		if !strings.Contains(command, wanted) {
 			t.Fatalf("remote command %q does not contain %q", command, wanted)
 		}
@@ -107,6 +107,8 @@ func TestRemoteAttachCommandsUseIsolatedMuxAndExpandHome(t *testing.T) {
 		`-c "$HOME"/'projects/demo'`,
 		"status off",
 		"prefix None",
+		"mouse on",
+		"terminal-features ',xterm*:hyperlinks'",
 	} {
 		if !strings.Contains(tmux, wanted) {
 			t.Fatalf("tmux command %q does not contain %q", tmux, wanted)
@@ -114,6 +116,9 @@ func TestRemoteAttachCommandsUseIsolatedMuxAndExpandHome(t *testing.T) {
 	}
 	if strings.Contains(tmux, "kill-server") {
 		t.Fatalf("tmux command targets the whole server: %q", tmux)
+	}
+	if strings.Contains(tmux, "allow-passthrough") {
+		t.Fatalf("tmux command enables unsafe passthrough: %q", tmux)
 	}
 
 	screen := l.remoteAttachCommand(SessionSpec{Cwd: "~"}, PersistenceScreen, "wmux-demo")
