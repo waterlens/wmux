@@ -1,0 +1,61 @@
+{
+  "name": "wmux",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A self-hosted, persistent web terminal for local shells and SSH hosts.",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c cyan,green \"pnpm dev:server\" \"pnpm dev:web\"",
+    "dev:server": "go run ./cmd/wmux",
+    "dev:web": "vite",
+    "build": "pnpm build:web && pnpm build:server",
+    "build:web": "vite build",
+    "build:server": "sh scripts/build-server.sh",
+    "start": "./dist/wmux",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write client scripts vite.config.ts package.json tsconfig.base.json tsconfig.client.json",
+    "format:check": "prettier --check client scripts vite.config.ts package.json tsconfig.base.json tsconfig.client.json",
+    "typecheck": "tsc -p tsconfig.client.json --noEmit",
+    "test": "pnpm lint && pnpm typecheck && pnpm test:unit && pnpm test:go",
+    "test:unit": "vitest run",
+    "test:go": "go test ./...",
+    "test:all": "pnpm test && pnpm build && pnpm test:browser",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/manrope": "^5.3.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "lucide-react": "^1.40.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "eslint": "^10.9.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.6",
+    "globals": "^17.12.0",
+    "jsdom": "^30.0.1",
+    "playwright-core": "^1.62.1",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.69.0",
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0"
+  }
+}

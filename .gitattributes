@@ -1,0 +1,3 @@
+internal/webui/dist/** linguist-generated=true
+internal/webui/dist/assets/*.js -whitespace
+internal/webui/dist/assets/*.css -whitespace

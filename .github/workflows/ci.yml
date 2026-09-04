@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install terminal backends
+        run: sudo apt-get update && sudo apt-get install -y tmux screen
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test:unit
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: pnpm build
+      - name: Screen persistence integration
+        run: WMUX_SCREEN_INTEGRATION=1 go test -timeout 30s ./internal/terminal -run '^TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt$' -count=1 -v
+      - name: Tmux restore integration
+        run: WMUX_TMUX_INTEGRATION=1 go test -timeout 30s ./internal/terminal -run '^TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt$' -count=1 -v
+      - run: pnpm test:browser

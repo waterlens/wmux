@@ -1,0 +1,20 @@
+[Unit]
+Description=wmux personal web terminal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=WMUX_HOST=127.0.0.1
+Environment=WMUX_PORT=8787
+Environment=WMUX_DATA_DIR=%h/.local/share/wmux
+EnvironmentFile=-%h/.config/wmux/wmux.env
+ExecStart=%h/.local/bin/wmux
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15s
+# Keep detached tmux/screen servers alive across a wmux service restart.
+KillMode=process
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,24 @@
+services:
+  wmux:
+    build:
+      context: .
+      args:
+        VERSION: ${WMUX_VERSION:-0.1.0}
+        COMMIT: ${WMUX_COMMIT:-unknown}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      WMUX_HOST: 0.0.0.0
+      WMUX_PORT: 8787
+      WMUX_DATA_DIR: /data
+      WMUX_LOG_LEVEL: ${WMUX_LOG_LEVEL:-info}
+      # Set these when a TLS reverse proxy fronts wmux:
+      # WMUX_PUBLIC_URL: https://terminal.example.com
+      # WMUX_COOKIE_SECURE: "true"
+      # WMUX_TRUST_PROXY: "true"
+    volumes:
+      - wmux-data:/data
+
+volumes:
+  wmux-data:
