@@ -1,4 +1,13 @@
-export type LiveStatus = 'connecting' | 'running' | 'reconnecting' | 'detached' | 'exited' | 'error';
+import { sessionStatusSchema, type SessionStatus } from './types';
+
+/**
+ * Status reported over the terminal socket. `publicTerminalState` in
+ * internal/api/websocket.go only sends a subset of the session lifecycle
+ * statuses, so this is an alias of the REST contract rather than a second
+ * union: sessionStatus.ts labels both from one table, and a future divergence
+ * has to be spelled out here instead of surfacing at a call site.
+ */
+export type LiveStatus = SessionStatus;
 
 export type ControlMessage = {
   type?: string;
@@ -156,16 +165,8 @@ export class ReplayBarrier {
 }
 
 export function normalizeLiveStatus(value: unknown): LiveStatus | null {
-  if (
-    value === 'connecting' ||
-    value === 'running' ||
-    value === 'reconnecting' ||
-    value === 'detached' ||
-    value === 'exited' ||
-    value === 'error'
-  )
-    return value;
-  return null;
+  const parsed = sessionStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 export function isPermanentSocketClose(code: number): boolean {
