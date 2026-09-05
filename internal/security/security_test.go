@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 )
@@ -48,7 +47,7 @@ func TestLoadOrCreateMasterKeyConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("master key mode = %o", info.Mode().Perm())
 	}
 }
@@ -62,63 +61,52 @@ func TestMasterKeyRejectsInvalidFileAndSymlink(t *testing.T) {
 	if _, err := LoadOrCreateMasterKey(bad); err == nil {
 		t.Fatal("expected short key error")
 	}
-	if runtime.GOOS != "windows" {
-		good := filepath.Join(root, "good.key")
-		if err := os.WriteFile(good, make([]byte, MasterKeySize), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		link := filepath.Join(root, "link.key")
-		if err := os.Symlink(good, link); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := LoadOrCreateMasterKey(link); err == nil {
-			t.Fatal("expected symlink key error")
-		}
+	good := filepath.Join(root, "good.key")
+	if err := os.WriteFile(good, make([]byte, MasterKeySize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link.key")
+	if err := os.Symlink(good, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreateMasterKey(link); err == nil {
+		t.Fatal("expected symlink key error")
 	}
 }
 
-func TestEncryptDecryptAndAuthentication(t *testing.T) {
-	key := bytes.Repeat([]byte{7}, MasterKeySize)
-	plaintext := []byte("secret ssh credentials")
-	aad := []byte("host-id")
-	ciphertext, err := EncryptWithAAD(key, plaintext, aad)
+type sealedValue struct {
+	Password string `json:"password"`
+}
+
+func TestEncryptJSONRoundTripAndAuthentication(t *testing.T) {
+	key := bytes.Repeat([]byte{9}, MasterKeySize)
+	sealed, err := EncryptJSON(key, sealedValue{Password: "hunter2"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(ciphertext, plaintext) {
+	if bytes.Contains(sealed, []byte("hunter2")) {
 		t.Fatal("ciphertext exposes plaintext")
 	}
-	opened, err := DecryptWithAAD(key, ciphertext, aad)
-	if err != nil || !bytes.Equal(opened, plaintext) {
-		t.Fatalf("DecryptWithAAD = %q, %v", opened, err)
-	}
-	if _, err := DecryptWithAAD(key, ciphertext, []byte("wrong")); !errors.Is(err, ErrInvalidCiphertext) {
-		t.Fatalf("wrong AAD error = %v", err)
-	}
-	ciphertext[len(ciphertext)-1] ^= 1
-	if _, err := DecryptWithAAD(key, ciphertext, aad); !errors.Is(err, ErrInvalidCiphertext) {
-		t.Fatalf("tamper error = %v", err)
-	}
-	if _, err := Encrypt([]byte("short"), plaintext); !errors.Is(err, ErrInvalidKey) {
-		t.Fatalf("short key error = %v", err)
-	}
-}
-
-func TestEncryptJSON(t *testing.T) {
-	type value struct {
-		Password string `json:"password"`
-	}
-	key := bytes.Repeat([]byte{9}, MasterKeySize)
-	sealed, err := EncryptJSON(key, value{Password: "hunter2"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got value
+	var got sealedValue
 	if err := DecryptJSON(key, sealed, &got); err != nil {
 		t.Fatal(err)
 	}
 	if got.Password != "hunter2" {
 		t.Fatalf("round trip = %#v", got)
+	}
+	if err := DecryptJSON(bytes.Repeat([]byte{8}, MasterKeySize), sealed, &got); !errors.Is(err, ErrInvalidCiphertext) {
+		t.Fatalf("wrong key error = %v", err)
+	}
+	sealed[len(sealed)-1] ^= 1
+	if err := DecryptJSON(key, sealed, &got); !errors.Is(err, ErrInvalidCiphertext) {
+		t.Fatalf("tamper error = %v", err)
+	}
+	sealed[0] ^= 1
+	if err := DecryptJSON(key, sealed, &got); !errors.Is(err, ErrInvalidCiphertext) {
+		t.Fatalf("format marker error = %v", err)
+	}
+	if _, err := EncryptJSON([]byte("short"), sealedValue{}); !errors.Is(err, ErrInvalidKey) {
+		t.Fatalf("short key error = %v", err)
 	}
 }
 

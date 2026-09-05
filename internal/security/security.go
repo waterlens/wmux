@@ -50,33 +50,33 @@ var (
 // key paths are rejected.
 func LoadOrCreateMasterKey(path string) ([]byte, error) {
 	if strings.TrimSpace(path) == "" {
-		return nil, fmt.Errorf("master key path is empty")
+		return nil, errors.New("security: master key path is empty")
 	}
 	keyFileMu.Lock()
 	defer keyFileMu.Unlock()
 
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create master key directory: %w", err)
+		return nil, fmt.Errorf("security: create master key directory: %w", err)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("secure master key directory: %w", err)
+		return nil, fmt.Errorf("security: secure master key directory: %w", err)
 	}
 
 	if _, err := os.Lstat(path); err == nil {
 		return loadMasterKey(path)
 	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("inspect master key: %w", err)
+		return nil, fmt.Errorf("security: inspect master key: %w", err)
 	}
 
 	key := make([]byte, MasterKeySize)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
-		return nil, fmt.Errorf("generate master key: %w", err)
+		return nil, fmt.Errorf("security: generate master key: %w", err)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".master.key-*")
 	if err != nil {
-		return nil, fmt.Errorf("create temporary master key: %w", err)
+		return nil, fmt.Errorf("security: create temporary master key: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
@@ -87,16 +87,16 @@ func LoadOrCreateMasterKey(path string) ([]byte, error) {
 		}
 	}()
 	if err := tmp.Chmod(0o600); err != nil {
-		return nil, fmt.Errorf("secure temporary master key: %w", err)
+		return nil, fmt.Errorf("security: secure temporary master key: %w", err)
 	}
 	if _, err := tmp.Write(key); err != nil {
-		return nil, fmt.Errorf("write master key: %w", err)
+		return nil, fmt.Errorf("security: write master key: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		return nil, fmt.Errorf("sync master key: %w", err)
+		return nil, fmt.Errorf("security: sync master key: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return nil, fmt.Errorf("close master key: %w", err)
+		return nil, fmt.Errorf("security: close master key: %w", err)
 	}
 	ok = true
 
@@ -106,10 +106,10 @@ func LoadOrCreateMasterKey(path string) ([]byte, error) {
 		if _, statErr := os.Lstat(path); statErr == nil {
 			return loadMasterKey(path)
 		}
-		return nil, fmt.Errorf("publish master key: %w", err)
+		return nil, fmt.Errorf("security: publish master key: %w", err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
-		return nil, fmt.Errorf("secure master key: %w", err)
+		return nil, fmt.Errorf("security: secure master key: %w", err)
 	}
 	return append([]byte(nil), key...), nil
 }
@@ -117,54 +117,44 @@ func LoadOrCreateMasterKey(path string) ([]byte, error) {
 func loadMasterKey(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("inspect master key: %w", err)
+		return nil, fmt.Errorf("security: inspect master key: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("master key must be a regular file and not a symlink")
+		return nil, errors.New("security: master key must be a regular file and not a symlink")
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
-		return nil, fmt.Errorf("secure master key: %w", err)
+		return nil, fmt.Errorf("security: secure master key: %w", err)
 	}
 	key, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read master key: %w", err)
+		return nil, fmt.Errorf("security: read master key: %w", err)
 	}
 	if len(key) != MasterKeySize {
-		return nil, fmt.Errorf("master key has %d bytes, want %d", len(key), MasterKeySize)
+		return nil, fmt.Errorf("security: master key has %d bytes, want %d", len(key), MasterKeySize)
 	}
 	return key, nil
 }
 
-// Encrypt seals plaintext with AES-256-GCM. Its output includes a format
+// seal encrypts plaintext with AES-256-GCM. Its output includes a format
 // marker and random nonce and is safe to store directly as a BLOB.
-func Encrypt(key, plaintext []byte) ([]byte, error) {
-	return EncryptWithAAD(key, plaintext, nil)
-}
-
-// EncryptWithAAD is Encrypt with authenticated (but unencrypted) context.
-func EncryptWithAAD(key, plaintext, aad []byte) ([]byte, error) {
+func seal(key, plaintext []byte) ([]byte, error) {
 	gcm, err := newGCM(key)
 	if err != nil {
 		return nil, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, fmt.Errorf("generate encryption nonce: %w", err)
+		return nil, fmt.Errorf("security: generate encryption nonce: %w", err)
 	}
 	result := make([]byte, 0, len(sealMagic)+len(nonce)+len(plaintext)+gcm.Overhead())
 	result = append(result, sealMagic...)
 	result = append(result, nonce...)
-	result = gcm.Seal(result, nonce, plaintext, aad)
+	result = gcm.Seal(result, nonce, plaintext, nil)
 	return result, nil
 }
 
-// Decrypt opens data created by Encrypt.
-func Decrypt(key, ciphertext []byte) ([]byte, error) {
-	return DecryptWithAAD(key, ciphertext, nil)
-}
-
-// DecryptWithAAD opens data created by EncryptWithAAD.
-func DecryptWithAAD(key, ciphertext, aad []byte) ([]byte, error) {
+// open decrypts data created by seal.
+func open(key, ciphertext []byte) ([]byte, error) {
 	gcm, err := newGCM(key)
 	if err != nil {
 		return nil, err
@@ -174,7 +164,7 @@ func DecryptWithAAD(key, ciphertext, aad []byte) ([]byte, error) {
 		return nil, ErrInvalidCiphertext
 	}
 	nonce := ciphertext[len(sealMagic):prefixLen]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext[prefixLen:], aad)
+	plaintext, err := gcm.Open(nil, nonce, ciphertext[prefixLen:], nil)
 	if err != nil {
 		return nil, ErrInvalidCiphertext
 	}
@@ -187,11 +177,11 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, fmt.Errorf("create AES cipher: %w", err)
+		return nil, fmt.Errorf("security: create AES cipher: %w", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("create GCM: %w", err)
+		return nil, fmt.Errorf("security: create GCM: %w", err)
 	}
 	return gcm, nil
 }
@@ -200,19 +190,19 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 func EncryptJSON(key []byte, v any) ([]byte, error) {
 	plaintext, err := json.Marshal(v)
 	if err != nil {
-		return nil, fmt.Errorf("marshal encrypted JSON: %w", err)
+		return nil, fmt.Errorf("security: marshal encrypted JSON: %w", err)
 	}
-	return Encrypt(key, plaintext)
+	return seal(key, plaintext)
 }
 
 // DecryptJSON decrypts ciphertext and unmarshals it into v.
 func DecryptJSON(key, ciphertext []byte, v any) error {
-	plaintext, err := Decrypt(key, ciphertext)
+	plaintext, err := open(key, ciphertext)
 	if err != nil {
 		return err
 	}
 	if err := json.Unmarshal(plaintext, v); err != nil {
-		return fmt.Errorf("unmarshal encrypted JSON: %w", err)
+		return fmt.Errorf("security: unmarshal encrypted JSON: %w", err)
 	}
 	return nil
 }
@@ -224,11 +214,11 @@ func HashPassword(password string) (string, error) {
 	}
 	salt := make([]byte, scryptSaltLen)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return "", fmt.Errorf("generate password salt: %w", err)
+		return "", fmt.Errorf("security: generate password salt: %w", err)
 	}
 	derived, err := scrypt.Key([]byte(password), salt, 1<<scryptLogN, scryptR, scryptP, scryptKeyLen)
 	if err != nil {
-		return "", fmt.Errorf("derive password hash: %w", err)
+		return "", fmt.Errorf("security: derive password hash: %w", err)
 	}
 	return fmt.Sprintf("$scrypt$ln=%d,r=%d,p=%d$%s$%s",
 		scryptLogN,
@@ -249,7 +239,7 @@ func VerifyPassword(password, encoded string) (bool, error) {
 	}
 	actual, err := scrypt.Key([]byte(password), salt, 1<<logN, r, p, len(expected))
 	if err != nil {
-		return false, fmt.Errorf("derive password hash: %w", err)
+		return false, fmt.Errorf("security: derive password hash: %w", err)
 	}
 	return subtle.ConstantTimeCompare(actual, expected) == 1, nil
 }
@@ -284,8 +274,9 @@ func parsePasswordHash(encoded string) (logN, r, p int, salt, derived []byte, er
 	if !okN || !okR || !okP || logN < 10 || logN > 20 || r > 32 || p > 16 {
 		return 0, 0, 0, nil, nil, ErrInvalidPasswordHash
 	}
-	// scrypt's memory/work parameters must also fit in int safely.
-	if uint64(r)*uint64(p) >= 1<<30 || logN >= strconv.IntSize-1 || uint64(1<<logN) > uint64(math.MaxInt)/(128*uint64(r)) {
+	// On a 32-bit platform the bounds above still allow 2^20 * 128 * 32, which
+	// overflows int inside scrypt.
+	if uint64(1)<<logN > uint64(math.MaxInt)/(128*uint64(r)) {
 		return 0, 0, 0, nil, nil, ErrInvalidPasswordHash
 	}
 	salt, decodeErr := base64.RawStdEncoding.DecodeString(parts[3])
@@ -303,7 +294,7 @@ func parsePasswordHash(encoded string) (logN, r, p int, salt, derived []byte, er
 func GenerateToken() (string, error) {
 	raw := make([]byte, TokenSize)
 	if _, err := io.ReadFull(rand.Reader, raw); err != nil {
-		return "", fmt.Errorf("generate token: %w", err)
+		return "", fmt.Errorf("security: generate token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
