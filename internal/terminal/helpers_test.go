@@ -172,3 +172,15 @@ func awaitState(ctx context.Context, t *testing.T, attachment *Attachment, accep
 		}
 	}
 }
+
+// shortTempDir returns a directory whose path stays well under the Unix socket
+// limit; t.TempDir() embeds the test name and is too long for screen sockets.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "wmux-s-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}

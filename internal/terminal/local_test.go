@@ -53,7 +53,7 @@ func TestLocalBackendReconnectDecisionTreatsPTYClosureAsExit(t *testing.T) {
 }
 
 func TestLocalMuxConfigurationIsIsolated(t *testing.T) {
-	runtimeDir := t.TempDir()
+	runtimeDir := shortTempDir(t)
 	l := newExecLauncher(Config{MuxName: "my wmux!", MuxRuntimeDir: runtimeDir})
 	name := MuxSessionName("session/id")
 	tmuxArgs := l.tmuxArgs("kill-session", "-t", "="+name)
@@ -69,7 +69,7 @@ func TestLocalMuxConfigurationIsIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDir := filepath.Join(runtimeDir, "screen-my-wmux")
+	wantDir := filepath.Join(runtimeDir, "s-my-wmux")
 	if config != filepath.Join(wantDir, "screenrc") {
 		t.Fatalf("screen config = %q, want isolated config below %q", config, wantDir)
 	}
@@ -172,12 +172,12 @@ func TestTerminateLocalTargetsOnlyNamedIsolatedSession(t *testing.T) {
 	}
 	assertCapturedArgs(t, capture, []string{"-L", "isolated", "-f", "/dev/null", "kill-session", "-t", "=" + name})
 
-	screenRoot := filepath.Join(dir, "runtime")
+	screenRoot := filepath.Join(shortTempDir(t), "runtime")
 	screenLauncher := newExecLauncher(Config{screenPath: tool, MuxName: "isolated", MuxRuntimeDir: screenRoot})
 	if err := screenLauncher.terminateLocal(context.Background(), spec, PersistenceScreen); err != nil {
 		t.Fatal(err)
 	}
-	wantScreenDir := filepath.Join(screenRoot, "screen-isolated")
+	wantScreenDir := filepath.Join(screenRoot, "s-isolated")
 	assertCapturedArgs(t, capture, []string{"-c", filepath.Join(wantScreenDir, "screenrc"), "-S", name, "-X", "quit"})
 	contents, err := os.ReadFile(environmentCapture)
 	if err != nil {

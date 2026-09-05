@@ -303,6 +303,16 @@ func sessionAbsent(kind Persistence, output []byte) bool {
 	return common || strings.Contains(text, "no screen session found") || strings.Contains(text, "no screen session")
 }
 
+// maxUnixSocketPath is the shortest sun_path limit among supported platforms
+// (104 bytes on the BSDs and macOS, 108 on Linux), without the trailing NUL.
+const maxUnixSocketPath = 103
+
+// screenDirName keeps the per-namespace screen directory short so its socket
+// paths stay under the Unix socket limit; the remote setup uses the same name.
+func screenDirName(muxName string) string {
+	return "s-" + strings.TrimPrefix(muxName, "wmux-")
+}
+
 func (l *execLauncher) screenRuntime(extra map[string]string) (string, []string, error) {
 	l.screenMu.Lock()
 	defer l.screenMu.Unlock()
@@ -314,7 +324,12 @@ func (l *execLauncher) screenRuntime(extra map[string]string) (string, []string,
 		}
 		root = filepath.Join(cache, "wmux", "mux")
 	}
-	dir := filepath.Join(root, "screen-"+l.muxName)
+	dir := filepath.Join(root, screenDirName(l.muxName))
+	// screen creates "<pid>.<session>" sockets inside SCREENDIR; a path that
+	// cannot fit one silently produces a session that never becomes reachable.
+	if len(dir)+len("/")+len("1234567.")+muxSessionNameLen > maxUnixSocketPath {
+		return "", nil, fmt.Errorf("terminal: screen socket directory %s is too long for a Unix socket path; use a shorter data directory", dir)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("terminal: create isolated screen directory: %w", err)
 	}

@@ -442,7 +442,8 @@ func remoteScreenSetup(namespace string) []string {
 		quotedLines = append(quotedLines, shellQuote(line))
 	}
 	return []string{
-		`wmux_screen_root="${XDG_CACHE_HOME:-$HOME/.cache}/wmux/mux/screen-` + namespace + `"`,
+		// Kept short on purpose: SCREENDIR/<pid>.<session> must fit a Unix socket path.
+		`wmux_screen_root="${XDG_CACHE_HOME:-$HOME/.cache}/wmux/` + screenDirName(namespace) + `"`,
 		`wmux_screen_sockets="$wmux_screen_root/sockets"`,
 		`wmux_screen_rc="$wmux_screen_root/screenrc"`,
 		`mkdir -p -- "$wmux_screen_sockets"`,

@@ -147,7 +147,7 @@ func TestRemoteAttachCommandsUseIsolatedMuxAndExpandHome(t *testing.T) {
 
 	screen := l.remoteAttachCommand(SessionSpec{Cwd: "~"}, PersistenceScreen, "wmux-demo", true)
 	for _, wanted := range []string{
-		`screen-private-wmux`,
+		`wmux/s-private-wmux"`,
 		`wmux_screen_rc="$wmux_screen_root/screenrc"`,
 		`export SCREENDIR="$wmux_screen_sockets"`,
 		`screen -c "$wmux_screen_rc"`,

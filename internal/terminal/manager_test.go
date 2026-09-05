@@ -209,7 +209,7 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	}
 	id := fmt.Sprintf("screen-close-%d-%d", os.Getpid(), time.Now().UnixNano())
 	name := MuxSessionName(id)
-	runtimeDir := t.TempDir()
+	runtimeDir := shortTempDir(t)
 	screenConfig, screenEnv, err := newExecLauncher(Config{MuxRuntimeDir: runtimeDir}).screenRuntime(nil)
 	if err != nil {
 		t.Fatal(err)
