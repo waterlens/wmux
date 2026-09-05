@@ -405,6 +405,72 @@ func TestHostPatchPreservesSecretAndReferencedHostCannotBeDeleted(t *testing.T) 
 	}
 }
 
+func TestHostPatchCredentialMergeRules(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
+
+	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/hosts", map[string]any{
+		"name": "凭据合并", "address": "192.0.2.20", "port": 22,
+		"username": "owner", "authType": "password", "password": "first-secret",
+	})
+	if response.StatusCode != http.StatusCreated {
+		failResponse(t, response)
+	}
+	var host hostResponse
+	decodeResponse(t, response, &host)
+
+	// A blank password means "keep the stored one": the editor submits without
+	// asking the user to retype it.
+	response = doJSONForTest(t, ctx, fixture, http.MethodPatch, "/api/hosts/"+host.ID, map[string]any{"password": ""})
+	if response.StatusCode != http.StatusOK {
+		failResponse(t, response)
+	}
+	response.Body.Close()
+	if credentials := storedCredentialsForTest(t, ctx, fixture, host.ID); credentials.Password != "first-secret" {
+		t.Fatalf("blank password overwrote the stored secret: %#v", credentials)
+	}
+
+	// Switching the authentication type replaces the secret rather than
+	// inheriting the password that belonged to the previous one.
+	response = doJSONForTest(t, ctx, fixture, http.MethodPatch, "/api/hosts/"+host.ID, map[string]any{
+		"authType": "privateKey", "privateKey": "PRIVATE-KEY-BODY", "passphrase": "unlock",
+	})
+	if response.StatusCode != http.StatusOK {
+		failResponse(t, response)
+	}
+	response.Body.Close()
+	credentials := storedCredentialsForTest(t, ctx, fixture, host.ID)
+	if credentials.Password != "" || credentials.PrivateKey != "PRIVATE-KEY-BODY" || credentials.Passphrase != "unlock" {
+		t.Fatalf("auth type switch kept the wrong credentials: %#v", credentials)
+	}
+
+	// A blank passphrase is a real value, because that is how a key without one
+	// is saved; the key itself stays.
+	response = doJSONForTest(t, ctx, fixture, http.MethodPatch, "/api/hosts/"+host.ID, map[string]any{"passphrase": ""})
+	if response.StatusCode != http.StatusOK {
+		failResponse(t, response)
+	}
+	response.Body.Close()
+	credentials = storedCredentialsForTest(t, ctx, fixture, host.ID)
+	if credentials.PrivateKey != "PRIVATE-KEY-BODY" || credentials.Passphrase != "" {
+		t.Fatalf("blank passphrase did not clear exactly one field: %#v", credentials)
+	}
+}
+
+func storedCredentialsForTest(t *testing.T, ctx context.Context, fixture *apiFixture, hostID string) store.Credentials {
+	t.Helper()
+	host, err := fixture.database.GetHost(ctx, hostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := fixture.api.decryptCredentials(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return credentials
+}
+
 func createSessionForTest(t *testing.T, ctx context.Context, fixture *apiFixture, value map[string]any) string {
 	t.Helper()
 	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/sessions", value)

@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/waterlens/wmux/internal/app"
@@ -61,54 +60,29 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreError(w, "read SSH host", err, "SSH 主机不存在")
 		return
 	}
-	credentials, err := s.decryptCredentials(host)
+	stored, err := s.decryptCredentials(host)
 	if err != nil {
 		s.internalError(w, "decrypt SSH credentials", err)
 		return
 	}
-	var patch hostPatch
-	if !decodeJSON(w, r, &patch) {
+	// Decoding over the stored values is the merge: encoding/json only assigns
+	// the keys the request actually sent, so anything it omits keeps what is
+	// already persisted. The three credentials stay nil so the merge below can
+	// tell "absent" from "sent empty".
+	input := hostInput{
+		Name:     host.Name,
+		Address:  host.Address,
+		Port:     host.Port,
+		Username: host.Username,
+		AuthType: host.AuthType,
+	}
+	if !decodeJSON(w, r, &input) {
 		return
 	}
-	input := hostInput{
-		Name:       host.Name,
-		Address:    host.Address,
-		Port:       host.Port,
-		Username:   host.Username,
-		AuthType:   host.AuthType,
-		Password:   stringPointer(credentials.Password),
-		PrivateKey: stringPointer(credentials.PrivateKey),
-		Passphrase: stringPointer(credentials.Passphrase),
-	}
-	oldAuthType := input.AuthType
-	if patch.Name != nil {
-		input.Name = *patch.Name
-	}
-	if patch.Address != nil {
-		input.Address = *patch.Address
-	}
-	if patch.Port != nil {
-		input.Port = *patch.Port
-	}
-	if patch.Username != nil {
-		input.Username = *patch.Username
-	}
-	if patch.AuthType != nil {
-		input.AuthType = *patch.AuthType
-	}
-	if input.AuthType != oldAuthType {
-		input.Password = nil
-		input.PrivateKey = nil
-		input.Passphrase = nil
-	}
-	if patch.Password != nil && *patch.Password != "" {
-		input.Password = patch.Password
-	}
-	if patch.PrivateKey != nil && strings.TrimSpace(*patch.PrivateKey) != "" {
-		input.PrivateKey = patch.PrivateKey
-	}
-	if patch.Passphrase != nil {
-		input.Passphrase = patch.Passphrase
+	// Switching the authentication type discards the secrets that belonged to
+	// the previous one; every other edit inherits what it did not send.
+	if input.AuthType == host.AuthType {
+		input.inheritCredentials(stored)
 	}
 	if err := input.normalize(); err != nil {
 		writeError(w, http.StatusBadRequest, codeInvalidHost, err.Error())
@@ -257,10 +231,6 @@ func credentialsFromInput(input hostInput) store.Credentials {
 		credentials.Passphrase = *input.Passphrase
 	}
 	return credentials
-}
-
-func stringPointer(value string) *string {
-	return &value
 }
 
 func publicHost(host store.Host) hostResponse {

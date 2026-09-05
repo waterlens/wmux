@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/waterlens/wmux/internal/store"
 )
 
 type setupInput struct {
@@ -19,17 +21,6 @@ type hostInput struct {
 	Port       int     `json:"port"`
 	Username   string  `json:"username"`
 	AuthType   string  `json:"authType"`
-	Password   *string `json:"password,omitempty"`
-	PrivateKey *string `json:"privateKey,omitempty"`
-	Passphrase *string `json:"passphrase,omitempty"`
-}
-
-type hostPatch struct {
-	Name       *string `json:"name,omitempty"`
-	Address    *string `json:"address,omitempty"`
-	Port       *int    `json:"port,omitempty"`
-	Username   *string `json:"username,omitempty"`
-	AuthType   *string `json:"authType,omitempty"`
 	Password   *string `json:"password,omitempty"`
 	PrivateKey *string `json:"privateKey,omitempty"`
 	Passphrase *string `json:"passphrase,omitempty"`
@@ -151,6 +142,23 @@ func (v *hostInput) normalize() error {
 		return errors.New("不支持的 SSH 认证方式")
 	}
 	return nil
+}
+
+// inheritCredentials keeps the persisted secret for every credential an edit
+// did not supply. The three fields use different rules on purpose: the host
+// editor submits without retyping a password or a private key, so a blank one
+// means "unchanged", while a blank passphrase is a real value because that is
+// how a key with no passphrase is saved.
+func (v *hostInput) inheritCredentials(stored store.Credentials) {
+	if v.Password == nil || *v.Password == "" {
+		v.Password = &stored.Password
+	}
+	if v.PrivateKey == nil || strings.TrimSpace(*v.PrivateKey) == "" {
+		v.PrivateKey = &stored.PrivateKey
+	}
+	if v.Passphrase == nil {
+		v.Passphrase = &stored.Passphrase
+	}
 }
 
 func (v *sessionInput) normalize() error {
