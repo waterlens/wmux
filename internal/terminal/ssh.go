@@ -19,14 +19,13 @@ import (
 )
 
 type sshBackend struct {
-	client  *ssh.Client
-	session *ssh.Session
-	stdin   io.WriteCloser
-	output  *io.PipeReader
-	pipe    *io.PipeWriter
-	done    chan error
-	kind    Persistence
-	name    string
+	client       *ssh.Client
+	session      *ssh.Session
+	stdin        io.WriteCloser
+	stdout       *io.PipeReader
+	stdoutWriter *io.PipeWriter
+	done         chan error
+	kind         Persistence
 
 	authClosers []io.Closer
 	keepalive   chan struct{}
@@ -36,46 +35,47 @@ type sshBackend struct {
 	input chan struct{}
 }
 
-func (l launcher) startSSH(ctx context.Context, spec SessionSpec, requested Persistence, create bool) (backend, Persistence, error) {
+func (l *execLauncher) startSSH(ctx context.Context, spec SessionSpec, requested Persistence, create bool) (b backend, resolved Persistence, err error) {
 	client, closers, err := dialSSH(ctx, *spec.Host)
 	if err != nil {
 		return nil, "", err
 	}
 	stopSetupCancellation := context.AfterFunc(ctx, func() { _ = client.Close() })
-	setupComplete := false
+	var sess *ssh.Session
+	var reader *io.PipeReader
+	var writer *io.PipeWriter
+	// Every failure below unwinds the same way; a cancelled context wins over
+	// whatever error the closing connection reported.
 	defer func() {
-		if !setupComplete {
-			stopSetupCancellation()
+		if err == nil {
+			return
 		}
-	}()
-	cleanup := func() {
+		if reader != nil {
+			_ = reader.Close()
+			_ = writer.Close()
+		}
+		if sess != nil {
+			_ = sess.Close()
+		}
+		stopSetupCancellation()
 		_ = client.Close()
 		closeAll(closers)
-	}
-
-	resolved, err := resolveRemote(ctx, client, requested)
-	if err != nil {
-		cleanup()
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, "", ctxErr
+			err = ctxErr
 		}
+	}()
+
+	if resolved, err = resolveRemote(ctx, client, requested); err != nil {
 		return nil, "", err
 	}
-	if err := ctx.Err(); err != nil {
-		cleanup()
+	if err = ctx.Err(); err != nil {
 		return nil, "", err
 	}
 	// A direct remote shell has nothing to reattach to.
 	if resolved == PersistenceNone && !create {
-		cleanup()
 		return nil, "", ErrBackendMissing
 	}
-	sess, err := client.NewSession()
-	if err != nil {
-		cleanup()
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, "", ctxErr
-		}
+	if sess, err = client.NewSession(); err != nil {
 		return nil, "", fmt.Errorf("terminal: create SSH session: %w", err)
 	}
 	cols, rows := terminalSize(spec)
@@ -84,70 +84,49 @@ func (l launcher) startSSH(ctx context.Context, spec SessionSpec, requested Pers
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
 	}
-	if err := sess.RequestPty("xterm-256color", int(rows), int(cols), modes); err != nil {
-		_ = sess.Close()
-		cleanup()
-		if ctx.Err() != nil {
-			return nil, "", ctx.Err()
-		}
+	if err = sess.RequestPty("xterm-256color", int(rows), int(cols), modes); err != nil {
 		return nil, "", permanentStartError(fmt.Errorf("terminal: request SSH PTY: %w", err))
 	}
 	stdin, err := sess.StdinPipe()
 	if err != nil {
-		_ = sess.Close()
-		cleanup()
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, "", ctxErr
-		}
 		return nil, "", fmt.Errorf("terminal: SSH stdin: %w", err)
 	}
-	reader, writer := io.Pipe()
+	reader, writer = io.Pipe()
 	sess.Stdout = writer
 	sess.Stderr = writer
 
-	name := backendName(spec.ID)
-	command := l.remoteAttachCommand(spec, resolved, name, create)
-	if command == "" {
+	if command := l.remoteAttachCommand(spec, resolved, BackendName(spec.ID), create); command == "" {
 		err = sess.Shell()
 	} else {
 		err = sess.Start(posixScript(command))
 	}
 	if err != nil {
-		_ = reader.Close()
-		_ = writer.Close()
-		_ = sess.Close()
-		cleanup()
-		if ctx.Err() != nil {
-			return nil, "", ctx.Err()
-		}
 		return nil, "", permanentStartError(fmt.Errorf("terminal: start remote %s: %w", resolved, err))
 	}
 
-	b := &sshBackend{
-		client:      client,
-		session:     sess,
-		stdin:       stdin,
-		output:      reader,
-		pipe:        writer,
-		done:        make(chan error, 1),
-		kind:        resolved,
-		name:        name,
-		authClosers: closers,
-		keepalive:   make(chan struct{}),
-		input:       make(chan struct{}, 1),
+	remote := &sshBackend{
+		client:       client,
+		session:      sess,
+		stdin:        stdin,
+		stdout:       reader,
+		stdoutWriter: writer,
+		done:         make(chan error, 1),
+		kind:         resolved,
+		authClosers:  closers,
+		keepalive:    make(chan struct{}),
+		input:        make(chan struct{}, 1),
 	}
 	go func() {
 		waitErr := sess.Wait()
 		_ = writer.CloseWithError(waitErr)
-		b.done <- waitErr
-		close(b.done)
+		remote.done <- waitErr
+		close(remote.done)
 	}()
 	if interval := keepAliveInterval(*spec.Host); interval > 0 {
-		go b.runKeepalive(interval)
+		go remote.runKeepalive(interval)
 	}
 	stopSetupCancellation()
-	setupComplete = true
-	return b, resolved, nil
+	return remote, resolved, nil
 }
 
 func dialSSH(ctx context.Context, host HostSpec) (*ssh.Client, []io.Closer, error) {
@@ -228,27 +207,13 @@ func strictHostKeyCallback(fingerprint string) (ssh.HostKeyCallback, error) {
 	}, nil
 }
 
-func sshAuth(credential Credential) ([]ssh.AuthMethod, []io.Closer, error) {
-	return sshAuthContext(context.Background(), credential)
-}
-
 func sshAuthContext(ctx context.Context, credential Credential) ([]ssh.AuthMethod, []io.Closer, error) {
 	switch value := credential.(type) {
-	case *PasswordCredential:
-		if value == nil {
-			return nil, nil, errors.New("terminal: SSH password credential is nil")
-		}
-		return sshAuthContext(ctx, *value)
 	case PasswordCredential:
 		if value.Password == "" {
 			return nil, nil, errors.New("terminal: SSH password is empty")
 		}
 		return []ssh.AuthMethod{ssh.Password(value.Password)}, nil, nil
-	case *PrivateKeyCredential:
-		if value == nil {
-			return nil, nil, errors.New("terminal: SSH private key credential is nil")
-		}
-		return sshAuthContext(ctx, *value)
 	case PrivateKeyCredential:
 		if len(value.PEM) == 0 {
 			return nil, nil, errors.New("terminal: SSH private key is empty")
@@ -264,11 +229,6 @@ func sshAuthContext(ctx context.Context, credential Credential) ([]ssh.AuthMetho
 			return nil, nil, fmt.Errorf("terminal: parse SSH private key: %w", err)
 		}
 		return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil, nil
-	case *AgentCredential:
-		if value == nil {
-			return nil, nil, errors.New("terminal: SSH agent credential is nil")
-		}
-		return sshAuthContext(ctx, *value)
 	case AgentCredential:
 		socket := value.Socket
 		if socket == "" {
@@ -371,7 +331,7 @@ var validEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // remoteAttachCommand builds the POSIX script that attaches to, and with create
 // first creates, the remote persistent session.
-func (l launcher) remoteAttachCommand(spec SessionSpec, resolved Persistence, name string, create bool) string {
+func (l *execLauncher) remoteAttachCommand(spec SessionSpec, resolved Persistence, name string, create bool) string {
 	env := spec.Env
 	exports := make([]string, 0, len(env))
 	for _, entry := range sortedEnv(env) {
@@ -496,10 +456,7 @@ func remoteScreenSetup(namespace string) []string {
 	}
 }
 
-func (l launcher) terminateSSH(ctx context.Context, spec SessionSpec, resolved Persistence) error {
-	if resolved == PersistenceNone {
-		return nil
-	}
+func (l *execLauncher) terminateSSH(ctx context.Context, spec SessionSpec, resolved Persistence) error {
 	client, closers, err := dialSSH(ctx, *spec.Host)
 	if err != nil {
 		return err
@@ -513,7 +470,7 @@ func (l launcher) terminateSSH(ctx context.Context, spec SessionSpec, resolved P
 		return fmt.Errorf("terminal: create SSH termination session: %w", err)
 	}
 	defer sess.Close()
-	name := backendName(spec.ID)
+	name := BackendName(spec.ID)
 	output, err := runSSHOutput(ctx, sess, posixScript(l.remoteTerminateCommand(resolved, name)))
 	if err != nil && !sessionAbsent(resolved, output) {
 		return fmt.Errorf("terminal: terminate remote %s: %w", resolved, err)
@@ -521,7 +478,7 @@ func (l launcher) terminateSSH(ctx context.Context, spec SessionSpec, resolved P
 	return nil
 }
 
-func (l launcher) remoteTerminateCommand(resolved Persistence, name string) string {
+func (l *execLauncher) remoteTerminateCommand(resolved Persistence, name string) string {
 	if resolved == PersistenceTmux {
 		tmux := "tmux -L " + shellQuote(l.muxName) + " -f /dev/null"
 		return tmux + " kill-session -t " + shellQuote("="+name)
@@ -548,11 +505,7 @@ func runSSHOutput(ctx context.Context, session *ssh.Session, command string) ([]
 	return output.Bytes(), nil
 }
 
-func (b *sshBackend) Read(p []byte) (int, error) { return b.output.Read(p) }
-
-func (b *sshBackend) Write(p []byte) (int, error) {
-	return b.WriteContext(context.Background(), p)
-}
+func (b *sshBackend) Read(p []byte) (int, error) { return b.stdout.Read(p) }
 
 // WriteContext waits for its turn under the caller's context.
 func (b *sshBackend) WriteContext(ctx context.Context, p []byte) (int, error) {
@@ -589,16 +542,15 @@ func (b *sshBackend) Wait(ctx context.Context) error {
 func (b *sshBackend) Close() error {
 	b.closeOnce.Do(func() {
 		close(b.keepalive)
-		b.closeErr = errors.Join(b.stdin.Close(), b.session.Close(), b.client.Close(), b.output.Close(), b.pipe.Close())
+		b.closeErr = errors.Join(b.stdin.Close(), b.session.Close(), b.client.Close(), b.stdout.Close(), b.stdoutWriter.Close())
 		closeAll(b.authClosers)
 	})
 	return b.closeErr
 }
 
+// Terminate ends a non-persistent remote shell. killBackend never routes a tmux
+// or screen session here; those are killed through a fresh control connection.
 func (b *sshBackend) Terminate(ctx context.Context) error {
-	if b.kind != PersistenceNone {
-		return errors.New("terminal: persistent SSH backend must be terminated through a fresh control connection")
-	}
 	stopCancellation := context.AfterFunc(ctx, func() { _ = b.client.Close() })
 	if err := b.session.Signal(ssh.SIGKILL); err != nil && !errors.Is(err, io.EOF) {
 		stopCancellation()

@@ -16,12 +16,10 @@ import (
 )
 
 type localBackend struct {
-	pty      *os.File
-	cmd      *exec.Cmd
-	done     chan error
-	kind     Persistence
-	toolPath string
-	name     string
+	pty  *os.File
+	cmd  *exec.Cmd
+	done chan error
+	kind Persistence
 
 	closeOnce sync.Once
 	closeErr  error
@@ -29,7 +27,7 @@ type localBackend struct {
 	input chan struct{}
 }
 
-func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Persistence, create bool) (backend, Persistence, error) {
+func (l *execLauncher) startLocal(ctx context.Context, spec SessionSpec, requested Persistence, create bool) (backend, Persistence, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
@@ -43,7 +41,7 @@ func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Pe
 	}
 
 	cols, rows := terminalSize(spec)
-	name := backendName(spec.ID)
+	name := BackendName(spec.ID)
 	var cmd *exec.Cmd
 	switch resolved {
 	case PersistenceTmux:
@@ -92,13 +90,11 @@ func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Pe
 		return nil, "", permanentStartError(fmt.Errorf("terminal: start local %s: %w", resolved, err))
 	}
 	b := &localBackend{
-		pty:      ptmx,
-		cmd:      cmd,
-		done:     make(chan error, 1),
-		kind:     resolved,
-		toolPath: tool,
-		name:     name,
-		input:    make(chan struct{}, 1),
+		pty:   ptmx,
+		cmd:   cmd,
+		done:  make(chan error, 1),
+		kind:  resolved,
+		input: make(chan struct{}, 1),
 	}
 	go func() {
 		b.done <- cmd.Wait()
@@ -107,7 +103,7 @@ func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Pe
 	return b, resolved, nil
 }
 
-func (l launcher) ensureLocalTmux(ctx context.Context, path, name string, spec SessionSpec, cols, rows uint16, create bool) error {
+func (l *execLauncher) ensureLocalTmux(ctx context.Context, path, name string, spec SessionSpec, cols, rows uint16, create bool) error {
 	if err := exec.CommandContext(ctx, path, l.tmuxArgs("has-session", "-t", "="+name)...).Run(); err == nil {
 		return l.configureLocalTmux(ctx, path)
 	}
@@ -137,7 +133,7 @@ func (l launcher) ensureLocalTmux(ctx context.Context, path, name string, spec S
 	return l.configureLocalTmux(ctx, path)
 }
 
-func (l launcher) configureLocalTmux(ctx context.Context, path string) error {
+func (l *execLauncher) configureLocalTmux(ctx context.Context, path string) error {
 	settings := [][]string{
 		{"set-option", "-g", "status", "off"},
 		{"set-option", "-g", "prefix", "None"},
@@ -160,7 +156,7 @@ func (l launcher) configureLocalTmux(ctx context.Context, path string) error {
 }
 
 // appendTmuxOption appends value to a server option unless marker is present.
-func (l launcher) appendTmuxOption(ctx context.Context, path, option, value, marker string) error {
+func (l *execLauncher) appendTmuxOption(ctx context.Context, path, option, value, marker string) error {
 	current, queryErr := exec.CommandContext(ctx, path, l.tmuxArgs("show-options", "-gqv", option)...).CombinedOutput()
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -174,12 +170,12 @@ func (l launcher) appendTmuxOption(ctx context.Context, path, option, value, mar
 	return nil
 }
 
-func (l launcher) tmuxArgs(args ...string) []string {
+func (l *execLauncher) tmuxArgs(args ...string) []string {
 	base := []string{"-L", l.muxName, "-f", "/dev/null"}
 	return append(base, args...)
 }
 
-func (l launcher) ensureLocalScreen(ctx context.Context, path, config string, env []string, name string, spec SessionSpec, create bool) error {
+func (l *execLauncher) ensureLocalScreen(ctx context.Context, path, config string, env []string, name string, spec SessionSpec, create bool) error {
 	if localScreenExists(ctx, path, config, env, name) {
 		return nil
 	}
@@ -228,8 +224,8 @@ func localScreenExists(ctx context.Context, path, config string, env []string, n
 	return bytes.Contains(out, []byte("."+name+"\t")) || bytes.Contains(out, []byte("."+name+" "))
 }
 
-func (l launcher) terminateLocal(ctx context.Context, spec SessionSpec, resolved Persistence) error {
-	name := backendName(spec.ID)
+func (l *execLauncher) terminateLocal(ctx context.Context, spec SessionSpec, resolved Persistence) error {
+	name := BackendName(spec.ID)
 	var path string
 	var args []string
 	var env []string
@@ -245,8 +241,6 @@ func (l launcher) terminateLocal(ctx context.Context, spec SessionSpec, resolved
 		}
 		env = screenEnv
 		args = []string{"-c", config, "-S", name, "-X", "quit"}
-	case PersistenceNone:
-		return nil
 	default:
 		return fmt.Errorf("terminal: invalid local persistence %q", resolved)
 	}
@@ -321,11 +315,9 @@ func sessionAbsent(kind Persistence, output []byte) bool {
 	return common || strings.Contains(text, "no screen session found") || strings.Contains(text, "no screen session")
 }
 
-func (l launcher) screenRuntime(extra map[string]string) (string, []string, error) {
-	if l.screenMu != nil {
-		l.screenMu.Lock()
-		defer l.screenMu.Unlock()
-	}
+func (l *execLauncher) screenRuntime(extra map[string]string) (string, []string, error) {
+	l.screenMu.Lock()
+	defer l.screenMu.Unlock()
 	root := l.runtimeDir
 	if root == "" {
 		cache, err := os.UserCacheDir()
@@ -409,10 +401,6 @@ func terminalSize(spec SessionSpec) (cols, rows uint16) {
 
 func (b *localBackend) Read(p []byte) (int, error) { return b.pty.Read(p) }
 
-func (b *localBackend) Write(p []byte) (int, error) {
-	return b.WriteContext(context.Background(), p)
-}
-
 // WriteContext waits for its turn under the caller's context.
 func (b *localBackend) WriteContext(ctx context.Context, p []byte) (int, error) {
 	select {
@@ -455,10 +443,9 @@ func (b *localBackend) Close() error {
 	return b.closeErr
 }
 
+// Terminate ends a non-persistent PTY. killBackend never routes a tmux or
+// screen session here; those are killed through a separate control connection.
 func (b *localBackend) Terminate(ctx context.Context) error {
-	if b.kind != PersistenceNone {
-		return errors.New("terminal: persistent local backend must be terminated through its isolated launcher")
-	}
 	if b.cmd.Process != nil {
 		if err := b.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			return err

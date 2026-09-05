@@ -66,17 +66,17 @@ func TestRuntimeStateCallbacksPreserveProductMetadata(t *testing.T) {
 		t.Fatalf("ListSessions = %+v, %v", records, err)
 	}
 	record := records[0]
-	if !record.Active || record.Name != "Renamed by user" || record.ResolvedPersistence != terminal.PersistenceTmux {
+	if !record.Active || record.Spec.ID != created.ID || record.ResolvedPersistence != terminal.PersistenceTmux {
 		t.Fatalf("restored record = %+v", record)
 	}
-	if record.Generation != created.Generation {
-		t.Fatalf("restored generation = %d, want %d", record.Generation, created.Generation)
+	if record.Spec.Generation != created.Generation {
+		t.Fatalf("restored generation = %d, want %d", record.Spec.Generation, created.Generation)
 	}
-	if record.Env["WMUX_SESSION_ID"] != created.ID || record.Env["COLORTERM"] != "truecolor" {
-		t.Fatalf("restored record environment = %+v", record.Env)
+	if record.Spec.Env["WMUX_SESSION_ID"] != created.ID || record.Spec.Env["COLORTERM"] != "truecolor" {
+		t.Fatalf("restored record environment = %+v", record.Spec.Env)
 	}
-	if record.Shell != "/bin/sh" || len(record.Args) != 2 || record.Args[1] != "make watch" {
-		t.Fatalf("restored record command = %q %+v", record.Shell, record.Args)
+	if record.Spec.Shell != "/bin/sh" || len(record.Spec.Args) != 2 || record.Spec.Args[1] != "make watch" {
+		t.Fatalf("restored record command = %q %+v", record.Spec.Shell, record.Spec.Args)
 	}
 
 	repository.OnSessionState(terminal.SessionStatus{

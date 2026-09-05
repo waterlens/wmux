@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os/exec"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,7 +18,6 @@ import (
 
 type backend interface {
 	io.Reader
-	io.Writer
 	WriteContext(context.Context, []byte) (int, error)
 	Resize(cols, rows uint16) error
 	Wait(context.Context) error
@@ -27,19 +26,21 @@ type backend interface {
 	Reconnectable(error) bool
 }
 
-// backendLauncher creates or attaches a backend connection; create is set only
-// for a session's first launch.
-type backendLauncher interface {
+// launcher creates or attaches a backend connection; create is set only for a
+// session's first launch.
+type launcher interface {
 	start(ctx context.Context, spec SessionSpec, resolved Persistence, create bool) (backend, Persistence, error)
 	terminate(ctx context.Context, spec SessionSpec, resolved Persistence) error
 }
 
-type launcher struct {
+// execLauncher drives the local tmux/screen binaries and remote shell scripts.
+type execLauncher struct {
 	tmuxPath   string
 	screenPath string
 	muxName    string
 	runtimeDir string
-	screenMu   *sync.Mutex
+	// screenMu serializes writes to the shared isolated screen runtime directory.
+	screenMu sync.Mutex
 }
 
 const (
@@ -48,6 +49,11 @@ const (
 
 	// remoteMissingExitStatus is the attach script's exit status for a missing session.
 	remoteMissingExitStatus = 3
+
+	maxMuxNameLen     = 32
+	maxBackendNameLen = 40
+
+	backendReadBuffer = 32 << 10
 )
 
 // tmuxBaseEnvironment is tmux's documented update-environment default.
@@ -56,47 +62,45 @@ var tmuxBaseEnvironment = []string{
 	"SSH_CONNECTION", "WINDOWID", "XAUTHORITY",
 }
 
-func newLauncher(cfg Config) launcher {
-	name := unsafeSessionName.ReplaceAllString(cfg.MuxName, "-")
-	name = strings.Trim(name, "-")
-	if name == "" {
-		name = "wmux"
+func newExecLauncher(cfg Config) *execLauncher {
+	return &execLauncher{
+		tmuxPath:   cfg.tmuxPath,
+		screenPath: cfg.screenPath,
+		muxName:    SafeMuxName(cfg.MuxName, "wmux", maxMuxNameLen),
+		runtimeDir: cfg.MuxRuntimeDir,
 	}
-	if len(name) > 32 {
-		name = name[:32]
-	}
-	return launcher{tmuxPath: cfg.TmuxPath, screenPath: cfg.ScreenPath, muxName: name, runtimeDir: cfg.MuxRuntimeDir, screenMu: &sync.Mutex{}}
 }
 
-func (l launcher) start(ctx context.Context, spec SessionSpec, resolved Persistence, create bool) (backend, Persistence, error) {
+func (l *execLauncher) start(ctx context.Context, spec SessionSpec, resolved Persistence, create bool) (backend, Persistence, error) {
 	if spec.Host != nil {
 		return l.startSSH(ctx, spec, resolved, create)
 	}
 	return l.startLocal(ctx, spec, resolved, create)
 }
 
-func (l launcher) terminate(ctx context.Context, spec SessionSpec, resolved Persistence) error {
-	if resolved == "" || resolved == PersistenceAuto {
-		return nil
-	}
+// terminate kills the multiplexer session itself; killBackend decides whether a
+// session is persistent enough to need it.
+func (l *execLauncher) terminate(ctx context.Context, spec SessionSpec, resolved Persistence) error {
 	if spec.Host != nil {
 		return l.terminateSSH(ctx, spec, resolved)
 	}
 	return l.terminateLocal(ctx, spec, resolved)
 }
 
-func (l launcher) resolveLocal(requested Persistence) (Persistence, string, error) {
+// resolveLocal reports the persistence to use and the absolute path of its binary.
+func (l *execLauncher) resolveLocal(requested Persistence) (Persistence, string, error) {
 	if requested == "" {
 		requested = PersistenceAuto
 	}
 	find := func(explicit, fallback string) string {
-		if explicit != "" {
-			if _, err := exec.LookPath(explicit); err == nil {
-				return explicit
-			}
+		name := explicit
+		if name == "" {
+			name = fallback
+		}
+		path, err := exec.LookPath(name)
+		if err != nil {
 			return ""
 		}
-		path, _ := exec.LookPath(fallback)
 		return path
 	}
 
@@ -142,51 +146,39 @@ func isPermanentStartError(err error) bool {
 	return errors.As(err, &target)
 }
 
-// IsPermanentStartError reports whether a retry would repeat the same failure.
-func IsPermanentStartError(err error) bool { return isPermanentStartError(err) }
-
 func isTerminalEOF(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, syscall.EIO)
 }
 
 var unsafeSessionName = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
 
-func backendName(id string) string {
-	name := unsafeSessionName.ReplaceAllString(id, "-")
-	name = strings.Trim(name, "-")
+// SafeMuxName reduces value to the characters tmux and screen accept in a
+// socket or session name, falling back to fallback when nothing is left.
+func SafeMuxName(value, fallback string, limit int) string {
+	name := strings.Trim(unsafeSessionName.ReplaceAllString(value, "-"), "-")
 	if name == "" {
-		name = "session"
+		name = fallback
 	}
-	if len(name) > 40 {
-		name = name[:40]
+	if len(name) > limit {
+		name = name[:limit]
 	}
-	hash := sha256.Sum256([]byte(id))
-	return fmt.Sprintf("wmux-%s-%x", name, hash[:4])
+	return name
 }
 
 // BackendName returns the deterministic tmux/screen name used for a session.
 func BackendName(sessionID string) string {
-	return backendName(sessionID)
+	hash := sha256.Sum256([]byte(sessionID))
+	return fmt.Sprintf("wmux-%s-%x", SafeMuxName(sessionID, "session", maxBackendNameLen), hash[:4])
 }
 
+// reconnectDelay is minimum doubled per attempt, capped at maximum. NewManager
+// guarantees both bounds are positive.
 func reconnectDelay(minimum, maximum time.Duration, attempt int) time.Duration {
-	if minimum <= 0 {
-		minimum = 250 * time.Millisecond
-	}
-	if maximum <= 0 {
-		maximum = 10 * time.Second
-	}
-	if maximum < minimum {
-		maximum = minimum
-	}
 	delay := minimum
-	for i := 0; i < attempt && delay < maximum/2; i++ {
+	for i := 0; i < attempt && delay < maximum; i++ {
 		delay *= 2
 	}
-	if delay > maximum {
-		return maximum
-	}
-	return delay
+	return min(delay, maximum)
 }
 
 func shellQuote(value string) string {
@@ -223,14 +215,7 @@ func posixScript(script string) string {
 	return "exec /bin/sh -c " + shellQuote(script)
 }
 
-func sortedKeys(env map[string]string) []string {
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
+func sortedKeys(env map[string]string) []string { return slices.Sorted(maps.Keys(env)) }
 
 func sortedEnv(env map[string]string) []string {
 	keys := sortedKeys(env)

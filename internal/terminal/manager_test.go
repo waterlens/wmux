@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -17,47 +16,60 @@ import (
 	"github.com/waterlens/wmux/internal/transcript"
 )
 
-func testManager(t *testing.T, clientBuffer int) *Manager {
-	t.Helper()
-	directory, err := transcript.NewDirectory(transcript.DirectoryConfig{
-		Root:         t.TempDir(),
-		SegmentBytes: 4 << 10,
-		MaxBytes:     32 << 10,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager, err := NewManager(Config{
-		Transcripts:  directory,
-		ClientBuffer: clientBuffer,
-		ReconnectMin: 10 * time.Millisecond,
-		ReconnectMax: 50 * time.Millisecond,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = manager.Close() })
-	return manager
+// memorySessionRepository stands in for the application's session table.
+type memorySessionRepository struct {
+	mu      sync.Mutex
+	records map[string]SessionRecord
 }
 
-func directShell() string {
-	if runtime.GOOS == "windows" {
-		return "cmd.exe"
-	}
-	return "/bin/sh"
+func newMemorySessionRepository() *memorySessionRepository {
+	return &memorySessionRepository{records: make(map[string]SessionRecord)}
 }
+
+func (r *memorySessionRepository) put(record SessionRecord) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record.Spec = cloneSpec(record.Spec)
+	r.records[record.Spec.ID] = record
+}
+
+func (r *memorySessionRepository) ListSessions(context.Context) ([]SessionRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	records := make([]SessionRecord, 0, len(r.records))
+	for _, record := range r.records {
+		record.Spec = cloneSpec(record.Spec)
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+func (*memorySessionRepository) LoadHost(context.Context, string) (HostSpec, error) {
+	return HostSpec{}, errors.New("unexpected host load for local test session")
+}
+
+func (r *memorySessionRepository) OnSessionState(status SessionStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, exists := r.records[status.ID]
+	if !exists {
+		return
+	}
+	record.ResolvedPersistence = status.Persistence
+	record.Active = status.State != StateExited && status.State != StateTerminated
+	r.records[status.ID] = record
+}
+
+func (*memorySessionRepository) OnClientDropped(string, string, string) {}
 
 func TestDirectLocalPTYAndTranscriptReplay(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creack/pty direct test is Unix-only")
-	}
 	manager := testManager(t, 32)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := manager.Create(ctx, SessionSpec{
 		ID:          "direct-pty",
 		Persistence: PersistenceNone,
-		Shell:       directShell(),
+		Shell:       "/bin/sh",
 		Cols:        100,
 		Rows:        30,
 	})
@@ -69,8 +81,8 @@ func TestDirectLocalPTYAndTranscriptReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.Close()
-	waitRunning(t, ctx, manager, "direct-pty")
-	if _, err := first.Write([]byte("printf 'wmux-direct-ok\\n'\n")); err != nil {
+	waitState(ctx, t, manager, "direct-pty", StateRunning)
+	if _, err := first.WriteContext(ctx, []byte("printf 'wmux-direct-ok\\n'\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,13 +122,10 @@ func TestDirectLocalPTYAndTranscriptReplay(t *testing.T) {
 }
 
 func TestWriterLeaseAndTakeControl(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creack/pty direct test is Unix-only")
-	}
 	manager := testManager(t, 8)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "lease", Persistence: PersistenceNone, Shell: directShell()}); err != nil {
+	if _, err := manager.Create(ctx, SessionSpec{ID: "lease", Persistence: PersistenceNone, Shell: "/bin/sh"}); err != nil {
 		t.Fatal(err)
 	}
 	first, err := manager.Attach(ctx, "lease", "first", 0)
@@ -130,7 +139,7 @@ func TestWriterLeaseAndTakeControl(t *testing.T) {
 	if !first.IsWriter() || second.IsWriter() {
 		t.Fatalf("first writer = %v, second writer = %v", first.IsWriter(), second.IsWriter())
 	}
-	if _, err := second.Write([]byte("forbidden\n")); !errors.Is(err, ErrNotWriter) {
+	if _, err := second.WriteContext(ctx, []byte("forbidden\n")); !errors.Is(err, ErrNotWriter) {
 		t.Fatalf("second Write error = %v, want ErrNotWriter", err)
 	}
 	if err := second.TakeControl(); err != nil {
@@ -139,7 +148,7 @@ func TestWriterLeaseAndTakeControl(t *testing.T) {
 	if first.IsWriter() || !second.IsWriter() {
 		t.Fatalf("after takeover: first writer = %v, second writer = %v", first.IsWriter(), second.IsWriter())
 	}
-	if _, err := first.Write([]byte("forbidden\n")); !errors.Is(err, ErrNotWriter) {
+	if _, err := first.WriteContext(ctx, []byte("forbidden\n")); !errors.Is(err, ErrNotWriter) {
 		t.Fatalf("old writer Write error = %v, want ErrNotWriter", err)
 	}
 	if err := second.Close(); err != nil {
@@ -154,13 +163,10 @@ func TestWriterLeaseAndTakeControl(t *testing.T) {
 }
 
 func TestSlowClientIsDroppedWithoutBlockingPublisher(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creack/pty direct test is Unix-only")
-	}
 	manager := testManager(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "slow", Persistence: PersistenceNone, Shell: directShell()}); err != nil {
+	if _, err := manager.Create(ctx, SessionSpec{ID: "slow", Persistence: PersistenceNone, Shell: "/bin/sh"}); err != nil {
 		t.Fatal(err)
 	}
 	attachment, err := manager.Attach(ctx, "slow", "slow-browser", 0)
@@ -197,17 +203,14 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	if os.Getenv("WMUX_SCREEN_INTEGRATION") != "1" {
 		t.Skip("set WMUX_SCREEN_INTEGRATION=1 to exercise the host screen binary")
 	}
-	if runtime.GOOS == "windows" {
-		t.Skip("screen is Unix-only")
-	}
 	screenPath, err := exec.LookPath("screen")
 	if err != nil {
 		t.Skip("screen is not installed")
 	}
 	id := fmt.Sprintf("screen-close-%d-%d", os.Getpid(), time.Now().UnixNano())
-	name := backendName(id)
+	name := BackendName(id)
 	runtimeDir := t.TempDir()
-	screenConfig, screenEnv, err := newLauncher(Config{MuxRuntimeDir: runtimeDir}).screenRuntime(nil)
+	screenConfig, screenEnv, err := newExecLauncher(Config{MuxRuntimeDir: runtimeDir}).screenRuntime(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,8 +227,8 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	newManager := func() *Manager {
 		manager, err := NewManager(Config{
 			Transcripts:   directory,
-			TmuxPath:      filepath.Join(t.TempDir(), "missing-tmux"),
-			ScreenPath:    screenPath,
+			tmuxPath:      filepath.Join(t.TempDir(), "missing-tmux"),
+			screenPath:    screenPath,
 			MuxRuntimeDir: runtimeDir,
 		})
 		if err != nil {
@@ -244,20 +247,20 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitRunning(t, ctx, firstManager, id)
+	waitState(ctx, t, firstManager, id, StateRunning)
 	status, _ := firstManager.Status(id)
 	if status.Persistence != PersistenceScreen {
 		t.Fatalf("auto persistence = %q, want screen", status.Persistence)
 	}
-	if _, err := firstAttachment.Write([]byte("printf 'before-detach\\n'\n")); err != nil {
+	if _, err := firstAttachment.WriteContext(ctx, []byte("printf 'before-detach\\n'\n")); err != nil {
 		t.Fatal(err)
 	}
-	waitForOutput(t, ctx, firstAttachment.Frames, "before-detach")
+	waitForOutput(ctx, t, firstAttachment.Frames, "before-detach")
 	_ = firstAttachment.Close()
 	if err := firstManager.Close(); err != nil {
 		t.Fatalf("close manager: %v", err)
 	}
-	if !screenSessionExists(screenPath, screenConfig, screenEnv, name) {
+	if !localScreenExists(ctx, screenPath, screenConfig, screenEnv, name) {
 		t.Fatal("screen session did not survive Manager.Close")
 	}
 
@@ -272,7 +275,7 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitRunning(t, secondCtx, secondManager, id)
+	waitState(secondCtx, t, secondManager, id, StateRunning)
 	if !secondAttachment.IsWriter() {
 		t.Fatal("reattached browser did not receive write lease")
 	}
@@ -281,66 +284,14 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	if err := secondManager.Terminate(terminateCtx, id); err != nil {
 		t.Fatal(err)
 	}
-	if screenSessionExists(screenPath, screenConfig, screenEnv, name) {
-		t.Fatalf("screen session survived explicit Terminate: %s", screenSessionListing(screenPath, screenConfig, screenEnv, name))
+	if localScreenExists(terminateCtx, screenPath, screenConfig, screenEnv, name) {
+		t.Fatal("screen session survived explicit Terminate")
 	}
 }
-
-// memorySessionRepository stands in for the application's session table.
-type memorySessionRepository struct {
-	mu      sync.Mutex
-	records map[string]SessionRecord
-}
-
-func newMemorySessionRepository() *memorySessionRepository {
-	return &memorySessionRepository{records: make(map[string]SessionRecord)}
-}
-
-func (r *memorySessionRepository) put(record SessionRecord) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	record.Args = append([]string(nil), record.Args...)
-	record.Env = cloneMap(record.Env)
-	r.records[record.ID] = record
-}
-
-func (r *memorySessionRepository) ListSessions(context.Context) ([]SessionRecord, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	records := make([]SessionRecord, 0, len(r.records))
-	for _, record := range r.records {
-		record.Args = append([]string(nil), record.Args...)
-		record.Env = cloneMap(record.Env)
-		records = append(records, record)
-	}
-	return records, nil
-}
-
-func (*memorySessionRepository) LoadHost(context.Context, string) (HostSpec, error) {
-	return HostSpec{}, errors.New("unexpected host load for local test session")
-}
-
-func (r *memorySessionRepository) OnSessionState(status SessionStatus) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	record, exists := r.records[status.ID]
-	if !exists {
-		return
-	}
-	record.ResolvedPersistence = status.Persistence
-	record.Active = status.State != StateExited && status.State != StateTerminated
-	r.records[status.ID] = record
-}
-
-func (*memorySessionRepository) OnWriterChanged(string, string)         {}
-func (*memorySessionRepository) OnClientDropped(string, string, string) {}
 
 func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	if os.Getenv("WMUX_TMUX_INTEGRATION") != "1" {
 		t.Skip("set WMUX_TMUX_INTEGRATION=1 to exercise the host tmux binary")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux is Unix-only")
 	}
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
@@ -348,14 +299,14 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	}
 
 	id := fmt.Sprintf("tmux-restore-%d-%d", os.Getpid(), time.Now().UnixNano())
-	name := backendName(id)
+	name := BackendName(id)
 	tmuxName := fmt.Sprintf("wmux-test-%d-%d", os.Getpid(), time.Now().UnixNano())
 	repository := newMemorySessionRepository()
 	directory, err := transcript.NewDirectory(transcript.DirectoryConfig{Root: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cleanupLauncher := newLauncher(Config{TmuxPath: tmuxPath, MuxName: tmuxName})
+	cleanupLauncher := newExecLauncher(Config{tmuxPath: tmuxPath, MuxName: tmuxName})
 	defer func() {
 		cmd := exec.Command(tmuxPath, cleanupLauncher.tmuxArgs("kill-session", "-t", "="+name)...)
 		_ = cmd.Run()
@@ -366,8 +317,8 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 			Repository:  repository,
 			Callbacks:   repository,
 			Transcripts: directory,
-			TmuxPath:    tmuxPath,
-			ScreenPath:  filepath.Join(t.TempDir(), "missing-screen"),
+			tmuxPath:    tmuxPath,
+			screenPath:  filepath.Join(t.TempDir(), "missing-screen"),
 			MuxName:     tmuxName,
 		})
 		if err != nil {
@@ -380,12 +331,9 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	defer cancel()
 	firstManager := newManager()
 	spec := SessionSpec{
-		ID: id, Persistence: PersistenceAuto, Shell: "/bin/sh", Args: []string{"-i"}, Cols: 100, Rows: 30,
+		ID: id, Persistence: PersistenceAuto, Shell: "/bin/sh", Args: []string{"-i"}, Cols: 100, Rows: 30, Generation: 1,
 	}
-	repository.put(SessionRecord{
-		ID: id, Persistence: spec.Persistence, Shell: spec.Shell, Args: spec.Args,
-		Cols: spec.Cols, Rows: spec.Rows, Active: true, Generation: 1,
-	})
+	repository.put(SessionRecord{Spec: spec, Active: true})
 	if _, err := firstManager.Create(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
@@ -393,15 +341,15 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitRunning(t, ctx, firstManager, id)
+	waitState(ctx, t, firstManager, id, StateRunning)
 	if status, err := firstManager.Status(id); err != nil || status.Persistence != PersistenceTmux {
 		t.Fatalf("first manager status = %+v, %v; want tmux", status, err)
 	}
 	assertIsolatedTmuxInteractionOptions(t, tmuxPath, cleanupLauncher)
-	if _, err := firstAttachment.Write([]byte("printf 'before-tmux-restore\\n'\n")); err != nil {
+	if _, err := firstAttachment.WriteContext(ctx, []byte("printf 'before-tmux-restore\\n'\n")); err != nil {
 		t.Fatal(err)
 	}
-	waitForOutput(t, ctx, firstAttachment.Frames, "before-tmux-restore")
+	waitForOutput(ctx, t, firstAttachment.Frames, "before-tmux-restore")
 	_ = firstAttachment.Close()
 	if err := firstManager.Close(); err != nil {
 		t.Fatalf("close first manager: %v", err)
@@ -415,7 +363,7 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	if err := secondManager.Restore(ctx); err != nil {
 		t.Fatalf("restore second manager: %v", err)
 	}
-	waitRunning(t, ctx, secondManager, id)
+	waitState(ctx, t, secondManager, id, StateRunning)
 	secondAttachment, err := secondManager.Attach(ctx, id, "second-browser", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -423,10 +371,10 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	if !secondAttachment.IsWriter() {
 		t.Fatal("restored attachment did not receive the write lease")
 	}
-	if _, err := secondAttachment.Write([]byte("printf 'after-tmux-restore\\n'\n")); err != nil {
+	if _, err := secondAttachment.WriteContext(ctx, []byte("printf 'after-tmux-restore\\n'\n")); err != nil {
 		t.Fatal(err)
 	}
-	waitForOutput(t, ctx, secondAttachment.Frames, "after-tmux-restore")
+	waitForOutput(ctx, t, secondAttachment.Frames, "after-tmux-restore")
 	if err := secondManager.Terminate(ctx, id); err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +383,7 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	}
 }
 
-func assertIsolatedTmuxInteractionOptions(t *testing.T, path string, l launcher) {
+func assertIsolatedTmuxInteractionOptions(t *testing.T, path string, l *execLauncher) {
 	t.Helper()
 	global := func(option string) (string, error) {
 		output, err := exec.Command(path, l.tmuxArgs("show-options", "-gv", option)...).CombinedOutput()
@@ -469,53 +417,5 @@ func assertIsolatedTmuxInteractionOptions(t *testing.T, path string, l launcher)
 	output, err := exec.Command(path, l.tmuxArgs("show-options", "-Apgv", "allow-passthrough")...).CombinedOutput()
 	if err == nil && strings.TrimSpace(string(output)) != "off" {
 		t.Fatalf("isolated tmux allow-passthrough = %q, want off", output)
-	}
-}
-
-func screenSessionExists(path, config string, env []string, name string) bool {
-	output := screenSessionListing(path, config, env, name)
-	return strings.Contains(output, "."+name+"\t") || strings.Contains(output, "."+name+" ")
-}
-
-func screenSessionListing(path, config string, env []string, name string) string {
-	cmd := exec.Command(path, "-c", config, "-ls", name)
-	cmd.Env = env
-	output, _ := cmd.CombinedOutput()
-	return string(output)
-}
-
-func waitForOutput(t *testing.T, ctx context.Context, frames <-chan OutputFrame, needle string) {
-	t.Helper()
-	var output []byte
-	for !bytes.Contains(output, []byte(needle)) {
-		select {
-		case frame, ok := <-frames:
-			if !ok {
-				t.Fatalf("frames closed while waiting for %q; output %q", needle, output)
-			}
-			output = append(output, frame.Data...)
-		case <-ctx.Done():
-			t.Fatalf("waiting for %q: %v; output %q", needle, ctx.Err(), output)
-		}
-	}
-}
-
-func waitRunning(t *testing.T, ctx context.Context, manager *Manager, sessionID string) {
-	t.Helper()
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		status, err := manager.Status(sessionID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if status.State == StateRunning {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("session did not become running: %+v", status)
-		case <-ticker.C:
-		}
 	}
 }

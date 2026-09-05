@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -55,8 +54,8 @@ func TestLocalBackendReconnectDecisionTreatsPTYClosureAsExit(t *testing.T) {
 
 func TestLocalMuxConfigurationIsIsolated(t *testing.T) {
 	runtimeDir := t.TempDir()
-	l := newLauncher(Config{MuxName: "my wmux!", MuxRuntimeDir: runtimeDir})
-	name := backendName("session/id")
+	l := newExecLauncher(Config{MuxName: "my wmux!", MuxRuntimeDir: runtimeDir})
+	name := BackendName("session/id")
 	tmuxArgs := l.tmuxArgs("kill-session", "-t", "="+name)
 	wantArgs := []string{"-L", "my-wmux", "-f", "/dev/null", "kill-session", "-t", "=" + name}
 	if !slices.Equal(tmuxArgs, wantArgs) {
@@ -96,9 +95,6 @@ func TestLocalMuxConfigurationIsIsolated(t *testing.T) {
 }
 
 func TestConfigureLocalTmuxEnablesMouseAndSafelyProbesHyperlinks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("capture helper is a POSIX shell script")
-	}
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "commands")
 	tool := filepath.Join(dir, "tmux")
@@ -107,7 +103,7 @@ func TestConfigureLocalTmuxEnablesMouseAndSafelyProbesHyperlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("WMUX_CAPTURE_PATH", capture)
-	l := newLauncher(Config{MuxName: "isolated"})
+	l := newExecLauncher(Config{MuxName: "isolated"})
 	if err := l.configureLocalTmux(context.Background(), tool); err != nil {
 		t.Fatalf("optional hyperlink support broke an older tmux: %v", err)
 	}
@@ -157,9 +153,6 @@ func TestExpandLocalHome(t *testing.T) {
 }
 
 func TestTerminateLocalTargetsOnlyNamedIsolatedSession(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("capture helper is a POSIX shell script")
-	}
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "args")
 	environmentCapture := filepath.Join(dir, "screen-dir")
@@ -172,15 +165,15 @@ func TestTerminateLocalTargetsOnlyNamedIsolatedSession(t *testing.T) {
 	t.Setenv("WMUX_ENV_CAPTURE_PATH", environmentCapture)
 
 	spec := SessionSpec{ID: "one/session"}
-	name := backendName(spec.ID)
-	tmuxLauncher := newLauncher(Config{TmuxPath: tool, MuxName: "isolated"})
+	name := BackendName(spec.ID)
+	tmuxLauncher := newExecLauncher(Config{tmuxPath: tool, MuxName: "isolated"})
 	if err := tmuxLauncher.terminateLocal(context.Background(), spec, PersistenceTmux); err != nil {
 		t.Fatal(err)
 	}
 	assertCapturedArgs(t, capture, []string{"-L", "isolated", "-f", "/dev/null", "kill-session", "-t", "=" + name})
 
 	screenRoot := filepath.Join(dir, "runtime")
-	screenLauncher := newLauncher(Config{ScreenPath: tool, MuxName: "isolated", MuxRuntimeDir: screenRoot})
+	screenLauncher := newExecLauncher(Config{screenPath: tool, MuxName: "isolated", MuxRuntimeDir: screenRoot})
 	if err := screenLauncher.terminateLocal(context.Background(), spec, PersistenceScreen); err != nil {
 		t.Fatal(err)
 	}
@@ -212,15 +205,12 @@ func TestLocalTmuxGivesEachSessionItsOwnEnvironment(t *testing.T) {
 	if os.Getenv("WMUX_TMUX_INTEGRATION") != "1" {
 		t.Skip("set WMUX_TMUX_INTEGRATION=1 to exercise the host tmux binary")
 	}
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux is Unix-only")
-	}
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("tmux is not installed")
 	}
 	namespace := fmt.Sprintf("wmux-env-%d-%d", os.Getpid(), time.Now().UnixNano())
-	l := newLauncher(Config{TmuxPath: tmuxPath, MuxName: namespace})
+	l := newExecLauncher(Config{tmuxPath: tmuxPath, MuxName: namespace})
 	t.Cleanup(func() {
 		_ = exec.Command(tmuxPath, l.tmuxArgs("kill-server")...).Run()
 	})
@@ -251,7 +241,7 @@ func TestLocalTmuxGivesEachSessionItsOwnEnvironment(t *testing.T) {
 	}
 
 	for index, id := range ids {
-		waitForFileContent(t, ctx, files[index], id)
+		waitForFileContent(ctx, t, files[index], id)
 	}
 
 	overrides, err := exec.CommandContext(ctx, tmuxPath, l.tmuxArgs("show-options", "-gqv", "terminal-overrides")...).CombinedOutput()
@@ -268,15 +258,12 @@ func TestLocalTmuxAttachOnlyReportsMissingSession(t *testing.T) {
 	if os.Getenv("WMUX_TMUX_INTEGRATION") != "1" {
 		t.Skip("set WMUX_TMUX_INTEGRATION=1 to exercise the host tmux binary")
 	}
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux is Unix-only")
-	}
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("tmux is not installed")
 	}
 	namespace := fmt.Sprintf("wmux-missing-%d-%d", os.Getpid(), time.Now().UnixNano())
-	l := newLauncher(Config{TmuxPath: tmuxPath, MuxName: namespace})
+	l := newExecLauncher(Config{tmuxPath: tmuxPath, MuxName: namespace})
 	t.Cleanup(func() {
 		_ = exec.Command(tmuxPath, l.tmuxArgs("kill-server")...).Run()
 	})
@@ -285,22 +272,5 @@ func TestLocalTmuxAttachOnlyReportsMissingSession(t *testing.T) {
 	spec := SessionSpec{ID: namespace + "-gone", Shell: "/bin/sh", Args: []string{"-i"}}
 	if _, _, err := l.startLocal(ctx, spec, PersistenceTmux, false); !errors.Is(err, ErrBackendMissing) {
 		t.Fatalf("attach-only launch of a missing session = %v, want ErrBackendMissing", err)
-	}
-}
-
-func waitForFileContent(t *testing.T, ctx context.Context, path, want string) {
-	t.Helper()
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		contents, err := os.ReadFile(path)
-		if err == nil && string(contents) == want {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("file %s = %q, %v; want %q", path, contents, err, want)
-		case <-ticker.C:
-		}
 	}
 }

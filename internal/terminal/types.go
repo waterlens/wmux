@@ -91,7 +91,6 @@ type HostSpec struct {
 
 type SessionSpec struct {
 	ID          string
-	Name        string
 	Host        *HostSpec // nil means a PTY on the wmux host.
 	Persistence Persistence
 
@@ -108,19 +107,11 @@ type SessionSpec struct {
 
 // SessionRecord is safe to persist: it references a host but holds no Credential.
 type SessionRecord struct {
-	ID                  string
-	Name                string
+	// Spec.Host is always nil; HostID names the host to load instead.
+	Spec                SessionSpec
 	HostID              string
-	Persistence         Persistence
 	ResolvedPersistence Persistence
-	Shell               string
-	Args                []string
-	Cwd                 string
-	Env                 map[string]string
-	Cols                uint16
-	Rows                uint16
 	Active              bool
-	Generation          int
 }
 
 // Repository is implemented by the application's storage layer.
@@ -130,33 +121,29 @@ type Repository interface {
 }
 
 type SessionStatus struct {
-	ID           string
-	Generation   int
-	State        SessionState
-	Persistence  Persistence
-	WriterID     string
-	Clients      int
-	LastError    string
-	LastSequence uint64
+	ID          string
+	Generation  int
+	State       SessionState
+	Persistence Persistence
+	WriterID    string
+	Clients     int
+	LastError   string
 }
 
 // Callbacks run after runtime locks are released and should return promptly.
 type Callbacks interface {
 	OnSessionState(status SessionStatus)
-	OnWriterChanged(sessionID, clientID string)
 	OnClientDropped(sessionID, clientID, reason string)
 }
 
-type NopCallbacks struct{}
+type nopCallbacks struct{}
 
-func (NopCallbacks) OnSessionState(SessionStatus)           {}
-func (NopCallbacks) OnWriterChanged(string, string)         {}
-func (NopCallbacks) OnClientDropped(string, string, string) {}
+func (nopCallbacks) OnSessionState(SessionStatus)           {}
+func (nopCallbacks) OnClientDropped(string, string, string) {}
 
 type OutputFrame struct {
-	Sequence uint64    `json:"sequence"`
-	Time     time.Time `json:"time"`
-	Data     []byte    `json:"data"`
+	Sequence uint64
+	Data     []byte
 }
 
 type Config struct {
@@ -170,10 +157,12 @@ type Config struct {
 	ReconnectMax    time.Duration
 	ShutdownTimeout time.Duration
 
-	TmuxPath      string
-	ScreenPath    string
 	MuxName       string
 	MuxRuntimeDir string
 
-	launcher backendLauncher
+	// tmuxPath, screenPath and launcher are test injection points; production
+	// resolves the binaries from PATH and builds its own launcher.
+	tmuxPath   string
+	screenPath string
+	launcher   launcher
 }

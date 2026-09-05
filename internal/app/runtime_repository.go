@@ -36,27 +36,34 @@ func (r *RuntimeRepository) ListSessions(ctx context.Context) ([]terminal.Sessio
 	result := make([]terminal.SessionRecord, 0, len(sessions))
 	for _, session := range sessions {
 		record := terminal.SessionRecord{
-			ID:                  session.ID,
-			Name:                session.Name,
-			Persistence:         terminal.Persistence(session.Persistence),
+			Spec:                launchSpec(session),
 			ResolvedPersistence: terminal.Persistence(session.Backend),
-			Cwd:                 session.Cwd,
-			Env:                 sessionEnvironment(session.ID),
-			Cols:                uint16(session.Cols),
-			Rows:                uint16(session.Rows),
 			Active:              session.Status == store.SessionStatusConnecting || session.Status == store.SessionStatusRunning || session.Status == store.SessionStatusReconnecting || session.Status == store.SessionStatusDetached,
-			Generation:          session.Generation,
 		}
 		if session.HostID != nil {
 			record.HostID = *session.HostID
 		}
-		if session.Command != "" {
-			record.Shell = "/bin/sh"
-			record.Args = []string{"-lc", session.Command}
-		}
 		result = append(result, record)
 	}
 	return result, nil
+}
+
+// launchSpec maps a persisted session row to a host-free launch spec.
+func launchSpec(session store.Session) terminal.SessionSpec {
+	spec := terminal.SessionSpec{
+		ID:          session.ID,
+		Persistence: terminal.Persistence(session.Persistence),
+		Generation:  session.Generation,
+		Cwd:         session.Cwd,
+		Env:         sessionEnvironment(session.ID),
+		Cols:        uint16(session.Cols),
+		Rows:        uint16(session.Rows),
+	}
+	if session.Command != "" {
+		spec.Shell = "/bin/sh"
+		spec.Args = []string{"-lc", session.Command}
+	}
+	return spec
 }
 
 // LoadHost decrypts credentials only when terminal needs an SSH connection.
@@ -123,9 +130,6 @@ func (r *RuntimeRepository) OnSessionState(status terminal.SessionStatus) {
 	r.logStateChange(status)
 }
 
-// OnWriterChanged does nothing: writer leases are not persisted.
-func (r *RuntimeRepository) OnWriterChanged(string, string) {}
-
 // OnClientDropped logs slow-consumer diagnostics without terminal output.
 func (r *RuntimeRepository) OnClientDropped(sessionID, clientID, reason string) {
 	if r.Logger != nil {
@@ -135,20 +139,7 @@ func (r *RuntimeRepository) OnClientDropped(sessionID, clientID, reason string) 
 
 // SessionSpec builds a launch spec from a persisted product session.
 func (r *RuntimeRepository) SessionSpec(ctx context.Context, session store.Session) (terminal.SessionSpec, error) {
-	spec := terminal.SessionSpec{
-		ID:          session.ID,
-		Name:        session.Name,
-		Persistence: terminal.Persistence(session.Persistence),
-		Generation:  session.Generation,
-		Cwd:         session.Cwd,
-		Cols:        uint16(session.Cols),
-		Rows:        uint16(session.Rows),
-		Env:         sessionEnvironment(session.ID),
-	}
-	if session.Command != "" {
-		spec.Shell = "/bin/sh"
-		spec.Args = []string{"-lc", session.Command}
-	}
+	spec := launchSpec(session)
 	if session.HostID != nil {
 		host, err := r.LoadHost(ctx, *session.HostID)
 		if err != nil {

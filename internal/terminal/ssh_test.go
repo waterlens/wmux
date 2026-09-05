@@ -55,36 +55,36 @@ func TestPrivateKeyCredentialWithPassphrase(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded := pem.EncodeToMemory(block)
-	methods, closers, err := sshAuth(PrivateKeyCredential{PEM: encoded, Passphrase: []byte("correct horse")})
+	methods, closers, err := sshAuthContext(t.Context(), PrivateKeyCredential{PEM: encoded, Passphrase: []byte("correct horse")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(methods) != 1 || len(closers) != 0 {
 		t.Fatalf("auth methods = %d, closers = %d", len(methods), len(closers))
 	}
-	if _, _, err := sshAuth(&PrivateKeyCredential{PEM: encoded, Passphrase: []byte("wrong")}); err == nil {
+	if _, _, err := sshAuthContext(t.Context(), PrivateKeyCredential{PEM: encoded, Passphrase: []byte("wrong")}); err == nil {
 		t.Fatal("wrong private-key passphrase was accepted")
 	}
 }
 
 func TestPasswordAndAgentCredentialsValidate(t *testing.T) {
-	methods, closers, err := sshAuth(PasswordCredential{Password: "secret"})
+	methods, closers, err := sshAuthContext(t.Context(), PasswordCredential{Password: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(methods) != 1 || len(closers) != 0 {
 		t.Fatalf("auth methods = %d, closers = %d", len(methods), len(closers))
 	}
-	if _, _, err := sshAuth(PasswordCredential{}); err == nil {
+	if _, _, err := sshAuthContext(t.Context(), PasswordCredential{}); err == nil {
 		t.Fatal("empty password was accepted")
 	}
-	if _, _, err := sshAuth(AgentCredential{Socket: t.TempDir() + "/missing-agent.sock"}); err == nil {
+	if _, _, err := sshAuthContext(t.Context(), AgentCredential{Socket: t.TempDir() + "/missing-agent.sock"}); err == nil {
 		t.Fatal("missing SSH agent socket was accepted")
 	}
 }
 
 func TestRemoteAttachCommandQuotesValues(t *testing.T) {
-	command := newLauncher(Config{}).remoteAttachCommand(SessionSpec{
+	command := newExecLauncher(Config{}).remoteAttachCommand(SessionSpec{
 		Cwd:   "/tmp/a'b",
 		Shell: "/bin/zsh",
 		Args:  []string{"-l", "argument with spaces"},
@@ -107,7 +107,7 @@ func TestRemoteAttachCommandQuotesValues(t *testing.T) {
 }
 
 func TestRemoteAttachCommandsUseIsolatedMuxAndExpandHome(t *testing.T) {
-	l := newLauncher(Config{MuxName: "private wmux"})
+	l := newExecLauncher(Config{MuxName: "private wmux"})
 	tmux := l.remoteAttachCommand(SessionSpec{Cwd: "~/projects/demo"}, PersistenceTmux, "wmux-demo", true)
 	for _, wanted := range []string{
 		"tmux -L 'private-wmux' -f /dev/null",
@@ -162,7 +162,7 @@ func TestRemoteAttachCommandsUseIsolatedMuxAndExpandHome(t *testing.T) {
 }
 
 func TestRemoteTerminateCommandsTargetOnlyOneIsolatedSession(t *testing.T) {
-	l := newLauncher(Config{MuxName: "private wmux"})
+	l := newExecLauncher(Config{MuxName: "private wmux"})
 	name := "wmux-session"
 	tmux := l.remoteTerminateCommand(PersistenceTmux, name)
 	if tmux != "tmux -L 'private-wmux' -f /dev/null kill-session -t '=wmux-session'" {

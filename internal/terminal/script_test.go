@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -29,9 +28,6 @@ exit 0
 // sshd runs these command strings through the account's login shell, which is
 // not always POSIX-compatible.
 func TestRemoteScriptsRunUnderPOSIXAndFishLoginShells(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the remote scripts are POSIX shell")
-	}
 	shells := map[string]string{}
 	posix, err := exec.LookPath("sh")
 	if err != nil {
@@ -44,8 +40,8 @@ func TestRemoteScriptsRunUnderPOSIXAndFishLoginShells(t *testing.T) {
 		t.Log("fish is not installed; only the POSIX login shell is exercised")
 	}
 
-	l := newLauncher(Config{MuxName: "wmux script test"})
-	name := backendName("ses_script")
+	l := newExecLauncher(Config{MuxName: "wmux script test"})
+	name := BackendName("ses_script")
 	spec := SessionSpec{
 		ID:    "ses_script",
 		Cwd:   "~/work/a'b",
