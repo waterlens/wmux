@@ -30,6 +30,7 @@ import {
   type LiveStatus,
   type PageDirection,
 } from '../terminalProtocol';
+import { dispatchWheelTicks, TMUX_WHEEL_LINES, TouchScrollTracker } from '../touchScroll';
 import type { Notify, Session, TerminalPreferences } from '../types';
 import { Button } from './UI';
 
@@ -99,6 +100,13 @@ function alignScreen(terminal: Terminal, mount: HTMLElement, fixedWidth: boolean
   const slack = fixedWidth ? available - screen.offsetWidth : 0;
   screen.style.marginLeft = slack > 1 ? `${Math.floor(slack / 2)}px` : '';
   mount.classList.toggle('is-overflowing', fixedWidth && slack < -1);
+}
+
+/** Height of one terminal row in CSS pixels, from the rendered screen when available. */
+function rowHeight(terminal: Terminal): number {
+  const screen = terminal.element?.querySelector<HTMLElement>('.xterm-screen');
+  if (screen && screen.clientHeight > 0 && terminal.rows > 0) return screen.clientHeight / terminal.rows;
+  return (terminal.options.fontSize ?? 14) * (terminal.options.lineHeight ?? 1);
 }
 
 async function attachWebglRenderer(terminal: Terminal, isCancelled: () => boolean): Promise<void> {
@@ -304,6 +312,77 @@ export function TerminalView({
       terminalRef.current?.focus();
     }, ACTIVE_TAB_SETTLE_MS);
   }, [active, fit]);
+
+  // Touch scrolling for programs that track the mouse (tmux, vim, less): xterm
+  // only scrolls its own viewport on touch, so vertical drags become wheel
+  // reports instead, one tick per TMUX_WHEEL_LINES rows, with a short fling.
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount || !terminalReady) return undefined;
+    let tracker: TouchScrollTracker | null = null;
+    let flingFrame = 0;
+    let flingClock = 0;
+    let pointer = { x: 0, y: 0 };
+
+    const stopFling = () => {
+      if (flingFrame) cancelAnimationFrame(flingFrame);
+      flingFrame = 0;
+    };
+    const emit = (ticks: number) => {
+      const element = terminalRef.current?.element;
+      if (element && ticks) dispatchWheelTicks(element, ticks, pointer.x, pointer.y);
+    };
+    const onTouchStart = (event: TouchEvent) => {
+      stopFling();
+      tracker?.stop();
+      tracker = null;
+      const terminal = terminalRef.current;
+      const touch = event.touches[0];
+      // A single finger on a mouse-tracking program; otherwise xterm's own scrolling applies.
+      if (!terminal || !touch || event.touches.length !== 1 || terminal.modes.mouseTrackingMode === 'none') return;
+      pointer = { x: touch.clientX, y: touch.clientY };
+      tracker = new TouchScrollTracker(rowHeight(terminal) * TMUX_WHEEL_LINES);
+      tracker.begin(touch.clientX, touch.clientY, performance.now());
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (!tracker || !touch || event.touches.length !== 1) return;
+      const ticks = tracker.move(touch.clientX, touch.clientY, performance.now());
+      if (ticks === null) return;
+      if (event.cancelable) event.preventDefault();
+      pointer = { x: touch.clientX, y: touch.clientY };
+      emit(ticks);
+    };
+    const onTouchEnd = () => {
+      const finished = tracker;
+      tracker = null;
+      if (!finished) return;
+      finished.release();
+      if (!finished.isCoasting) return;
+      flingClock = performance.now();
+      const step = (now: number) => {
+        emit(finished.coast(now - flingClock));
+        flingClock = now;
+        flingFrame = finished.isCoasting ? requestAnimationFrame(step) : 0;
+      };
+      flingFrame = requestAnimationFrame(step);
+    };
+    const onTouchCancel = () => {
+      tracker = null;
+    };
+
+    mount.addEventListener('touchstart', onTouchStart, { passive: true });
+    mount.addEventListener('touchmove', onTouchMove, { passive: false });
+    mount.addEventListener('touchend', onTouchEnd);
+    mount.addEventListener('touchcancel', onTouchCancel);
+    return () => {
+      stopFling();
+      mount.removeEventListener('touchstart', onTouchStart);
+      mount.removeEventListener('touchmove', onTouchMove);
+      mount.removeEventListener('touchend', onTouchEnd);
+      mount.removeEventListener('touchcancel', onTouchCancel);
+    };
+  }, [terminalReady]);
 
   useEffect(() => {
     if (!terminalReady) return undefined;

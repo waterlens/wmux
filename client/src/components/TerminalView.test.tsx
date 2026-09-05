@@ -18,7 +18,10 @@ const xtermHarness = vi.hoisted(() => {
     options: Record<string, unknown>;
     cols = 80;
     rows = 24;
-    modes = { applicationCursorKeysMode: false };
+    modes = {
+      applicationCursorKeysMode: false,
+      mouseTrackingMode: 'none' as 'none' | 'x10' | 'vt200' | 'drag' | 'any',
+    };
     unicode = { activeVersion: '6' };
     dataHandler: DataHandler = () => undefined;
     binaryHandler: DataHandler = () => undefined;
@@ -526,5 +529,55 @@ describe('TerminalView width preferences', () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe('TerminalView touch scrolling', () => {
+  function touchEvent(type: string, clientY: number): Event {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    const touches = type === 'touchend' ? [] : [{ identifier: 1, clientX: 120, clientY }];
+    Object.defineProperty(event, 'touches', { value: touches });
+    Object.defineProperty(event, 'changedTouches', { value: [{ identifier: 1, clientX: 120, clientY }] });
+    return event;
+  }
+
+  async function renderWithTracking(mode: 'none' | 'drag') {
+    const { container } = renderTerminal();
+    await finishFontLoading();
+    const terminal = xtermHarness.FakeTerminal.instances[0]!;
+    terminal.modes.mouseTrackingMode = mode;
+    terminal.element = document.createElement('div');
+    const wheels: WheelEvent[] = [];
+    terminal.element.addEventListener('wheel', (event) => wheels.push(event));
+    const mount = container.querySelector<HTMLElement>('.terminal-canvas')!;
+    return { mount, wheels };
+  }
+
+  it('turns a vertical drag into wheel-up reports while a program tracks the mouse', async () => {
+    const { mount, wheels } = await renderWithTracking('drag');
+    // 14px font × 1.18 line height ≈ 16.5px rows; one tick per five rows ≈ 83px.
+    mount.dispatchEvent(touchEvent('touchstart', 100));
+    const settle = touchEvent('touchmove', 110);
+    mount.dispatchEvent(settle);
+    const drag = touchEvent('touchmove', 300);
+    mount.dispatchEvent(drag);
+    expect(drag.defaultPrevented).toBe(true);
+    expect(wheels.length).toBe(2);
+    expect(wheels.every((event) => event.deltaY < 0)).toBe(true);
+    expect(wheels[0]?.clientY).toBe(300);
+
+    const back = touchEvent('touchmove', 100);
+    mount.dispatchEvent(back);
+    expect(wheels.length).toBe(4);
+    expect(wheels.slice(2).every((event) => event.deltaY > 0)).toBe(true);
+  });
+
+  it('leaves touch scrolling to xterm when no program tracks the mouse', async () => {
+    const { mount, wheels } = await renderWithTracking('none');
+    mount.dispatchEvent(touchEvent('touchstart', 100));
+    const drag = touchEvent('touchmove', 400);
+    mount.dispatchEvent(drag);
+    expect(drag.defaultPrevented).toBe(false);
+    expect(wheels).toHaveLength(0);
   });
 });

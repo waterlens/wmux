@@ -355,3 +355,55 @@ test('a fixed column count keeps its width on the phone by shrinking the font', 
   await page.setViewportSize(desktopViewport);
   await terminateSession(page, '固定宽度');
 });
+
+test.describe('touch input', () => {
+  test.use({ hasTouch: true });
+
+  test('a touch drag scrolls tmux history through mouse reports', async ({ page }) => {
+    await signIn(page);
+    const input = await startSession(page, '触摸滚动');
+    const rows = page.locator('.terminal-view.is-active .xterm-rows > div');
+    await input.focus();
+    await page.keyboard.type(pythonCommand(`print('\\n'.join('LINE %03d' % n for n in range(1, 401)))`), {
+      delay: 1,
+    });
+    await page.keyboard.press('Enter');
+    await expect(rows.filter({ hasText: 'LINE 400' })).toBeVisible();
+    const firstLine = async () => {
+      const texts = await rows.allInnerTexts();
+      const match = texts.map((text) => /LINE (\d{3})/.exec(text)).find(Boolean);
+      return match ? Number(match[1]) : Number.NaN;
+    };
+    const before = await firstLine();
+    expect(before).toBeGreaterThan(300);
+
+    // Drag a finger downwards over the terminal: older lines should scroll into view.
+    await page.locator('.terminal-view.is-active .terminal-canvas').evaluate(async (canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const startY = rect.top + rect.height / 3;
+      const fire = (type: string, clientY: number) => {
+        const touch = new Touch({ identifier: 1, target: canvas, clientX: x, clientY, pageX: x, pageY: clientY });
+        const list = type === 'touchend' ? [] : [touch];
+        canvas.dispatchEvent(
+          new TouchEvent(type, {
+            touches: list,
+            targetTouches: list,
+            changedTouches: [touch],
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      };
+      fire('touchstart', startY);
+      for (let step = 1; step <= 20; step += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 16));
+        fire('touchmove', startY + step * 12);
+      }
+      fire('touchend', startY + 240);
+    });
+    await expect.poll(firstLine, { timeout: 10_000 }).toBeLessThan(before);
+
+    await terminateSession(page, '触摸滚动');
+  });
+});
