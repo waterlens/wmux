@@ -1,9 +1,15 @@
+import { DEFAULT_TERMINAL_FONT, TERMINAL_FONT_IDS } from './terminalFonts';
 import type { TerminalPreferences } from './types';
 
 const STORAGE_KEY = 'wmux.terminalPreferences';
 
+/** `columns` value meaning "fit the terminal to the window". */
+export const AUTO_COLUMNS = 0;
+
 export const DEFAULT_PREFERENCES: TerminalPreferences = {
+  fontFamily: DEFAULT_TERMINAL_FONT,
   fontSize: 14,
+  columns: AUTO_COLUMNS,
   cursorStyle: 'block',
   cursorBlink: true,
   scrollback: 10_000,
@@ -11,6 +17,18 @@ export const DEFAULT_PREFERENCES: TerminalPreferences = {
 };
 
 export const FONT_SIZE_RANGE = { min: 11, max: 22 };
+
+/** Common fixed widths offered in settings; any integer inside COLUMN_RANGE is accepted. */
+export const COLUMN_PRESETS = [80, 100, 120, 132, 160];
+export const COLUMN_RANGE = { min: 40, max: 400 };
+
+export function isValidColumns(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    (value === AUTO_COLUMNS || (value >= COLUMN_RANGE.min && value <= COLUMN_RANGE.max))
+  );
+}
 
 export const SCROLLBACK_OPTIONS: { value: number; label: string }[] = [
   { value: 2_000, label: '2,000 行' },
@@ -30,10 +48,12 @@ export function loadPreferences(): TerminalPreferences {
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as Partial<TerminalPreferences>;
     return {
+      fontFamily: allowed(TERMINAL_FONT_IDS, stored.fontFamily, DEFAULT_PREFERENCES.fontFamily),
       fontSize:
         typeof stored.fontSize === 'number'
           ? Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, stored.fontSize))
           : DEFAULT_PREFERENCES.fontSize,
+      columns: isValidColumns(stored.columns) ? stored.columns : DEFAULT_PREFERENCES.columns,
       cursorStyle: allowed(CURSOR_STYLES, stored.cursorStyle, DEFAULT_PREFERENCES.cursorStyle),
       cursorBlink: typeof stored.cursorBlink === 'boolean' ? stored.cursorBlink : DEFAULT_PREFERENCES.cursorBlink,
       scrollback: allowed(

@@ -22,9 +22,10 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError, errorMessage } from '../api';
+import { AUTO_COLUMNS } from '../preferences';
 import { liveStatusLabel } from '../sessionStatus';
 import { TerminalConnection } from '../terminalConnection';
-import { resolveTerminalFontFamily, TERMINAL_SYSTEM_FONT_FAMILY } from '../terminalFonts';
+import { resolveTerminalFontFamily, TERMINAL_SYSTEM_FONT_FAMILY, type TerminalFontId } from '../terminalFonts';
 import { applyTerminalModifiers, encodeCursorKey, type CursorDirection, type LiveStatus } from '../terminalProtocol';
 import type { Notify, Session, TerminalPreferences } from '../types';
 import { Button } from './UI';
@@ -43,6 +44,57 @@ type TerminalViewProps = {
 const FIT_SETTLE_MS = 0;
 /** Switching tabs reveals the panel with a transition; measure once it has landed. */
 const ACTIVE_TAB_SETTLE_MS = 30;
+/** A fixed column count shrinks the font down to this size before the screen is allowed to overflow. */
+const MIN_FIT_FONT_SIZE = 6;
+/** Width FitAddon reserves for the scrollbar while scrollback is enabled. */
+const SCROLLBAR_WIDTH = 14;
+
+/**
+ * Sizes the terminal to exactly `cols` columns at the largest font size (never
+ * above the preferred one, never below the floor) that fits the mount, with as
+ * many rows as fill the height at that size. `knownFontSize` skips the probing
+ * when the same mount width was already measured. Returns the font size used.
+ */
+function fitColumns(
+  terminal: Terminal,
+  addon: FitAddon,
+  cols: number,
+  preferredFontSize: number,
+  knownFontSize: number | null,
+): number {
+  const clamp = (size: number) => Math.min(preferredFontSize, Math.max(MIN_FIT_FONT_SIZE, size));
+  const colsAt = (size: number): number => {
+    if (terminal.options.fontSize !== size) terminal.options.fontSize = size;
+    return addon.proposeDimensions()?.cols ?? 0;
+  };
+  let size = clamp(knownFontSize ?? terminal.options.fontSize ?? preferredFontSize);
+  if (knownFontSize === null) {
+    const current = colsAt(size);
+    if (current > 0) {
+      // Cell width scales with the font, so a linear estimate lands within a pixel or two.
+      size = clamp(Math.floor((size * current) / cols));
+      if (colsAt(size) >= cols) {
+        while (size < preferredFontSize && colsAt(size + 1) >= cols) size += 1;
+      } else {
+        while (size > MIN_FIT_FONT_SIZE && colsAt(size) < cols) size -= 1;
+      }
+    }
+  }
+  colsAt(size);
+  const proposal = addon.proposeDimensions();
+  if (proposal && (terminal.cols !== cols || terminal.rows !== proposal.rows)) terminal.resize(cols, proposal.rows);
+  return size;
+}
+
+/** Centers a fixed-width screen inside the mount and lets it scroll sideways once it cannot fit. */
+function alignScreen(terminal: Terminal, mount: HTMLElement, fixedWidth: boolean): void {
+  const screen = terminal.element?.querySelector<HTMLElement>('.xterm-screen');
+  if (!screen) return;
+  const available = mount.clientWidth - (terminal.options.scrollback === 0 ? 0 : SCROLLBAR_WIDTH);
+  const slack = fixedWidth ? available - screen.offsetWidth : 0;
+  screen.style.marginLeft = slack > 1 ? `${Math.floor(slack / 2)}px` : '';
+  mount.classList.toggle('is-overflowing', fixedWidth && slack < -1);
+}
 
 async function attachWebglRenderer(terminal: Terminal, isCancelled: () => boolean): Promise<void> {
   try {
@@ -73,6 +125,10 @@ export function TerminalView({
   const ctrlRef = useRef(false);
   const altRef = useRef(false);
   const preferencesRef = useRef(preferences);
+  const appliedFontRef = useRef<TerminalFontId | null>(null);
+  const fontRequestRef = useRef(0);
+  const columnFitRef = useRef<{ key: string; fontSize: number } | null>(null);
+  const [dimensions, setDimensions] = useState('');
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const [writer, setWriter] = useState<boolean | null>(null);
   const [ctrl, setCtrl] = useState(false);
@@ -104,8 +160,20 @@ export function TerminalView({
     if (!mount || !terminal || !addon || !activeRef.current || mount.clientWidth < 20 || mount.clientHeight < 20)
       return;
     try {
-      addon.fit();
-      if (terminal.cols > 0 && terminal.rows > 0) connectionRef.current?.resize(terminal.cols, terminal.rows);
+      const { columns, fontSize } = preferencesRef.current;
+      if (columns === AUTO_COLUMNS) {
+        if (terminal.options.fontSize !== fontSize) terminal.options.fontSize = fontSize;
+        addon.fit();
+      } else {
+        const key = `${mount.clientWidth}:${columns}:${fontSize}:${terminal.options.fontFamily ?? ''}`;
+        const known = columnFitRef.current?.key === key ? columnFitRef.current.fontSize : null;
+        columnFitRef.current = { key, fontSize: fitColumns(terminal, addon, columns, fontSize, known) };
+      }
+      alignScreen(terminal, mount, columns !== AUTO_COLUMNS);
+      if (terminal.cols > 0 && terminal.rows > 0) {
+        setDimensions(`${terminal.cols}×${terminal.rows}`);
+        connectionRef.current?.resize(terminal.cols, terminal.rows);
+      }
     } catch {
       // A transient zero-sized container can make fit fail during mobile rotation.
     }
@@ -164,9 +232,11 @@ export function TerminalView({
     );
 
     // Opening xterm before the webfonts resolve would cache fallback glyph metrics.
-    void resolveTerminalFontFamily().then((fontFamily) => {
+    const initialFont = preferencesRef.current.fontFamily;
+    void resolveTerminalFontFamily(initialFont).then((fontFamily) => {
       if (disposed) return;
       const currentPreferences = preferencesRef.current;
+      appliedFontRef.current = initialFont;
       terminal.options.fontFamily = fontFamily;
       terminal.options.fontSize = currentPreferences.fontSize;
       terminal.options.cursorStyle = currentPreferences.cursorStyle;
@@ -201,12 +271,25 @@ export function TerminalView({
   useEffect(() => {
     const terminal = terminalRef.current;
     if (!terminal) return;
-    terminal.options.fontSize = preferences.fontSize;
+    // Font size and width belong to fit(), which owns the effective size.
     terminal.options.cursorStyle = preferences.cursorStyle;
     terminal.options.cursorBlink = preferences.cursorBlink;
     terminal.options.scrollback = preferences.scrollback;
     scheduleFit();
   }, [preferences, scheduleFit]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal || !terminalReady || appliedFontRef.current === preferences.fontFamily) return;
+    const request = ++fontRequestRef.current;
+    void resolveTerminalFontFamily(preferences.fontFamily).then((fontFamily) => {
+      // A newer choice or a disposed terminal makes this result stale.
+      if (request !== fontRequestRef.current || terminalRef.current !== terminal) return;
+      appliedFontRef.current = preferences.fontFamily;
+      terminal.options.fontFamily = fontFamily;
+      fit();
+    });
+  }, [fit, preferences.fontFamily, terminalReady]);
 
   useEffect(() => {
     if (!active) return;
@@ -367,6 +450,8 @@ export function TerminalView({
               {session.kind === 'local' ? '本机' : (session.hostName ?? 'SSH')}
               <i>·</i>
               {session.cwd || '~'}
+              {dimensions && <i>·</i>}
+              {dimensions}
             </span>
           </div>
         </div>

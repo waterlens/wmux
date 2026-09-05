@@ -1,3 +1,4 @@
+import type { TerminalFontId } from './terminalFonts';
 import { z } from 'zod';
 
 // Response contracts are defined once as zod schemas; the TypeScript types are inferred from them so
@@ -101,7 +102,10 @@ export type SessionInput = {
 };
 
 export type TerminalPreferences = {
+  fontFamily: TerminalFontId;
   fontSize: number;
+  /** Fixed column count, or `AUTO_COLUMNS` (0) to fit the window. */
+  columns: number;
   cursorStyle: 'block' | 'bar' | 'underline';
   cursorBlink: boolean;
   scrollback: number;

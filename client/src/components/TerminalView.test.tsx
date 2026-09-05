@@ -29,6 +29,11 @@ const xtermHarness = vi.hoisted(() => {
     dispose = vi.fn();
     getSelection = vi.fn(() => 'selected');
     paste = vi.fn((value: string) => this.dataHandler(value));
+    resize = vi.fn((cols: number, rows: number) => {
+      this.cols = cols;
+      this.rows = rows;
+    });
+    element: HTMLElement | undefined = undefined;
 
     constructor(options: Record<string, unknown>) {
       this.options = { ...options };
@@ -65,7 +70,13 @@ const xtermHarness = vi.hoisted(() => {
   }
 
   class FakeFitAddon {
+    static instances: FakeFitAddon[] = [];
     fit = vi.fn();
+    proposeDimensions = vi.fn((): { cols: number; rows: number } | undefined => ({ cols: 80, rows: 24 }));
+
+    constructor() {
+      FakeFitAddon.instances.push(this);
+    }
   }
 
   class FakeUnicode11Addon {}
@@ -167,7 +178,9 @@ const session: Session = {
 };
 
 const preferences: TerminalPreferences = {
+  fontFamily: 'jetbrains-mono',
   fontSize: 14,
+  columns: 0,
   cursorStyle: 'block',
   cursorBlink: true,
   scrollback: 10_000,
@@ -204,6 +217,7 @@ let releaseFonts: (faces: FontFace[]) => void;
 
 beforeEach(() => {
   xtermHarness.FakeTerminal.instances.length = 0;
+  xtermHarness.FakeFitAddon.instances.length = 0;
   apiHarness.status.mockReset();
   apiHarness.status.mockResolvedValue({ setupRequired: false, authenticated: true, version: 'test' });
   apiHarness.reconnectSession.mockReset();
@@ -440,5 +454,70 @@ describe('TerminalView rendering and input surface', () => {
     fireEvent.click(screen.getByRole('button', { name: '重试后台连接' }));
     await waitFor(() => expect(screen.getByText('无法结束会话，请稍后重试。')).toBeTruthy());
     expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+});
+
+describe('TerminalView width preferences', () => {
+  /** jsdom reports every box as 0×0, so give the mount a real size for these tests. */
+  function withMountSize(width: number, height: number) {
+    const widthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    const heightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => width });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => height });
+    return () => {
+      if (widthDescriptor) Object.defineProperty(HTMLElement.prototype, 'clientWidth', widthDescriptor);
+      if (heightDescriptor) Object.defineProperty(HTMLElement.prototype, 'clientHeight', heightDescriptor);
+    };
+  }
+
+  function renderWithPreferences(overrides: Partial<TerminalPreferences>) {
+    return render(
+      <TerminalView
+        session={session}
+        active
+        preferences={{ ...preferences, ...overrides }}
+        onRestart={() => undefined}
+        onTerminate={() => undefined}
+        notify={vi.fn()}
+      />,
+    );
+  }
+
+  it('fits a fixed column count at the largest font that still fits the mount', async () => {
+    const restore = withMountSize(720, 480);
+    try {
+      renderWithPreferences({ columns: 120 });
+      const terminal = xtermHarness.FakeTerminal.instances[0]!;
+      const addon = xtermHarness.FakeFitAddon.instances[0]!;
+      // A stand-in for xterm's metrics: 0.6em wide cells inside a 720px mount.
+      addon.proposeDimensions.mockImplementation(() => ({
+        cols: Math.floor(1200 / Number(terminal.options.fontSize)),
+        rows: 30,
+      }));
+      await finishFontLoading();
+
+      expect(terminal.options.fontSize).toBe(10);
+      expect(terminal.resize).toHaveBeenLastCalledWith(120, 30);
+      expect(addon.fit).not.toHaveBeenCalled();
+      expect(screen.getByText('测试会话').closest('.terminal-view')?.textContent).toContain('120×30');
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps the preferred font size and lets FitAddon pick the columns in auto mode', async () => {
+    const restore = withMountSize(720, 480);
+    try {
+      renderWithPreferences({ columns: 0, fontSize: 16 });
+      const terminal = xtermHarness.FakeTerminal.instances[0]!;
+      const addon = xtermHarness.FakeFitAddon.instances[0]!;
+      await finishFontLoading();
+
+      expect(terminal.options.fontSize).toBe(16);
+      expect(addon.fit).toHaveBeenCalled();
+      expect(terminal.resize).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
   });
 });

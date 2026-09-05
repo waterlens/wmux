@@ -16,7 +16,9 @@ vi.mock('../api', async (importOriginal) => ({
 
 const user: User = { username: 'waterlens', createdAt: '2026-01-01T00:00:00Z' };
 const preferences: TerminalPreferences = {
+  fontFamily: 'jetbrains-mono',
   fontSize: 14,
+  columns: 0,
   cursorStyle: 'block',
   cursorBlink: true,
   scrollback: 10_000,
@@ -187,5 +189,48 @@ describe('SettingsDialog behavior', () => {
     );
     expect(screen.getByRole('dialog', { name: '退出 wmux？' })).toBeTruthy();
     expect(within(confirmation).getByRole('button', { name: '退出登录' }).getAttribute('aria-busy')).toBeNull();
+  });
+});
+
+describe('SettingsDialog font and width preferences', () => {
+  it('offers the bundled monospace fonts and forwards the choice', () => {
+    const { onPreferencesChange } = renderSettings();
+    const fontSelect = screen.getByRole('combobox', { name: '终端字体' }) as HTMLSelectElement;
+    expect(Array.from(fontSelect.options).map((option) => option.value)).toEqual([
+      'jetbrains-mono',
+      'fira-code',
+      'cascadia-code',
+      'source-code-pro',
+      'roboto-mono',
+      'ibm-plex-mono',
+      'ubuntu-mono',
+      'system',
+    ]);
+    expect(screen.getByText('JetBrains Mono · 14px')).toBeTruthy();
+
+    fireEvent.change(fontSelect, { target: { value: 'fira-code' } });
+    expect(onPreferencesChange).toHaveBeenLastCalledWith({ ...preferences, fontFamily: 'fira-code' });
+  });
+
+  it('switches between automatic, preset and custom column counts', () => {
+    const { onPreferencesChange } = renderSettings();
+    const widthSelect = screen.getByRole('combobox', { name: '终端宽度' }) as HTMLSelectElement;
+    expect(widthSelect.value).toBe('0');
+    expect(screen.queryByRole('spinbutton', { name: '自定义列数' })).toBeNull();
+
+    fireEvent.change(widthSelect, { target: { value: '120' } });
+    expect(onPreferencesChange).toHaveBeenLastCalledWith({ ...preferences, columns: 120 });
+
+    fireEvent.change(widthSelect, { target: { value: 'custom' } });
+    expect(onPreferencesChange).toHaveBeenLastCalledWith({ ...preferences, columns: 100 });
+    const custom = screen.getByRole('spinbutton', { name: '自定义列数' });
+
+    fireEvent.change(custom, { target: { value: '9' } });
+    expect(onPreferencesChange).toHaveBeenLastCalledWith({ ...preferences, columns: 100 });
+    fireEvent.change(custom, { target: { value: '96' } });
+    expect(onPreferencesChange).toHaveBeenLastCalledWith({ ...preferences, columns: 96 });
+
+    fireEvent.change(widthSelect, { target: { value: '0' } });
+    expect(onPreferencesChange).toHaveBeenLastCalledWith({ ...preferences, columns: 0 });
   });
 });

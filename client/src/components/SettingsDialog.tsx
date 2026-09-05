@@ -1,8 +1,20 @@
 import { Info, LogOut, Monitor, RotateCcw, ShieldCheck, TerminalSquare } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { api, ApiError, errorMessage } from '../api';
-import { DEFAULT_PREFERENCES, FONT_SIZE_RANGE, SCROLLBACK_OPTIONS } from '../preferences';
+import {
+  AUTO_COLUMNS,
+  COLUMN_PRESETS,
+  COLUMN_RANGE,
+  DEFAULT_PREFERENCES,
+  FONT_SIZE_RANGE,
+  isValidColumns,
+  SCROLLBACK_OPTIONS,
+} from '../preferences';
+import { TERMINAL_FONTS, terminalFont, terminalFontStack, type TerminalFontId } from '../terminalFonts';
 import type { Host, Session, TerminalPreferences, User } from '../types';
+
+/** Width the custom option starts from when the terminal was fitting the window. */
+const CUSTOM_COLUMNS_START = 100;
 import { Button, ConfirmDialog, Field, Input, Modal, Select, UserAvatar } from './UI';
 
 type SettingsDialogProps = {
@@ -38,6 +50,11 @@ export function SettingsDialog({
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordError, setPasswordError] = useState('');
   const [passwordSaved, setPasswordSaved] = useState(false);
+  // "自定义" stays selected while the user types a width that happens to equal a preset.
+  const [customColumns, setCustomColumns] = useState(
+    preferences.columns !== AUTO_COLUMNS && !COLUMN_PRESETS.includes(preferences.columns),
+  );
+  const [columnsDraft, setColumnsDraft] = useState(String(preferences.columns || CUSTOM_COLUMNS_START));
 
   async function logout() {
     setLoggingOut(true);
@@ -131,7 +148,9 @@ export function SettingsDialog({
                 <div className="setting-row setting-row--slider">
                   <div>
                     <strong>字体大小</strong>
-                    <span>JetBrains Mono · {preferences.fontSize}px</span>
+                    <span style={{ fontFamily: terminalFontStack(preferences.fontFamily) }}>
+                      {terminalFont(preferences.fontFamily).label} · {preferences.fontSize}px
+                    </span>
                   </div>
                   <input
                     type="range"
@@ -142,6 +161,75 @@ export function SettingsDialog({
                     onChange={(event) => onPreferencesChange({ ...preferences, fontSize: Number(event.target.value) })}
                     aria-label="终端字体大小"
                   />
+                </div>
+
+                <div className="setting-row">
+                  <div>
+                    <strong>终端字体</strong>
+                    <span>选择后按需下载，只影响此浏览器</span>
+                  </div>
+                  <Select
+                    aria-label="终端字体"
+                    value={preferences.fontFamily}
+                    onChange={(event) =>
+                      onPreferencesChange({ ...preferences, fontFamily: event.target.value as TerminalFontId })
+                    }
+                  >
+                    {TERMINAL_FONTS.map((font) => (
+                      <option key={font.id} value={font.id}>
+                        {font.label}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+
+                <div className="setting-row">
+                  <div>
+                    <strong>终端宽度</strong>
+                    <span>固定列数时会缩小字号以适应窄屏幕，放不下再横向滚动</span>
+                  </div>
+                  <span className="setting-row__controls">
+                    <Select
+                      aria-label="终端宽度"
+                      value={customColumns ? 'custom' : String(preferences.columns)}
+                      onChange={(event) => {
+                        if (event.target.value === 'custom') {
+                          const start = preferences.columns || CUSTOM_COLUMNS_START;
+                          setCustomColumns(true);
+                          setColumnsDraft(String(start));
+                          onPreferencesChange({ ...preferences, columns: start });
+                          return;
+                        }
+                        setCustomColumns(false);
+                        onPreferencesChange({ ...preferences, columns: Number(event.target.value) });
+                      }}
+                    >
+                      <option value={String(AUTO_COLUMNS)}>自动（随窗口）</option>
+                      {COLUMN_PRESETS.map((columns) => (
+                        <option key={columns} value={columns}>
+                          {columns} 列
+                        </option>
+                      ))}
+                      <option value="custom">自定义…</option>
+                    </Select>
+                    {customColumns && (
+                      <Input
+                        type="number"
+                        inputMode="numeric"
+                        aria-label="自定义列数"
+                        min={COLUMN_RANGE.min}
+                        max={COLUMN_RANGE.max}
+                        value={columnsDraft}
+                        onChange={(event) => {
+                          setColumnsDraft(event.target.value);
+                          const columns = Number(event.target.value);
+                          if (isValidColumns(columns) && columns !== AUTO_COLUMNS) {
+                            onPreferencesChange({ ...preferences, columns });
+                          }
+                        }}
+                      />
+                    )}
+                  </span>
                 </div>
 
                 <div className="setting-row">
@@ -216,7 +304,13 @@ export function SettingsDialog({
                 </div>
 
                 <div className="settings-actions">
-                  <Button size="sm" onClick={() => onPreferencesChange(DEFAULT_PREFERENCES)}>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      setCustomColumns(false);
+                      onPreferencesChange(DEFAULT_PREFERENCES);
+                    }}
+                  >
                     <RotateCcw size={16} /> 恢复默认
                   </Button>
                 </div>

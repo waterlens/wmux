@@ -298,3 +298,60 @@ test('dialogs stay usable on desktop and phone viewports', async ({ page }) => {
   await confirm.getByRole('button', { name: '结束会话' }).click();
   await expect(confirm).toBeHidden();
 });
+
+test('a fixed column count keeps its width on the phone by shrinking the font', async ({ page }) => {
+  await page.addInitScript(() => {
+    globalThis.localStorage.setItem(
+      'wmux.terminalPreferences',
+      JSON.stringify({
+        fontFamily: 'jetbrains-mono',
+        fontSize: 14,
+        columns: 80,
+        cursorStyle: 'block',
+        cursorBlink: true,
+        scrollback: 10_000,
+        theme: 'light',
+      }),
+    );
+  });
+  await signIn(page);
+  const input = await startSession(page, '固定宽度');
+  const rows = page.locator('.terminal-view.is-active .xterm-rows');
+  const canvas = page.locator('.terminal-view.is-active .terminal-canvas');
+  const geometry = () =>
+    canvas.evaluate((mount) => {
+      const screen = mount.querySelector<HTMLElement>('.xterm-screen');
+      return {
+        mount: mount.clientWidth,
+        screen: screen?.offsetWidth ?? 0,
+        margin: Number.parseFloat(screen?.style.marginLeft || '0'),
+        overflow: mount.scrollWidth - mount.clientWidth,
+      };
+    });
+
+  await input.focus();
+  await page.keyboard.type(pythonCommand(`import os; print('COLS=%d' % os.get_terminal_size().columns)`), {
+    delay: 1,
+  });
+  await page.keyboard.press('Enter');
+  await expect(rows.filter({ hasText: 'COLS=80' })).toBeVisible();
+  // On a wide desktop the 80 columns keep the preferred font and sit centred in the pane.
+  const desktop = await geometry();
+  expect(desktop.screen).toBeLessThan(desktop.mount - 100);
+  expect(desktop.margin).toBeGreaterThan(20);
+
+  await page.setViewportSize(mobileViewport);
+  await expect.poll(async () => (await geometry()).overflow).toBeLessThanOrEqual(1);
+  await expect.poll(async () => (await geometry()).screen).toBeGreaterThan(0);
+  const phone = await geometry();
+  expect(phone.screen).toBeLessThanOrEqual(phone.mount);
+  await input.focus();
+  await page.keyboard.type(pythonCommand(`import os; print('PHONE_COLS=%d' % os.get_terminal_size().columns)`), {
+    delay: 1,
+  });
+  await page.keyboard.press('Enter');
+  await expect(rows.filter({ hasText: 'PHONE_COLS=80' })).toBeVisible();
+
+  await page.setViewportSize(desktopViewport);
+  await terminateSession(page, '固定宽度');
+});
