@@ -234,11 +234,10 @@ func (m *Manager) Discard(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.discard(ctx); err != nil {
-		return err
-	}
-	m.forget(sessionID, s)
-	return nil
+	// Teardown leaves the runtime unusable, so drop it from the registry even
+	// when releasing the backend or transcript reported an error.
+	defer m.forget(sessionID, s)
+	return s.discard(ctx)
 }
 
 // Close detaches all backend clients without killing tmux/screen sessions.
