@@ -56,8 +56,6 @@ export const sessionSchema = z.object({
   status: sessionStatusSchema,
   // Bumped by the server on every restart; used as the remount key of the terminal view.
   generation: z.number().int().optional(),
-  cols: z.number().int(),
-  rows: z.number().int(),
   createdAt: z.string(),
   updatedAt: z.string(),
   lastAttachedAt: z.string().optional(),
