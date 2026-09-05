@@ -1,6 +1,6 @@
 {
   "name": "wmux",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "description": "A self-hosted, persistent web terminal for local shells and SSH hosts.",
