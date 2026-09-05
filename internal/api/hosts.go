@@ -31,7 +31,7 @@ func (s *Server) createHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := input.normalize(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_host", err.Error())
+		writeError(w, http.StatusBadRequest, codeInvalidHost, err.Error())
 		return
 	}
 	credentials := credentialsFromInput(input)
@@ -111,7 +111,7 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request) {
 		input.Passphrase = patch.Passphrase
 	}
 	if err := input.normalize(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_host", err.Error())
+		writeError(w, http.StatusBadRequest, codeInvalidHost, err.Error())
 		return
 	}
 	encrypted, err := s.encryptCredentials(credentialsFromInput(input), input.AuthType)
@@ -142,7 +142,7 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 	err := s.store.DeleteHost(r.Context(), r.PathValue("id"))
 	if err != nil {
 		if errors.Is(err, store.ErrInUse) {
-			writeError(w, http.StatusConflict, "host_in_use", "仍有会话使用这台主机")
+			writeError(w, http.StatusConflict, codeHostInUse, "仍有会话使用这台主机")
 			return
 		}
 		s.handleStoreError(w, err, "SSH 主机不存在")
@@ -159,7 +159,7 @@ func (s *Server) probeHost(w http.ResponseWriter, r *http.Request) {
 	}
 	fingerprint, algorithm, err := s.probeSSH(r.Context(), app.SSHAddress(host), host.Username)
 	if err != nil {
-		s.upstreamError(w, "探测 SSH 主机指纹", "ssh_probe_failed", "无法读取 SSH 主机指纹，请检查地址和网络连接", err)
+		s.upstreamError(w, "探测 SSH 主机指纹", codeSSHProbeFailed, "无法读取 SSH 主机指纹，请检查地址和网络连接", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"fingerprint": fingerprint, "algorithm": algorithm})
@@ -179,13 +179,13 @@ func (s *Server) trustHost(w http.ResponseWriter, r *http.Request) {
 	}
 	actual, _, err := s.probeSSH(r.Context(), app.SSHAddress(host), host.Username)
 	if err != nil {
-		s.upstreamError(w, "重新探测 SSH 主机指纹", "ssh_probe_failed", "无法再次读取 SSH 主机指纹，请检查地址和网络连接", err)
+		s.upstreamError(w, "重新探测 SSH 主机指纹", codeSSHProbeFailed, "无法再次读取 SSH 主机指纹，请检查地址和网络连接", err)
 		return
 	}
 	// The fingerprint is a public value the user just read off the screen, so a
 	// plain comparison is enough.
 	if actual != input.Fingerprint {
-		writeError(w, http.StatusConflict, "fingerprint_changed", "SSH 主机密钥在确认期间发生变化")
+		writeError(w, http.StatusConflict, codeFingerprintChanged, "SSH 主机密钥在确认期间发生变化")
 		return
 	}
 	// Only the fingerprint is written, so a concurrent host edit survives.
@@ -221,7 +221,7 @@ func (s *Server) testHost(w http.ResponseWriter, r *http.Request) {
 		Credential:  credential,
 	})
 	if err != nil {
-		s.upstreamError(w, "测试 SSH 主机连接", "ssh_test_failed", "SSH 连接失败，请检查主机状态、指纹和认证信息", err)
+		s.upstreamError(w, "测试 SSH 主机连接", codeSSHTestFailed, "SSH 连接失败，请检查主机状态、指纹和认证信息", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "latencyMs": time.Since(started).Milliseconds()})
@@ -276,17 +276,4 @@ func publicHost(host store.Host) hostResponse {
 		CreatedAt:   host.CreatedAt,
 		UpdatedAt:   host.UpdatedAt,
 	}
-}
-
-func (s *Server) handleStoreError(w http.ResponseWriter, err error, notFoundMessage string) {
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "not_found", notFoundMessage)
-		return
-	}
-	if errors.Is(err, store.ErrInvalidInput) {
-		// The store rejected the value itself; that is the request's fault.
-		writeError(w, http.StatusBadRequest, "invalid_input", "请求的数据不符合要求")
-		return
-	}
-	s.internalError(w, "数据库操作失败", err)
 }

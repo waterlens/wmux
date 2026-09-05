@@ -105,18 +105,8 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Ping(r.Context()); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "unhealthy", "数据库不可用")
+		writeError(w, http.StatusServiceUnavailable, codeUnhealthy, "数据库不可用")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": version.Version, "commit": version.Commit})
-}
-
-func (s *Server) sameOrigin(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !originAllowed(r, s.config.PublicURL, s.config.TrustProxy) {
-			writeError(w, http.StatusForbidden, "invalid_origin", "请求来源不受信任")
-			return
-		}
-		next(w, r)
-	}
 }

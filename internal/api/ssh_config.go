@@ -62,7 +62,7 @@ func (s *Server) importSSHConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	alias := strings.TrimSpace(input.Alias)
 	if alias == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request", "SSH config 别名不能为空")
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "SSH config 别名不能为空")
 		return
 	}
 
@@ -71,14 +71,14 @@ func (s *Server) importSSHConfig(w http.ResponseWriter, r *http.Request) {
 	candidate, err := s.sshConfig.Resolve(r.Context(), alias)
 	if err != nil {
 		if errors.Is(err, sshconfig.ErrAliasNotFound) {
-			writeError(w, http.StatusNotFound, "ssh_config_host_not_found", "SSH config 中不存在这个主机别名")
+			writeError(w, http.StatusNotFound, codeSSHConfigHostNotFound, "SSH config 中不存在这个主机别名")
 			return
 		}
 		s.writeSSHConfigError(w, err)
 		return
 	}
 	if len(candidate.Unsupported) != 0 {
-		writeError(w, http.StatusUnprocessableEntity, "ssh_config_unsupported", "该 SSH 配置使用了暂不支持的连接指令")
+		writeError(w, http.StatusUnprocessableEntity, codeSSHConfigUnsupported, "该 SSH 配置使用了暂不支持的连接指令")
 		return
 	}
 	resolved := hostInput{
@@ -89,7 +89,7 @@ func (s *Server) importSSHConfig(w http.ResponseWriter, r *http.Request) {
 		AuthType: store.HostAuthAgent,
 	}
 	if err := resolved.normalize(); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "ssh_config_invalid", "SSH config 中的主机配置无效")
+		writeError(w, http.StatusUnprocessableEntity, codeSSHConfigInvalid, "SSH config 中的主机配置无效")
 		return
 	}
 
@@ -99,7 +99,7 @@ func (s *Server) importSSHConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if exists {
-		writeError(w, http.StatusConflict, "host_exists", "相同地址、端口和用户名的 SSH 主机已存在")
+		writeError(w, http.StatusConflict, codeHostExists, "相同地址、端口和用户名的 SSH 主机已存在")
 		return
 	}
 	writeJSON(w, http.StatusCreated, publicHost(host))
@@ -166,11 +166,11 @@ func (s *Server) writeSSHConfigError(w http.ResponseWriter, err error) {
 		// Do not include the path, parsed line, command, or file contents in the
 		// response or structured log. The public error is intentionally stable.
 		s.logger.Warn("SSH config is unavailable")
-		writeError(w, http.StatusServiceUnavailable, "ssh_config_unavailable", "无法读取 SSH config")
+		writeError(w, http.StatusServiceUnavailable, codeSSHConfigUnavailable, "无法读取 SSH config")
 		return
 	}
 	s.logger.Warn("SSH config is invalid")
-	writeError(w, http.StatusUnprocessableEntity, "ssh_config_invalid", "SSH config 格式无效")
+	writeError(w, http.StatusUnprocessableEntity, codeSSHConfigInvalid, "SSH config 格式无效")
 }
 
 func sshConfigUnavailable(err error) bool {

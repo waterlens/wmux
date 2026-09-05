@@ -30,7 +30,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := input.normalize(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_session", err.Error())
+		writeError(w, http.StatusBadRequest, codeInvalidSession, err.Error())
 		return
 	}
 	autoNamed := input.Name == ""
@@ -59,7 +59,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if host.Fingerprint == "" {
-			writeError(w, http.StatusConflict, "host_untrusted", "请先验证并信任 SSH 主机密钥")
+			writeError(w, http.StatusConflict, codeHostUntrusted, "请先验证并信任 SSH 主机密钥")
 			return
 		}
 		model.HostID = &host.ID
@@ -92,7 +92,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.terminals.Create(spec); err != nil {
 		s.discardSessionRow(r.Context(), id)
-		s.upstreamError(w, "启动终端会话", "terminal_start_failed", "无法启动会话，请检查工作目录、命令或连接设置", err)
+		s.upstreamError(w, "启动终端会话", codeTerminalStartFailed, "无法启动会话，请检查工作目录、命令或连接设置", err)
 		return
 	}
 	created, err = s.store.GetSession(r.Context(), id)
@@ -116,7 +116,7 @@ func (s *Server) updateSession(w http.ResponseWriter, r *http.Request) {
 	if patch.Name != nil {
 		name := strings.TrimSpace(*patch.Name)
 		if name == "" || len(name) > 80 {
-			writeError(w, http.StatusBadRequest, "invalid_session", "会话名称不能为空且不能超过 80 个字符")
+			writeError(w, http.StatusBadRequest, codeInvalidSession, "会话名称不能为空且不能超过 80 个字符")
 			return
 		}
 		if _, err := s.store.UpdateSessionName(r.Context(), session.ID, name); err != nil {
@@ -171,7 +171,7 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.terminals.StopForRestart(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
-		s.upstreamError(w, "结束待重启会话", "terminal_stop_failed", "暂时无法重启后台会话，请稍后重试", err)
+		s.upstreamError(w, "结束待重启会话", codeTerminalStopFailed, "暂时无法重启后台会话，请稍后重试", err)
 		return
 	}
 	// Opening the next generation makes callbacks from the stopped execution stale.
@@ -189,7 +189,7 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 	if err := s.terminals.Create(spec); err != nil {
 		message := "无法启动会话，请检查工作目录、命令或连接设置"
 		_ = s.store.UpdateSessionRuntime(r.Context(), id, generation, store.SessionStatusError, "", &message)
-		s.upstreamError(w, "重启终端会话", "terminal_start_failed", message, err)
+		s.upstreamError(w, "重启终端会话", codeTerminalStartFailed, message, err)
 		return
 	}
 	restarted, err := s.store.GetSession(r.Context(), id)
@@ -206,7 +206,7 @@ func (s *Server) reconnectSession(w http.ResponseWriter, r *http.Request) {
 	defer s.sessionOps.lock(id)()
 	if err := s.terminals.Reconnect(id); err != nil {
 		if errors.Is(err, terminal.ErrSessionNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "终端会话不存在")
+			writeError(w, http.StatusNotFound, codeNotFound, "终端会话不存在")
 			return
 		}
 		s.internalError(w, "重试后台连接", err)
@@ -243,11 +243,6 @@ func (s *Server) availableSessionName(ctx context.Context, base string) (string,
 			return candidate, nil
 		}
 	}
-}
-
-func (s *Server) upstreamError(w http.ResponseWriter, action, code, message string, err error) {
-	s.logger.Warn(action, "error", err)
-	writeError(w, http.StatusBadGateway, code, message)
 }
 
 // publicSession maps a stored row onto the wire shape, replacing runtime

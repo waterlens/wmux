@@ -37,7 +37,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := input.normalize(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_setup", err.Error())
+		writeError(w, http.StatusBadRequest, codeInvalidSetup, err.Error())
 		return
 	}
 	hash, err := security.HashPassword(input.Password)
@@ -47,7 +47,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.Setup(r.Context(), input.Username, hash); err != nil {
 		if errors.Is(err, store.ErrAlreadySetup) {
-			writeError(w, http.StatusConflict, "already_setup", "wmux 已完成初始化")
+			writeError(w, http.StatusConflict, codeAlreadySetup, "wmux 已完成初始化")
 			return
 		}
 		s.internalError(w, "创建管理员", err)
@@ -69,7 +69,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	key := clientIP(r, s.config.TrustProxy)
 	if !s.loginRate.allowed(key, time.Now()) {
 		w.Header().Set("Retry-After", "300")
-		writeError(w, http.StatusTooManyRequests, "rate_limited", "登录尝试过多，请稍后再试")
+		writeError(w, http.StatusTooManyRequests, codeRateLimited, "登录尝试过多，请稍后再试")
 		return
 	}
 	var input loginInput
@@ -80,7 +80,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.GetUserByUsername(r.Context(), input.Username)
 	if err != nil {
 		s.loginRate.fail(key, time.Now())
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "用户名或密码错误")
+		writeError(w, http.StatusUnauthorized, codeInvalidCredentials, "用户名或密码错误")
 		return
 	}
 	valid, verifyErr := security.VerifyPassword(input.Password, user.PasswordHash)
@@ -89,7 +89,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if !valid {
 		s.loginRate.fail(key, time.Now())
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "用户名或密码错误")
+		writeError(w, http.StatusUnauthorized, codeInvalidCredentials, "用户名或密码错误")
 		return
 	}
 	if err := s.issueLogin(w, r.Context()); err != nil {
@@ -126,7 +126,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(input.NewPassword) < 10 || len(input.NewPassword) > 1024 {
-		writeError(w, http.StatusBadRequest, "invalid_password", "新密码需要包含 10 到 1024 个字符")
+		writeError(w, http.StatusBadRequest, codeInvalidPassword, "新密码需要包含 10 到 1024 个字符")
 		return
 	}
 	user, err := s.store.GetUser(r.Context())
@@ -139,7 +139,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("stored password hash is invalid", "error", err)
 	}
 	if !valid {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "当前密码不正确")
+		writeError(w, http.StatusUnauthorized, codeInvalidCredentials, "当前密码不正确")
 		return
 	}
 	hash, err := security.HashPassword(input.NewPassword)
@@ -166,7 +166,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth, ok := s.authenticate(r)
 		if !ok {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+			writeError(w, http.StatusUnauthorized, codeUnauthorized, "请先登录")
 			return
 		}
 		if time.Since(auth.LastSeenAt) > 15*time.Minute {
@@ -221,9 +221,4 @@ func (s *Server) clearCookie(w http.ResponseWriter) {
 
 func publicUser(user store.User) map[string]any {
 	return map[string]any{"username": user.Username, "createdAt": user.CreatedAt}
-}
-
-func (s *Server) internalError(w http.ResponseWriter, action string, err error) {
-	s.logger.Error(action, "error", err)
-	writeError(w, http.StatusInternalServerError, "internal_error", "服务发生内部错误")
 }

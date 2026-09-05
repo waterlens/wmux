@@ -52,11 +52,11 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 	// The heartbeat re-reads this login, so the stream cannot outlive it.
 	auth, ok := r.Context().Value(authContextKey{}).(store.AuthSession)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+		writeError(w, http.StatusUnauthorized, codeUnauthorized, "请先登录")
 		return
 	}
 	if !originAllowed(r, s.config.PublicURL, s.config.TrustProxy) {
-		writeError(w, http.StatusForbidden, "invalid_origin", "WebSocket 来源不受信任")
+		writeError(w, http.StatusForbidden, codeInvalidOrigin, "WebSocket 来源不受信任")
 		return
 	}
 	id := r.PathValue("id")
@@ -68,7 +68,7 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 	if value := r.URL.Query().Get("since"); value != "" {
 		parsed, err := strconv.ParseUint(value, 10, 64)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_sequence", "无效的终端输出序号")
+			writeError(w, http.StatusBadRequest, codeInvalidSequence, "无效的终端输出序号")
 			return
 		}
 		after = parsed
@@ -411,4 +411,9 @@ func nonBlockingEvent(channel chan<- socketEvent, event socketEvent) {
 
 func boolPointer(value bool) *bool {
 	return &value
+}
+
+// validSize bounds the terminal geometry a browser may request.
+func validSize(cols, rows int) bool {
+	return cols >= 20 && cols <= 1000 && rows >= 5 && rows <= 500
 }

@@ -185,7 +185,3 @@ func (v *sessionInput) normalize() error {
 	}
 	return nil
 }
-
-func validSize(cols, rows int) bool {
-	return cols >= 20 && cols <= 1000 && rows >= 5 && rows <= 500
-}
