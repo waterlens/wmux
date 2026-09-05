@@ -184,3 +184,69 @@
 5. **跨包重复。** M1（`sshx` 复用 `terminal` 的 `Credential`）、M4、M5、M6、M7、M8、M32 与 L9。
 6. **前端结构。** H9 抽 `TerminalConnection`（工作量最大，可与第 4 步并行）、H12、M13、M23、M40 至 M43。
 7. **工具链。** H11 迁到 `@playwright/test` 并砍到 250 行以内，M46、M47、L21、L22 随之。
+
+## 处理记录（2026-09-05）
+
+修复由 8 个 Claude Opus 5 子代理分三波完成，每个子代理在独立的 git worktree 中按文件所有权工作，主会话核对改动范围后以 cherry-pick 并入分支 `refactor/review-2026-09-05`，每次并入后运行完整验证。三波分别是：① 包内清理（terminal+app / store+transcript+security+config+sshx+sshconfig / client 终端模块 / client 其余 / 工具链，5 个并行）；② 跨包契约（Go 契约 / client 契约，2 个并行）；③ `internal/api` 组织与文案。子代理的逐条报告保存在会话记录中，本节只列结论。
+
+### 逐条状态
+
+**高（12/12 完成）**：H1 `manager.go` 拆为 `manager.go`（357 行）+ `session.go` + `fanout.go`，三份 teardown 合并为 `teardown(ctx, reason, finalState)`；H2 全部死导出/死字段删除，`Callbacks` 缩为两个方法，`tmuxPath`/`screenPath` 降为非导出测试注入；H3 `sessionResponse` DTO、migration 3 删除 `backend_name`/`exit_code`、`store` 模型只保留 `Credentials` 的 json tag；H4 `UpdateSessionRuntime` 缩为 5 参数；H5 删 `sessionSpecProvider`、nil 降级与 `probeSSH` 兜底，api 测试 fixture 合并为 `newAPIFixture`；H6 `security` 只导出 `EncryptJSON`/`DecryptJSON`；H7 前端类型全部由 zod schema 推导；H8 `generations` state 删除，改用服务端 `generation`；H9 传输层抽为 `terminalConnection.ts`（314 行，无 React 依赖，12 个直接单测），`TerminalView.tsx` 765→507 行；H10 CSS 源码断言删除；H11 `browser-smoke.mjs` 807 行删除，替换为 `playwright.config.ts` + `tests/browser/smoke.spec.ts`（300 行，5 个用例，只保留 jsdom 做不到的场景）；H12 updater 内嵌套 `setState` 消除。
+
+**中（47/47 完成）**：M1–M47 全部完成；M20、M21、M22、M31 与 M33 的 api 部分、M34、M37、M44 的 api 读取辅助由第三波完成。其中：M4 store 校验缩到跨列规则，且 `ErrInvalidInput` 现映射为 400；M12 第一波只加注释，第二波完成 `Limits` 内嵌；M31 的 sshx 部分第一波完成；M33 的 `startSSH`/run loop 部分第一波完成；M44 的 terminal 部分与 api fixture 已完成；M45 有一条断言经核实是对当前行为的正向断言，保留；M40 中 `SSHConfigImport` 的 `open` 是自身 state，保持不变。
+
+**低（22/22 完成）**：L1–L22 全部完成；L8 的 `issueLogin`、L15、L17 的 api/app 部分由第三波完成。L21 选择删除 `sw.js` 的 navigate 兜底分支（离线行为不变）；L22 中 tsconfig 的处理与审查建议不同，见下。
+
+**第三波（`internal/api` 组织与文案）**：错误响应辅助与 `sameOrigin` 归位到 `response.go`，`failureWindow` 移到 `ratelimit.go`；slog message 统一为固定英文并带 `action` 字段，`handleStoreError` 记录调用上下文；`createSession` 的命名锁收进 `reserveSessionRow`；`terminalSocket` 拆为校验/接入/泵/心跳四段，`main.go` 的 `run` 拆为 `openRuntime`/`serve`/`close`；`hostPatch` 与 8 段手写合并删除，改为预填 `hostInput` 后解码，三种凭据口径保留为一条带注释的显式判断并新增 `TestHostPatchCredentialMergeRules`；`validateDisplayName` 共用；`issueLogin(ctx, w)`；`socketWriteTimeout`；27 个错误码收为常量；`failureWindow` 改为"记录已满时新来源不计数"；`requestLog` 改为记录 method/path/status/bytes/duration（≥500 Warn、≥400 Info、其余 Debug，`/api/health` 只在失败时记录）；`webui.Handler` 缓存头折叠为 `assets/` → immutable、其余 → no-cache，`embed.go` 并入 `handler.go`；api 测试辅助全部收进 `helpers_test.go`，`lifecycle_test.go` 只剩测试函数。
+
+### 与审查建议不同的判断
+
+子代理在核实后做出了以下与报告建议不同的决定，主会话认可：
+
+- **T-B3**：`retryAfterBackendError` 保留 `ErrBackendMissing` 守卫——删掉它等于把 attach-only 语义完全托付给每个 backend 的 `Reconnectable`，而测试 stub 并不满足该约定；改为上提到共用 helper 消除两处不一致。
+- **T-A11**：两条不可达的 `Terminate` 错误分支直接删除而非改 `panic`——即使不变量被破坏，它们也只杀 attach 客户端进程，碰不到 tmux/screen 会话本身。
+- **S-18**：`security.go` 的 `math` import 必须保留（`math.MaxInt` 在保留的第三个溢出条件里），审查称可删是笔误。
+- **C-5 / H12**：轮询回调没有按字面建议直接读闭包里的 `openIds`（该 effect 依赖是 `[]`，闭包值停在挂载时刻，会误删用户之后新开的标签页），改为维护 `openIdsRef`。
+- **C-18**：保留一个不含断言的 `@xterm/addon-webgl` 最小桩，否则测试输出会多出 jsdom 的 `getContext()` 警告。
+- **C-26**：`modal-layer--form`/`--settings` 作为零成本的 BEM 钩子保留。
+- **C-27**：两层 tsconfig 继承保留，但把 `module`/`moduleResolution` 下沉到 base 并删除死掉的 `NodeNext`；新增 Node 侧项目（`playwright.config.ts` + `tests/browser`）与 solution-style `tsconfig.json`，`pnpm typecheck` 改为 `tsc -b` 同时检查两个项目。理由：`tests/browser` 无扩展名导入 `../../playwright.config`，Playwright 的 loader 是 bundler 式解析，两个项目本就该共享同一套 module 设置。
+- **C-29 / LiveStatus**：`LiveStatus` 改为 `SessionStatus` 的别名而非收窄成服务端实际发送的 5 元子集，否则 `normalizeLiveStatus('detached')` 的返回值会变化；子集关系写进注释。
+- **M7**：`SafeMuxName` 降回非导出而非让 `main.go` 复用——`dataMuxName` 的 sha256 hex 本就不含非法字符。
+- **M19**：`Manager.Create` 去掉 ctx（runtime 生命周期长于请求且自带取消，传请求 ctx 反而是错的），`RefreshHost` 返回值保留并在 `hosts.go` 记 Debug 日志。
+- **M36**：只改名 Go 侧 helper（`MuxSessionName`、`ErrMuxSessionMissing`）与错误注释，`store.Session.Backend` 与 wire 字段 `backend` 保持兼容；进入 `last_error` 的错误文案未改。
+- **H5**：保留 `logger == nil → slog.Default()`——它是导出构造器上的输出端默认值，不是依赖兜底。
+- **M8**：store 里永不生效的默认尺寸删除后，8 处测试需显式写尺寸；未新增 Go 校验，单列约束继续由表上的 `CHECK (cols > 0)` 负责。
+- **S-23 第三项**：`hasLiteralAlias` 整个删除，`Resolve` 直接查收集器的 map。
+- **A-O5 / M21**：`requestLog` 选择"让它有用"而非删除——它是唯一的访问日志，删掉后 `sameOrigin`/`requireAuth`/`decodeJSON` 这几条最常见的拒绝路径将没有任何日志；`statusRecorder` 实现了 `Unwrap()`，WebSocket 升级不受影响（api `-race` 测试与 Playwright 真实 tmux 用例验证）。
+- **A-S6 / M10**：核实前端从不发送空串的 `password`/`privateKey`（不改就整键省略），"空串忽略"是对其它客户端的有意兜底，因此保留该行为并写成一条带注释的显式判断，而不是统一三种口径。
+- **X-14 store 侧**：给 store 常量加命名类型会波及 8 个文件约 84 处赋值，跳过；api 侧的 normalize 已改用 `store` 常量。
+
+### 有意的行为变化（非纯重构）
+
+1. 会话 JSON 不再包含 `backendName`、`exitCode`；WebSocket `hello`/`state` 不再包含 `clientId`、`writerId`、`clients`；错误码 `terminal_unavailable` 不再出现，新增 `invalid_input`（400）。二进制帧格式不变。
+2. 数据库 schema 2→3（删除 `sessions.backend_name`、`sessions.exit_code`），单向升级，旧版 wmux 无法打开 v3 库。`UpdateSessionRuntime` 不再做变更检测，重复回调会重写同一行（不影响 `updated_at`）。
+3. 所有配置错误统一以退出码 2 结束（此前只有非法 `WMUX_LOG_LEVEL` 退 2，其余退 1）。
+4. 终端工具栏的状态文案与侧栏统一：正在连接→启动中、连接错误→异常、已退出→已结束；"已连接"保留并注释。
+5. `sshconfig` 的 `User` 对 `%` token（`%%` 除外）fail-closed，此前展开 8 种 token。
+6. `Manager.Discard` 失败时也从注册表移除 runtime（terminal 子代理额外发现的泄漏，独立 commit `fix(terminal)`）。
+7. 本地构建也带 `-s -w`（dlv 调试需临时去掉）；`test:go` 改为 `-race` + `vet`；删除 `lock_fallback.go` 后 Windows 交叉编译不再通过（wmux 在 Windows 上本就无法运行）。
+8. 浏览器验收测试改为 Playwright：固定端口 8788，`webServer` 启动 `bin/wmux`；不再把服务端 stderr 的 ERROR/WARN 计为失败（日志仍 pipe 到测试输出）。
+9. `.env.example` 移到 `deploy/wmux.env.example` 并补齐两个变量；Go 二进制输出目录 `dist/` 改为 `bin/`；CI 新增 `git diff --exit-code -- internal/webui/dist` 守卫与失败时上传 Playwright 产物。
+10. `sshx` 的错误文案改为英文（只进服务端日志，用户可见文案由 `upstreamError` 提供，不变）。
+11. `WMUX_LOG_LEVEL` 经 `internal/config` 读取并校验。
+12. 每个请求产生一条 `request` 日志（method/path/status/bytes/duration），4xx 记 Info、5xx 记 Warn；副作用：`http.MaxBytesReader` 不做 `Unwrap`，超过 2 MiB 的请求体不再提前关闭连接，状态码与响应体不变。
+13. 创建会话时名称超长的提示统一为"会话名称不能为空且不能超过 80 个字符"（与重命名一致）；`third-party-notices.txt` 从无缓存头变为 `no-cache`。
+
+### 验证
+
+每一波并入后在主工作区运行：`gofmt -l`、`go vet ./...`、`go build ./...`、`go test -race -count=1 ./...`、tmux 与 screen 集成测试（`WMUX_TMUX_INTEGRATION=1` 三项、`WMUX_SCREEN_INTEGRATION=1` 一项，均 `-v` 确认真实执行）、`pnpm format:check`、`pnpm lint`、`pnpm typecheck`（`tsc -b`）、`pnpm test:unit`（12 个文件 72 个用例）、`pnpm build`、`pnpm test:browser`（5 个用例）。已知的既有 flake：`TestDialSSHHandshakeHonorsContextCancellation` 在 `-count=3 -race` 下偶发，根因是 socket deadline 与 ctx deadline 设在同一时刻，本次未改动其逻辑。
+
+### 遗留与建议
+
+- 研究备忘 `docs/research/2026-09-05-sshconfig-library-evaluation.md`：保留手写解析器；建议补一个以 `ssh -G` 为真值的差分测试、给相对 `Include` 加路径穿越守卫。
+- 研究备忘 `docs/research/2026-09-05-ghostty-web-evaluation.md`：现在不换 ghostty-web；建议评估关闭 `allowTransparency`、处理上次审查的 M7（锁内回放）、建立性能基线脚本、锁定 `@xterm/xterm@6.0.0` 直到上游 #6106 关闭。
+- PWA 离线形态（离线渲染出立刻报错的空壳）是产品决策，未在本次处理。
+- `StatusResponse` 是未被引用的导出类型，为保持 schema/type 成对导出而保留。
+- SSH 握手 flake 的正确性修法待做。
+- `internal/api/types.go` 里剩余的裸数字（255/128/4096/8192、`validSize` 的 20/1000/5/500）与 `Dockerfile` 中重复的 `/api/health` 字面量未处理。
+- X-14 的 store 常量类型化留给一次能同时改 `internal/store/**` 的任务。

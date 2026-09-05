@@ -26,7 +26,7 @@ Persistence is intentionally split into three independent concerns:
 
 - Process persistence is provided by tmux or screen on the machine where the shell runs.
 - Output continuity is provided by monotonically increasing sequence numbers and a bounded JSONL transcript.
-- Product state is stored in SQLite: names, targets, dimensions, backend identifiers and timestamps.
+- Product state is stored in SQLite: names, targets, dimensions, the resolved persistence kind (tmux, screen or none) and timestamps. The tmux/screen session name is derived deterministically from the session ID and is never stored. Schema changes ship as numbered migrations applied at startup (currently version 3).
 
 The Go process detaches from persistent multiplexers during graceful shutdown. A user-initiated session deletion explicitly terminates only the corresponding multiplexer session and removes its recording. tmux and screen run with wmux-owned namespaces and minimal configuration, so user configuration, status bars, key bindings and unrelated sessions are isolated.
 
@@ -75,7 +75,7 @@ Creating a host does not silently trust it. wmux first probes the public host ke
 
 ## OpenSSH config discovery
 
-The authenticated discovery endpoint reads the config of the operating-system account running wmux, or the explicit path selected with `WMUX_SSH_CONFIG`. Account-home lookup, `%d`, `~` and relative `Include` paths use the account database rather than the process `HOME` environment. It expands active `Include` files in lexical order and applies case-sensitive literal `Host` aliases, wildcard/negated patterns and OpenSSH's first-value rules. Discovery is read-only: it does not mutate SQLite, read `IdentityFile` contents, contact a host or trust a fingerprint. `IdentityFile` is exposed only as a boolean so local key paths never enter the browser response.
+The authenticated discovery endpoint reads the config of the operating-system account running wmux, or the explicit path selected with `WMUX_SSH_CONFIG`. Account-home lookup, `%d`, `~` and relative `Include` paths use the account database rather than the process `HOME` environment. It expands active `Include` files in lexical order and applies case-sensitive literal `Host` aliases, wildcard/negated patterns and OpenSSH's first-value rules. Discovery is read-only: it does not mutate SQLite, read `IdentityFile` contents, contact a host or trust a fingerprint. `IdentityFile` is exposed only as a boolean so local key paths never enter the browser response. `HostName` expands only `%h`; `User` accepts neither `%` tokens nor `${ENV}` expansion, so a config value can never pull server-side data into a candidate. The system-wide `/etc/ssh/ssh_config` is deliberately not read: discovery covers exactly the account config or the configured file and its `Include` fragments.
 
 Includes remain lazy syntax-tree nodes: resolution opens them only when the current `Host` or safely supported `Match all` block is active. Other `Match` conditions are fail-closed and `Match exec` is never executed. Candidate enumeration follows global, universal `Host *` and `Match all` includes; an alias declared only inside any other conditional include is intentionally not enumerated.
 
@@ -93,3 +93,5 @@ Container deployments should mount only the config text and required `Include` f
 - Authentication cookies are HTTP-only, SameSite Strict and Secure when configured for HTTPS.
 - Login failures are rate-limited by client address.
 - Responses disable framing, MIME sniffing and unnecessary browser permissions.
+- Every request produces one `request` log line with method, path, status, bytes and duration; 4xx logs at Info and 5xx at Warn, and `/api/health` is silent unless it fails.
+- The API error codes the browser matches on are enumerated in `internal/api/response.go`.
