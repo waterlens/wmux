@@ -48,21 +48,7 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin || url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws/'))
     return;
 
-  if (request.mode === 'navigate') {
-    event.respondWith(
-      fetch(request)
-        .then(async (response) => {
-          if (response.ok) {
-            const cache = await caches.open(CACHE_NAME);
-            await cache.put('/', response.clone());
-          }
-          return response;
-        })
-        .catch(async () => (await caches.match('/')) || Response.error()),
-    );
-    return;
-  }
-
+  // Navigations land on '/', which the shell branch below already serves network-first.
   if (SHELL.includes(url.pathname)) {
     event.respondWith(
       fetch(request)
