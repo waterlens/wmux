@@ -2,11 +2,32 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/waterlens/wmux/internal/store"
 )
+
+// maxDisplayNameLen bounds every name the browser renders for the user.
+const maxDisplayNameLen = 80
+
+// One message per resource, shared by creation and renaming so the same rule
+// never reaches the user in two wordings.
+var (
+	errSessionName = fmt.Errorf("会话名称不能为空且不能超过 %d 个字符", maxDisplayNameLen)
+	errHostName    = fmt.Errorf("主机名称不能为空且不能超过 %d 个字符", maxDisplayNameLen)
+)
+
+// validateDisplayName applies the length rule sessions and hosts share.
+// Session creation is the one caller that accepts an empty name, because it
+// then generates a default of its own.
+func validateDisplayName(name string, allowEmpty bool, invalid error) error {
+	if (name == "" && !allowEmpty) || len(name) > maxDisplayNameLen {
+		return invalid
+	}
+	return nil
+}
 
 type setupInput struct {
 	Username string `json:"username"`
@@ -113,8 +134,8 @@ func (v *hostInput) normalize() error {
 	v.Address = strings.TrimSpace(v.Address)
 	v.Username = strings.TrimSpace(v.Username)
 	v.AuthType = strings.TrimSpace(v.AuthType)
-	if v.Name == "" || len(v.Name) > 80 {
-		return errors.New("主机名称不能为空且不能超过 80 个字符")
+	if err := validateDisplayName(v.Name, false, errHostName); err != nil {
+		return err
 	}
 	if v.Address == "" || len(v.Address) > 255 || strings.Contains(v.Address, "://") {
 		return errors.New("请输入有效的主机名或 IP 地址")
@@ -129,15 +150,15 @@ func (v *hostInput) normalize() error {
 		return errors.New("SSH 用户名不能为空")
 	}
 	switch v.AuthType {
-	case "password":
+	case store.HostAuthPassword:
 		if v.Password == nil || *v.Password == "" {
 			return errors.New("密码认证需要填写密码")
 		}
-	case "privateKey":
+	case store.HostAuthKey:
 		if v.PrivateKey == nil || strings.TrimSpace(*v.PrivateKey) == "" {
 			return errors.New("私钥认证需要填写私钥")
 		}
-	case "agent":
+	case store.HostAuthAgent:
 	default:
 		return errors.New("不支持的 SSH 认证方式")
 	}
@@ -168,26 +189,27 @@ func (v *sessionInput) normalize() error {
 	v.Cwd = strings.TrimSpace(v.Cwd)
 	v.Command = strings.TrimSpace(v.Command)
 	v.Persistence = strings.TrimSpace(v.Persistence)
-	if len(v.Name) > 80 {
-		return errors.New("会话名称不能超过 80 个字符")
+	// Creation may leave the name empty; createSession then generates one.
+	if err := validateDisplayName(v.Name, true, errSessionName); err != nil {
+		return err
 	}
-	if v.Kind != "local" && v.Kind != "ssh" {
+	if v.Kind != store.SessionKindLocal && v.Kind != store.SessionKindSSH {
 		return errors.New("会话类型必须是 local 或 ssh")
 	}
-	if v.Kind == "ssh" && v.HostID == "" {
+	if v.Kind == store.SessionKindSSH && v.HostID == "" {
 		return errors.New("SSH 会话必须选择主机")
 	}
-	if v.Kind == "local" {
+	if v.Kind == store.SessionKindLocal {
 		v.HostID = ""
 	}
 	if len(v.Cwd) > 4096 || len(v.Command) > 8192 {
 		return errors.New("工作目录或启动命令过长")
 	}
 	if v.Persistence == "" {
-		v.Persistence = "auto"
+		v.Persistence = store.SessionPersistenceAuto
 	}
 	switch v.Persistence {
-	case "auto", "tmux", "screen", "none":
+	case store.SessionPersistenceAuto, store.SessionPersistenceTmux, store.SessionPersistenceScreen, store.SessionPersistenceNone:
 	default:
 		return errors.New("不支持的持久化模式")
 	}

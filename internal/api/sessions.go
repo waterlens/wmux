@@ -105,8 +105,8 @@ func (s *Server) updateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if patch.Name != nil {
 		name := strings.TrimSpace(*patch.Name)
-		if name == "" || len(name) > 80 {
-			writeError(w, http.StatusBadRequest, codeInvalidSession, "会话名称不能为空且不能超过 80 个字符")
+		if err := validateDisplayName(name, false, errSessionName); err != nil {
+			writeError(w, http.StatusBadRequest, codeInvalidSession, err.Error())
 			return
 		}
 		if _, err := s.store.UpdateSessionName(r.Context(), session.ID, name); err != nil {
