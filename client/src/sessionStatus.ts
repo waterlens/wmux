@@ -13,6 +13,16 @@ export function sessionStatusLabel(status: SessionStatus): string {
   return labels[status];
 }
 
+/**
+ * Terminal toolbar wording, which shares the session list vocabulary except for
+ * `running`: the toolbar sits next to the connection dot and reports this
+ * browser's live link rather than the session lifecycle, so it says 已连接.
+ * `LiveStatus` from terminalProtocol is the same union of literals.
+ */
+export function liveStatusLabel(status: SessionStatus): string {
+  return status === 'running' ? '已连接' : labels[status];
+}
+
 export function sessionStatusTone(status: SessionStatus): 'online' | 'pending' | 'error' | 'idle' {
   if (status === 'running') return 'online';
   if (status === 'connecting' || status === 'reconnecting') return 'pending';

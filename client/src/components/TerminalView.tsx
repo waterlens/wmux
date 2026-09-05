@@ -21,22 +21,11 @@ import {
   TerminalSquare,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiError, errorMessage, signalAuthExpired } from '../api';
-import {
-  applyTerminalModifiers,
-  decodeTerminalOutput,
-  encodeCursorKey,
-  encodeTerminalBinaryFrames,
-  encodeTerminalTextFrames,
-  isPermanentSocketClose,
-  normalizeLiveStatus,
-  parseControlMessage,
-  ReplayBarrier,
-  websocketAddress,
-  type CursorDirection,
-  type LiveStatus,
-} from '../terminalProtocol';
-import { openTerminalAfterFonts, TERMINAL_SYSTEM_FONT_FAMILY } from '../terminalFonts';
+import { api, ApiError, errorMessage } from '../api';
+import { liveStatusLabel } from '../sessionStatus';
+import { TerminalConnection } from '../terminalConnection';
+import { resolveTerminalFontFamily, TERMINAL_SYSTEM_FONT_FAMILY } from '../terminalFonts';
+import { applyTerminalModifiers, encodeCursorKey, type CursorDirection, type LiveStatus } from '../terminalProtocol';
 import type { Session, TerminalPreferences } from '../types';
 import { Button } from './UI';
 
@@ -50,6 +39,11 @@ type TerminalViewProps = {
   notify: (message: string, tone?: 'success' | 'error' | 'info') => void;
 };
 
+/** FitAddon measures the DOM, so a fit has to wait for the current layout to commit. */
+const FIT_SETTLE_MS = 0;
+/** Switching tabs reveals the panel with a transition; measure once it has landed. */
+const ACTIVE_TAB_SETTLE_MS = 30;
+
 async function attachWebglRenderer(terminal: Terminal, isCancelled: () => boolean): Promise<void> {
   try {
     const { WebglAddon } = await import('@xterm/addon-webgl');
@@ -61,22 +55,6 @@ async function attachWebglRenderer(terminal: Terminal, isCancelled: () => boolea
     // The DOM renderer stays in place.
   }
 }
-
-function disconnectMessage(reason: string | undefined): string {
-  if (reason === 'evicted') return '输出传输暂时落后，正在恢复连接。';
-  // The server closes with 1013 after a restart.
-  if (reason === 'restarted') return '会话已在其他设备重启，正在重新连接';
-  return 'wmux 服务正在重启，正在恢复连接。';
-}
-
-const statusText: Record<LiveStatus, string> = {
-  connecting: '正在连接',
-  running: '已连接',
-  reconnecting: '正在重连',
-  detached: '已分离',
-  exited: '已退出',
-  error: '连接错误',
-};
 
 export function TerminalView({
   session,
@@ -90,22 +68,11 @@ export function TerminalView({
   const mountRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  const socketRef = useRef<WebSocket | null>(null);
-  const lastSequenceRef = useRef(0);
-  const reconnectTimerRef = useRef<number | null>(null);
-  const reconnectAttemptsRef = useRef(0);
-  const shouldReconnectRef = useRef(true);
+  const connectionRef = useRef<TerminalConnection | null>(null);
   const activeRef = useRef(active);
-  const liveStatusRef = useRef<LiveStatus>('connecting');
-  const writerRef = useRef<boolean | null>(null);
   const ctrlRef = useRef(false);
   const altRef = useRef(false);
-  const sendInputRef = useRef<(value: string) => void>(() => undefined);
-  const sendBinaryRef = useRef<(value: string) => void>(() => undefined);
-  const sendExactInputRef = useRef<(value: string) => void>(() => undefined);
-  const connectRef = useRef<() => void>(() => undefined);
   const preferencesRef = useRef(preferences);
-  const [replayBarrier] = useState(() => new ReplayBarrier());
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const [writer, setWriter] = useState<boolean | null>(null);
   const [ctrl, setCtrl] = useState(false);
@@ -123,18 +90,11 @@ export function TerminalView({
     preferencesRef.current = preferences;
   }, [preferences]);
 
-  const setWriterState = useCallback(
-    (value: boolean | null) => {
-      writerRef.current = value;
-      setWriter(value);
-      if (terminalRef.current) terminalRef.current.options.disableStdin = value === false || !replayBarrier.isOpen();
-    },
-    [replayBarrier],
-  );
-
-  const updateStatus = useCallback((status: LiveStatus) => {
-    liveStatusRef.current = status;
-    setLiveStatus(status);
+  const clearModifiers = useCallback(() => {
+    ctrlRef.current = false;
+    altRef.current = false;
+    setCtrl(false);
+    setAlt(false);
   }, []);
 
   const fit = useCallback(() => {
@@ -145,14 +105,26 @@ export function TerminalView({
       return;
     try {
       addon.fit();
-      const socket = socketRef.current;
-      if (socket?.readyState === WebSocket.OPEN && terminal.cols > 0 && terminal.rows > 0) {
-        socket.send(JSON.stringify({ type: 'resize', cols: terminal.cols, rows: terminal.rows }));
-      }
+      if (terminal.cols > 0 && terminal.rows > 0) connectionRef.current?.resize(terminal.cols, terminal.rows);
     } catch {
       // A transient zero-sized container can make fit fail during mobile rotation.
     }
   }, []);
+
+  /** Preference, replay and write-lock changes all resize the viewport a beat later. */
+  const scheduleFit = useCallback(() => {
+    window.setTimeout(fit, FIT_SETTLE_MS);
+  }, [fit]);
+
+  const sendInput = useCallback(
+    (value: string) => {
+      // While replay is still draining this can be a device reply from historical
+      // output, so the toolbar modifiers stay armed until something is really sent.
+      const sent = connectionRef.current?.send(applyTerminalModifiers(value, ctrlRef.current, altRef.current));
+      if (sent) clearModifiers();
+    },
+    [clearModifiers],
+  );
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -191,30 +163,29 @@ export function TerminalView({
       }),
     );
 
-    void openTerminalAfterFonts(
-      (fontFamily) => {
-        const currentPreferences = preferencesRef.current;
-        terminal.options.fontFamily = fontFamily;
-        terminal.options.fontSize = currentPreferences.fontSize;
-        terminal.options.cursorStyle = currentPreferences.cursorStyle;
-        terminal.options.cursorBlink = currentPreferences.cursorBlink;
-        terminal.options.scrollback = currentPreferences.scrollback;
-        terminal.open(mount);
-        terminalRef.current = terminal;
-        fitRef.current = fitAddon;
-        void attachWebglRenderer(terminal, () => disposed);
-        inputDisposable = terminal.onData((data) => sendInputRef.current(data));
-        binaryDisposable = terminal.onBinary((data) => sendBinaryRef.current(data));
-        resizeObserver = new ResizeObserver(() => fit());
-        resizeObserver.observe(mount);
-        setTerminalReady(true);
-      },
-      () => {
-        fit();
-        if (activeRef.current) terminal.focus();
-      },
-      () => disposed,
-    );
+    // Opening xterm before the webfonts resolve would cache fallback glyph metrics.
+    void resolveTerminalFontFamily().then((fontFamily) => {
+      if (disposed) return;
+      const currentPreferences = preferencesRef.current;
+      terminal.options.fontFamily = fontFamily;
+      terminal.options.fontSize = currentPreferences.fontSize;
+      terminal.options.cursorStyle = currentPreferences.cursorStyle;
+      terminal.options.cursorBlink = currentPreferences.cursorBlink;
+      terminal.options.scrollback = currentPreferences.scrollback;
+      terminal.open(mount);
+      terminalRef.current = terminal;
+      fitRef.current = fitAddon;
+      void attachWebglRenderer(terminal, () => disposed);
+      inputDisposable = terminal.onData(sendInput);
+      binaryDisposable = terminal.onBinary((data) => {
+        connectionRef.current?.sendBinary(data);
+      });
+      resizeObserver = new ResizeObserver(() => fit());
+      resizeObserver.observe(mount);
+      setTerminalReady(true);
+      fit();
+      if (activeRef.current) terminal.focus();
+    });
 
     return () => {
       disposed = true;
@@ -225,7 +196,7 @@ export function TerminalView({
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [fit, session.id]);
+  }, [fit, sendInput, session.id]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -234,257 +205,48 @@ export function TerminalView({
     terminal.options.cursorStyle = preferences.cursorStyle;
     terminal.options.cursorBlink = preferences.cursorBlink;
     terminal.options.scrollback = preferences.scrollback;
-    window.setTimeout(fit, 0);
-  }, [fit, preferences]);
+    scheduleFit();
+  }, [preferences, scheduleFit]);
 
   useEffect(() => {
-    if (active) {
-      window.setTimeout(() => {
-        fit();
-        terminalRef.current?.focus();
-      }, 30);
-    }
+    if (!active) return;
+    window.setTimeout(() => {
+      fit();
+      terminalRef.current?.focus();
+    }, ACTIVE_TAB_SETTLE_MS);
   }, [active, fit]);
 
   useEffect(() => {
     if (!terminalReady) return undefined;
-    shouldReconnectRef.current = true;
-
-    function clearReconnectTimer() {
-      if (reconnectTimerRef.current !== null) {
-        window.clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
-    }
-
-    function finishReplay() {
-      const terminal = terminalRef.current;
-      if (terminal) terminal.options.disableStdin = writerRef.current === false;
-      setReplayComplete(true);
-      window.setTimeout(fit, 0);
-    }
-
-    function resetReplay() {
-      replayBarrier.reset();
-      setReplayComplete(false);
-      const terminal = terminalRef.current;
-      if (terminal) terminal.options.disableStdin = true;
-    }
-
-    function canSendInput(): boolean {
-      const socket = socketRef.current;
-      // The backend accepts input only after the server reports it running.
-      return (
-        replayBarrier.isOpen() &&
-        writerRef.current !== false &&
-        liveStatusRef.current === 'running' &&
-        Boolean(socket && socket.readyState === WebSocket.OPEN)
-      );
-    }
-
-    function sendFrames(frames: ArrayBuffer[]) {
-      const socket = socketRef.current;
-      if (!canSendInput() || !socket) return;
-      for (const frame of frames) socket.send(frame);
-    }
-
-    function clearOneShotModifiers() {
-      if (ctrlRef.current) {
-        ctrlRef.current = false;
-        setCtrl(false);
-      }
-      if (altRef.current) {
-        altRef.current = false;
-        setAlt(false);
-      }
-    }
-
-    function connect() {
-      clearReconnectTimer();
-      const current = socketRef.current;
-      if (current && (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING))
-        current.close();
-      resetReplay();
-      setWriterState(null);
-      updateStatus(reconnectAttemptsRef.current ? 'reconnecting' : 'connecting');
-      setLastError('');
-
-      const socket = new WebSocket(websocketAddress(session.id, lastSequenceRef.current));
-      socket.binaryType = 'arraybuffer';
-      socketRef.current = socket;
-
-      socket.addEventListener('open', () => {
-        if (socketRef.current !== socket) return;
-        reconnectAttemptsRef.current = 0;
-        fit();
-      });
-
-      socket.addEventListener('message', (event) => {
-        if (socketRef.current !== socket) return;
-        if (event.data instanceof ArrayBuffer) {
-          const frame = decodeTerminalOutput(event.data);
-          if (!frame) return;
-          if (frame.sequence > lastSequenceRef.current) lastSequenceRef.current = frame.sequence;
-          const terminal = terminalRef.current;
-          if (!frame.output.length || !terminal) return;
-          if (replayBarrier.isCollectingReplay()) {
-            const completeWrite = replayBarrier.trackReplayWrite();
-            try {
-              terminal.write(frame.output, () => {
-                if (completeWrite()) finishReplay();
-              });
-            } catch {
-              // A rejected write still has to release the replay barrier.
-              if (completeWrite()) finishReplay();
-              setLastError('终端输出解析失败，请重新连接。');
-              updateStatus('error');
-            }
-          } else {
-            // xterm queues this behind the replay writes, so the barrier opens first.
-            terminal.write(frame.output);
-          }
+    const connection = new TerminalConnection(session.id, {
+      onOutput: (output, done) => {
+        const terminal = terminalRef.current;
+        // A disposed renderer still has to release the replay barrier.
+        if (!terminal) {
+          done?.();
           return;
         }
+        terminal.write(output, done);
+      },
+      onStatus: setLiveStatus,
+      onWriter: setWriter,
+      onReplayComplete: setReplayComplete,
+      onInputAllowed: (allowed) => {
+        const terminal = terminalRef.current;
+        if (terminal) terminal.options.disableStdin = !allowed;
+      },
+      onError: setLastError,
+      onNotice: notify,
+      onRefit: scheduleFit,
+    });
+    connectionRef.current = connection;
+    connection.connect();
 
-        if (typeof event.data !== 'string') return;
-        const message = parseControlMessage(event.data);
-        if (message) {
-          const status = normalizeLiveStatus(message.status);
-          if (status) {
-            updateStatus(status);
-            if (status === 'exited') shouldReconnectRef.current = false;
-          }
-          if (typeof message.sequence === 'number' && message.sequence > lastSequenceRef.current) {
-            lastSequenceRef.current = message.sequence;
-          }
-          if (
-            message.type === 'writer' ||
-            message.type === 'hello' ||
-            message.type === 'state' ||
-            message.type === 'replay_end'
-          ) {
-            const writable = message.writer;
-            if (typeof writable === 'boolean') {
-              setWriterState(writable);
-              if (writable) window.setTimeout(fit, 0);
-            }
-          }
-          if (message.type === 'replay_end' && replayBarrier.endReplay()) finishReplay();
-          if (message.type === 'hello' && message.truncated) {
-            notify('较早的终端输出已被清理，当前显示最近记录', 'info');
-          }
-          if (message.type === 'disconnect') {
-            // An explicit reconnect instruction outranks an earlier exited status.
-            if (status === 'reconnecting') shouldReconnectRef.current = true;
-            setLastError(disconnectMessage(message.reason));
-          }
-          if (status === 'error') setLastError('终端暂时不可用，请检查会话配置或主机连接。');
-          if (message.type === 'error') {
-            // The server keeps the connection open for these.
-            const text = message.message || '终端连接发生错误。';
-            setLastError(text);
-            notify(text, 'error');
-          }
-        }
-      });
-
-      socket.addEventListener('close', (event) => {
-        if (socketRef.current !== socket) return;
-        socketRef.current = null;
-        resetReplay();
-        // A revoked login arrives as an exited disconnect, so 1008 is checked first.
-        if (isPermanentSocketClose(event.code)) {
-          shouldReconnectRef.current = false;
-          setWriterState(false);
-          if (liveStatusRef.current !== 'exited') {
-            updateStatus('error');
-            setLastError('此会话当前不可连接，请刷新会话列表或检查会话配置。');
-          }
-          void api
-            .status()
-            .then((status) => {
-              if (!status.authenticated) signalAuthExpired();
-            })
-            .catch((reason: unknown) => {
-              if (reason instanceof ApiError && reason.status === 401) signalAuthExpired();
-            });
-          return;
-        }
-        if (!shouldReconnectRef.current || liveStatusRef.current === 'exited') {
-          return;
-        }
-        void api
-          .status()
-          .then((status) => {
-            if (!shouldReconnectRef.current) return;
-            if (!status.authenticated) {
-              shouldReconnectRef.current = false;
-              signalAuthExpired();
-              return;
-            }
-            setWriterState(null);
-            reconnectAttemptsRef.current += 1;
-            updateStatus('reconnecting');
-            const delay = Math.min(8000, 500 * 2 ** Math.min(reconnectAttemptsRef.current, 4));
-            reconnectTimerRef.current = window.setTimeout(connect, delay);
-          })
-          .catch((reason: unknown) => {
-            if (!shouldReconnectRef.current) return;
-            if (reason instanceof ApiError && reason.status === 401) {
-              shouldReconnectRef.current = false;
-              signalAuthExpired();
-              return;
-            }
-            reconnectAttemptsRef.current += 1;
-            updateStatus('reconnecting');
-            reconnectTimerRef.current = window.setTimeout(connect, 2000);
-          });
-      });
-
-      socket.addEventListener('error', () => {
-        if (socketRef.current !== socket) return;
-        setLastError('实时连接不可用，正在重试');
-      });
-    }
-
-    connectRef.current = connect;
-
-    sendInputRef.current = (value: string) => {
-      // During replay this can be a device reply from historical output.
-      if (!canSendInput()) return;
-      const output = applyTerminalModifiers(value, ctrlRef.current, altRef.current);
-      clearOneShotModifiers();
-      sendFrames(encodeTerminalTextFrames(output));
-    };
-    sendExactInputRef.current = (value: string) => {
-      if (canSendInput()) sendFrames(encodeTerminalTextFrames(value));
-    };
-    sendBinaryRef.current = (value: string) => {
-      if (canSendInput()) sendFrames(encodeTerminalBinaryFrames(value));
-    };
-
-    connect();
     return () => {
-      shouldReconnectRef.current = false;
-      connectRef.current = () => undefined;
-      sendInputRef.current = () => undefined;
-      sendExactInputRef.current = () => undefined;
-      sendBinaryRef.current = () => undefined;
-      clearReconnectTimer();
-      replayBarrier.reset();
-      const socket = socketRef.current;
-      socketRef.current = null;
-      if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, 'view closed');
+      connectionRef.current = null;
+      connection.close();
     };
-  }, [fit, notify, replayBarrier, session.id, setWriterState, terminalReady, updateStatus]);
-
-  function manualReconnect() {
-    shouldReconnectRef.current = true;
-    reconnectAttemptsRef.current = 0;
-    const socket = socketRef.current;
-    if (socket && socket.readyState < WebSocket.CLOSING) socket.close(4000, 'manual reconnect');
-    else connectRef.current();
-  }
+  }, [notify, scheduleFit, session.id, terminalReady]);
 
   /** Wake the server-side backoff first, then re-attach this browser. */
   async function retryBackendConnection() {
@@ -500,25 +262,12 @@ export function TerminalView({
     } finally {
       setRetryingBackend(false);
     }
-    manualReconnect();
-  }
-
-  function takeControl() {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    socket.send(JSON.stringify({ type: 'take_control' }));
+    connectionRef.current?.reconnect();
   }
 
   function sendSpecial(value: string) {
-    sendInputRef.current(value);
+    sendInput(value);
     terminalRef.current?.focus();
-  }
-
-  function clearToolbarModifiers() {
-    ctrlRef.current = false;
-    altRef.current = false;
-    setCtrl(false);
-    setAlt(false);
   }
 
   function sendCursor(direction: CursorDirection) {
@@ -529,8 +278,8 @@ export function TerminalView({
       ctrlRef.current,
       altRef.current,
     );
-    clearToolbarModifiers();
-    sendExactInputRef.current(value);
+    clearModifiers();
+    connectionRef.current?.send(value);
     terminal?.focus();
   }
 
@@ -573,7 +322,7 @@ export function TerminalView({
     try {
       const value = await clipboard.readText();
       if (value) {
-        clearToolbarModifiers();
+        clearModifiers();
         terminalRef.current?.paste(value);
       }
     } catch {
@@ -626,7 +375,7 @@ export function TerminalView({
             {(liveStatus === 'connecting' || liveStatus === 'reconnecting') && (
               <LoaderCircle className="spin" size={13} />
             )}
-            {statusText[liveStatus]}
+            {liveStatusLabel(liveStatus)}
           </span>
           <button className="tool-button desktop-only" onClick={() => void copySelection()} title="复制选中内容">
             <Copy size={16} />
@@ -661,13 +410,7 @@ export function TerminalView({
       </header>
 
       <div className="terminal-canvas-wrap">
-        <div
-          ref={mountRef}
-          className="terminal-canvas"
-          data-terminal-ready={terminalReady}
-          data-replay-complete={replayComplete}
-          onClick={() => terminalRef.current?.focus()}
-        />
+        <div ref={mountRef} className="terminal-canvas" onClick={() => terminalRef.current?.focus()} />
 
         {!terminalReady && (
           <div className="terminal-loader" role="status">
@@ -697,7 +440,7 @@ export function TerminalView({
           <div className="read-only-banner">
             <Lock size={14} />
             <span>另一个设备正在输入</span>
-            <button onClick={takeControl}>接管</button>
+            <button onClick={() => connectionRef.current?.takeControl()}>接管</button>
           </div>
         )}
 
