@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -272,5 +273,19 @@ func TestLocalTmuxAttachOnlyReportsMissingSession(t *testing.T) {
 	spec := SessionSpec{ID: namespace + "-gone", Shell: "/bin/sh", Args: []string{"-i"}}
 	if _, _, err := l.startLocal(ctx, spec, PersistenceTmux, false); !errors.Is(err, ErrMuxSessionMissing) {
 		t.Fatalf("attach-only launch of a missing session = %v, want ErrMuxSessionMissing", err)
+	}
+}
+
+func TestScreenRuntimeRejectsOverlongSocketDirectory(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux screen builds bind Unix sockets under SCREENDIR")
+	}
+	root := filepath.Join(shortTempDir(t), strings.Repeat("d", 90))
+	l := newExecLauncher(Config{MuxName: "wmux-deadbeef", MuxRuntimeDir: root})
+	if _, _, err := l.screenRuntime(nil); err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("screenRuntime error = %v, want a socket path length error", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "s-deadbeef")); !os.IsNotExist(err) {
+		t.Fatalf("directory was created despite the rejected path (stat err = %v)", err)
 	}
 }

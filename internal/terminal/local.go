@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -303,9 +304,16 @@ func sessionAbsent(kind Persistence, output []byte) bool {
 	return common || strings.Contains(text, "no screen session found") || strings.Contains(text, "no screen session")
 }
 
-// maxUnixSocketPath is the shortest sun_path limit among supported platforms
-// (104 bytes on the BSDs and macOS, 108 on Linux), without the trailing NUL.
-const maxUnixSocketPath = 103
+// linuxSocketPathLimit is Linux's sun_path capacity without the trailing NUL.
+const linuxSocketPathLimit = 107
+
+// screenSocketPathTooLong reports whether screen could not create its
+// "<pid>.<session>" socket inside dir. Linux screen builds use Unix sockets,
+// and a path over the limit makes `screen -dmS` exit successfully while the
+// daemon never becomes reachable; Apple's screen uses named pipes instead.
+func screenSocketPathTooLong(dir string) bool {
+	return runtime.GOOS == "linux" && len(dir)+len("/")+len("1234567.")+muxSessionNameLen > linuxSocketPathLimit
+}
 
 // screenDirName keeps the per-namespace screen directory short so its socket
 // paths stay under the Unix socket limit; the remote setup uses the same name.
@@ -325,9 +333,7 @@ func (l *execLauncher) screenRuntime(extra map[string]string) (string, []string,
 		root = filepath.Join(cache, "wmux", "mux")
 	}
 	dir := filepath.Join(root, screenDirName(l.muxName))
-	// screen creates "<pid>.<session>" sockets inside SCREENDIR; a path that
-	// cannot fit one silently produces a session that never becomes reachable.
-	if len(dir)+len("/")+len("1234567.")+muxSessionNameLen > maxUnixSocketPath {
+	if screenSocketPathTooLong(dir) {
 		return "", nil, fmt.Errorf("terminal: screen socket directory %s is too long for a Unix socket path; use a shorter data directory", dir)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
