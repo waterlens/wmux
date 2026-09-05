@@ -26,7 +26,7 @@ import { liveStatusLabel } from '../sessionStatus';
 import { TerminalConnection } from '../terminalConnection';
 import { resolveTerminalFontFamily, TERMINAL_SYSTEM_FONT_FAMILY } from '../terminalFonts';
 import { applyTerminalModifiers, encodeCursorKey, type CursorDirection, type LiveStatus } from '../terminalProtocol';
-import type { Session, TerminalPreferences } from '../types';
+import type { Notify, Session, TerminalPreferences } from '../types';
 import { Button } from './UI';
 
 type TerminalViewProps = {
@@ -36,7 +36,7 @@ type TerminalViewProps = {
   restarting?: boolean | undefined;
   onRestart: (session: Session) => void;
   onTerminate: (session: Session) => void;
-  notify: (message: string, tone?: 'success' | 'error' | 'info') => void;
+  notify: Notify;
 };
 
 /** FitAddon measures the DOM, so a fit has to wait for the current layout to commit. */

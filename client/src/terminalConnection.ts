@@ -10,6 +10,7 @@ import {
   websocketAddress,
   type LiveStatus,
 } from './terminalProtocol';
+import type { Toast } from './types';
 
 function disconnectMessage(reason: string | undefined): string {
   if (reason === 'evicted') return '输出传输暂时落后，正在恢复连接。';
@@ -34,7 +35,7 @@ export type TerminalConnectionSink = {
   onInputAllowed(allowed: boolean): void;
   /** Inline connection error text; an empty string clears it. */
   onError(message: string): void;
-  onNotice(message: string, tone: 'error' | 'info'): void;
+  onNotice(message: string, tone: Toast['tone']): void;
   /** Re-measure the viewport and report the new size back through `resize`. */
   onRefit(): void;
 };
