@@ -33,11 +33,12 @@ jobs:
       - name: Committed web assets are up to date
         run: git diff --exit-code -- internal/webui/dist
       - name: Screen persistence integration
+        # The integration steps run even after an earlier failure so one CI run reports every backend.
+        if: always()
         run: |
           screen -v || true
           WMUX_SCREEN_INTEGRATION=1 go test -timeout 30s ./internal/terminal -run '^TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt$' -count=1 -v
       - name: Tmux restore integration
-        # Runs even when the screen step fails so one CI run reports both backends.
         if: always()
         run: WMUX_TMUX_INTEGRATION=1 go test -timeout 60s ./internal/terminal -run '^(TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt|TestLocalTmuxGivesEachSessionItsOwnEnvironment|TestLocalTmuxAttachOnlyReportsMissingSession)$' -count=1 -v
       - name: Install browser

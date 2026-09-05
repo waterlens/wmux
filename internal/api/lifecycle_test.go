@@ -98,11 +98,17 @@ func TestTerminalWebSocketReplayBoundarySeparatesHistoryFromLiveOutput(t *testin
 	if replaying {
 		t.Fatal("live output arrived before replay_end")
 	}
-	if boundary != historySequence {
-		t.Fatalf("replay_end sequence = %d, want snapshot sequence %d", boundary, historySequence)
+	// The PTY may still deliver a trailing echo or newline frame after the
+	// marker was seen, so the snapshot can end past historySequence but never
+	// before it, and never past the live write made after the attach.
+	if boundary < historySequence {
+		t.Fatalf("replay_end sequence = %d, want at least snapshot sequence %d", boundary, historySequence)
 	}
-	if !bytes.Contains(replayOutput.Bytes(), []byte("\x1b[5n")) {
+	if !bytes.Contains(replayOutput.Bytes(), []byte("\x1b[5nWMUX_HISTORY_END")) {
 		t.Fatalf("initial replay %q does not contain the stale CSI 5n query", replayOutput.Bytes())
+	}
+	if bytes.Contains(replayOutput.Bytes(), []byte(strings.TrimSpace(live))) {
+		t.Fatalf("replay %q leaked output produced after the attach", replayOutput.Bytes())
 	}
 }
 
