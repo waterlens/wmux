@@ -1,5 +1,7 @@
 export const PWA_UPDATE_EVENT = 'wmux:pwa-update';
 
+let reloading = false;
+
 function announceUpdate(registration: ServiceWorkerRegistration): void {
   window.dispatchEvent(new CustomEvent(PWA_UPDATE_EVENT, { detail: registration }));
 }
@@ -19,7 +21,6 @@ export function registerPwa(): void {
             if (worker.state === 'installed' && navigator.serviceWorker.controller) announceUpdate(registration);
           });
         });
-        window.setInterval(() => void registration.update(), 60 * 60 * 1000);
       })
       .catch(() => {
         // Offline use and terminal access do not depend on PWA installation.
@@ -30,7 +31,6 @@ export function registerPwa(): void {
 }
 
 export function activateUpdate(registration: ServiceWorkerRegistration): void {
-  let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (reloading) return;
     reloading = true;
