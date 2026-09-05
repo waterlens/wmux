@@ -5,13 +5,12 @@ import { AuthScreen } from './components/AuthScreen';
 import { Button } from './components/UI';
 import { Workspace } from './components/Workspace';
 import { activateUpdate, PWA_UPDATE_EVENT } from './pwa';
-import type { Host, Session, StatusResponse, User } from './types';
+import type { Host, Session, User } from './types';
 
 type AppState =
   | { phase: 'loading' }
-  | { phase: 'setup'; status: StatusResponse }
-  | { phase: 'login'; status: StatusResponse }
-  | { phase: 'workspace'; status: StatusResponse; user: User; hosts: Host[]; sessions: Session[] }
+  | { phase: 'setup' | 'login'; version: string }
+  | { phase: 'workspace'; version: string; commit?: string | undefined; user: User; hosts: Host[]; sessions: Session[] }
   | { phase: 'error'; message: string };
 
 export default function App() {
@@ -22,15 +21,15 @@ export default function App() {
     try {
       const status = await api.status();
       if (status.setupRequired) {
-        setState({ phase: 'setup', status });
+        setState({ phase: 'setup', version: status.version });
         return;
       }
       if (!status.authenticated) {
-        setState({ phase: 'login', status });
+        setState({ phase: 'login', version: status.version });
         return;
       }
       const [user, hosts, sessions] = await Promise.all([api.me(), api.hosts(), api.sessions()]);
-      setState({ phase: 'workspace', status, user, hosts, sessions });
+      setState({ phase: 'workspace', version: status.version, commit: status.commit, user, hosts, sessions });
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) return;
       setState({ phase: 'error', message: errorMessage(reason) });
@@ -44,13 +43,7 @@ export default function App() {
 
   useEffect(() => {
     const authExpired = () =>
-      setState((current) => ({
-        phase: 'login',
-        status:
-          'status' in current
-            ? { ...current.status, authenticated: false, setupRequired: false }
-            : { authenticated: false, setupRequired: false, version: '' },
-      }));
+      setState((current) => ({ phase: 'login', version: 'version' in current ? current.version : '' }));
     const pwaUpdate = (event: Event) => setUpdate((event as CustomEvent<ServiceWorkerRegistration>).detail);
     window.addEventListener(AUTH_EXPIRED_EVENT, authExpired);
     window.addEventListener(PWA_UPDATE_EVENT, pwaUpdate);
@@ -72,24 +65,21 @@ export default function App() {
         }}
       />
     );
-  else if (state.phase === 'setup')
-    content = <AuthScreen mode="setup" version={state.status.version} onAuthenticated={() => void bootstrap()} />;
-  else if (state.phase === 'login')
-    content = <AuthScreen mode="login" version={state.status.version} onAuthenticated={() => void bootstrap()} />;
-  else
+  else if (state.phase === 'workspace')
     content = (
       <Workspace
         initialHosts={state.hosts}
         initialSessions={state.sessions}
         user={state.user}
-        version={state.status.version}
-        commit={state.status.commit}
+        version={state.version}
+        commit={state.commit}
         onLogout={async () => {
           await api.logout();
-          setState({ phase: 'login', status: { ...state.status, authenticated: false } });
+          setState({ phase: 'login', version: state.version });
         }}
       />
     );
+  else content = <AuthScreen mode={state.phase} version={state.version} onAuthenticated={() => void bootstrap()} />;
 
   return (
     <>

@@ -4,15 +4,12 @@ import { Button } from './UI';
 
 type State = { error: Error | null };
 
+/** Rendering errors are intentionally contained; server logs never receive terminal content. */
 export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
   state: State = { error: null };
 
   static getDerivedStateFromError(error: Error): State {
     return { error };
-  }
-
-  componentDidCatch(): void {
-    // Rendering errors are intentionally contained; server logs never receive terminal content.
   }
 
   render() {
