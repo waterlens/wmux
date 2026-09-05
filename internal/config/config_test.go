@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,7 @@ func TestFromLookupEnv(t *testing.T) {
 		"WMUX_PUBLIC_URL":  "https://terminal.example.test/",
 		"WMUX_TRUST_PROXY": "true",
 		"WMUX_SESSION_TTL": "12h",
+		"WMUX_LOG_LEVEL":   " WARNING ",
 	}
 	cfg, err := FromLookupEnv(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -38,6 +40,9 @@ func TestFromLookupEnv(t *testing.T) {
 	}
 	if cfg.SessionTTL != 12*time.Hour {
 		t.Fatalf("SessionTTL = %v", cfg.SessionTTL)
+	}
+	if cfg.LogLevel != slog.LevelWarn {
+		t.Fatalf("LogLevel = %v", cfg.LogLevel)
 	}
 	if cfg.DatabasePath != filepath.Join(dataDir, "wmux.db") {
 		t.Fatalf("DatabasePath = %q", cfg.DatabasePath)
@@ -66,6 +71,7 @@ func TestFromLookupEnvRejectsInvalidValues(t *testing.T) {
 		{"WMUX_PUBLIC_URL": "/relative"},
 		{"WMUX_COOKIE_SECURE": "sometimes"},
 		{"WMUX_SESSION_TTL": "0s"},
+		{"WMUX_LOG_LEVEL": "verbose"},
 	}
 	for _, values := range tests {
 		_, err := FromLookupEnv(func(key string) (string, bool) {

@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -37,6 +38,7 @@ type Config struct {
 	CookieSecure  bool
 	TrustProxy    bool
 	SessionTTL    time.Duration
+	LogLevel      slog.Level
 }
 
 // Load reads configuration from the current process environment.
@@ -105,6 +107,10 @@ func FromLookupEnv(lookup func(string) (string, bool)) (Config, error) {
 	if ttl <= 0 {
 		return Config{}, errors.New("config: WMUX_SESSION_TTL must be positive")
 	}
+	logLevel, err := logLevelValue(lookup, "WMUX_LOG_LEVEL")
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		Host:          host,
@@ -119,6 +125,7 @@ func FromLookupEnv(lookup func(string) (string, bool)) (Config, error) {
 		CookieSecure:  cookieSecure,
 		TrustProxy:    trustProxy,
 		SessionTTL:    ttl,
+		LogLevel:      logLevel,
 	}
 	return cfg, nil
 }
@@ -189,6 +196,22 @@ func boolValue(lookup func(string) (string, bool), key string, fallback bool) (b
 		return false, fmt.Errorf("config: %s must be a boolean: %w", key, err)
 	}
 	return parsed, nil
+}
+
+func logLevelValue(lookup func(string) (string, bool), key string) (slog.Level, error) {
+	value, _ := lookup(key)
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "info":
+		return slog.LevelInfo, nil
+	case "debug":
+		return slog.LevelDebug, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("config: %s must be debug, info, warn, or error", key)
+	}
 }
 
 func durationValue(lookup func(string) (string, bool), key string, fallback time.Duration) (time.Duration, error) {

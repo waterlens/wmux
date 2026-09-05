@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -25,38 +24,19 @@ import (
 )
 
 func main() {
-	level, err := parseLogLevel(os.Getenv("WMUX_LOG_LEVEL"))
+	cfg, err := config.Load()
 	if err != nil {
-		slog.New(slog.NewTextHandler(os.Stderr, nil)).Error("invalid logging configuration", "error", err)
+		slog.New(slog.NewTextHandler(os.Stderr, nil)).Error("invalid configuration", "error", err)
 		os.Exit(2)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	if err := run(logger); err != nil {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	if err := run(cfg, logger); err != nil {
 		logger.Error("wmux stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func parseLogLevel(value string) (slog.Level, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "info":
-		return slog.LevelInfo, nil
-	case "debug":
-		return slog.LevelDebug, nil
-	case "warn", "warning":
-		return slog.LevelWarn, nil
-	case "error":
-		return slog.LevelError, nil
-	default:
-		return slog.LevelInfo, errors.New("WMUX_LOG_LEVEL must be debug, info, warn, or error")
-	}
-}
-
-func run(logger *slog.Logger) error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
+func run(cfg config.Config, logger *slog.Logger) error {
 	if err := cfg.Ensure(); err != nil {
 		return err
 	}
