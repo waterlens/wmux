@@ -50,8 +50,8 @@ const (
 	// remoteMissingExitStatus is the attach script's exit status for a missing session.
 	remoteMissingExitStatus = 3
 
-	maxMuxNameLen     = 32
-	maxBackendNameLen = 40
+	maxMuxNameLen        = 32
+	maxMuxSessionNameLen = 40
 
 	// muxSettleTimeout and muxPollInterval bound the wait for a local or remote
 	// multiplexer session to appear or disappear.
@@ -183,10 +183,10 @@ func SafeMuxName(value, fallback string, limit int) string {
 	return name
 }
 
-// BackendName returns the deterministic tmux/screen name used for a session.
-func BackendName(sessionID string) string {
+// MuxSessionName returns the deterministic tmux/screen name used for a session.
+func MuxSessionName(sessionID string) string {
 	hash := sha256.Sum256([]byte(sessionID))
-	return fmt.Sprintf("wmux-%s-%x", SafeMuxName(sessionID, "session", maxBackendNameLen), hash[:4])
+	return fmt.Sprintf("wmux-%s-%x", SafeMuxName(sessionID, "session", maxMuxSessionNameLen), hash[:4])
 }
 
 // reconnectDelay is minimum doubled per attempt, capped at maximum. NewManager

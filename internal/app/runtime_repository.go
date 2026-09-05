@@ -119,7 +119,7 @@ func (r *RuntimeRepository) OnSessionState(status terminal.SessionStatus) {
 	backendName := ""
 	if status.Persistence != "" && status.Persistence != terminal.PersistenceAuto {
 		backend = string(status.Persistence)
-		backendName = terminal.BackendName(status.ID)
+		backendName = terminal.MuxSessionName(status.ID)
 	}
 	if err := r.Store.UpdateSessionRuntime(ctx, status.ID, status.Generation, state, backend, backendName, sessionError); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {

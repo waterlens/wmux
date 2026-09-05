@@ -366,7 +366,7 @@ func TestDeleteDormantPersistentSSHSessionsWithoutContactingUnreachableHost(t *t
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := fixture.database.UpdateSessionRuntime(ctx, id, created.Generation, status, "tmux", terminal.BackendName(id), nil); err != nil {
+		if err := fixture.database.UpdateSessionRuntime(ctx, id, created.Generation, status, "tmux", terminal.MuxSessionName(id), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -674,7 +674,7 @@ func TestDeleteRunningSessionOnUnreachableHostWarnsAndReleasesTheHost(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.database.UpdateSessionRuntime(ctx, id, created.Generation, store.SessionStatusRunning, "tmux", terminal.BackendName(id), nil); err != nil {
+	if err := fixture.database.UpdateSessionRuntime(ctx, id, created.Generation, store.SessionStatusRunning, "tmux", terminal.MuxSessionName(id), nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.manager.Restore(ctx); err != nil {

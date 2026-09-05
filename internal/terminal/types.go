@@ -49,8 +49,8 @@ var (
 	ErrAttachmentClosed = errors.New("terminal: attachment is closed")
 	ErrUnavailable      = errors.New("terminal: backend is unavailable")
 
-	// ErrBackendMissing reports that the tmux/screen session is gone.
-	ErrBackendMissing = errors.New("terminal: backend session no longer exists")
+	// ErrMuxSessionMissing reports that the tmux/screen session is gone.
+	ErrMuxSessionMissing = errors.New("terminal: backend session no longer exists")
 )
 
 // Credential exposes no serialization contract, so secrets stay out of records.

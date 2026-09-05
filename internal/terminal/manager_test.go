@@ -208,7 +208,7 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 		t.Skip("screen is not installed")
 	}
 	id := fmt.Sprintf("screen-close-%d-%d", os.Getpid(), time.Now().UnixNano())
-	name := BackendName(id)
+	name := MuxSessionName(id)
 	runtimeDir := t.TempDir()
 	screenConfig, screenEnv, err := newExecLauncher(Config{MuxRuntimeDir: runtimeDir}).screenRuntime(nil)
 	if err != nil {
@@ -299,7 +299,7 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	}
 
 	id := fmt.Sprintf("tmux-restore-%d-%d", os.Getpid(), time.Now().UnixNano())
-	name := BackendName(id)
+	name := MuxSessionName(id)
 	tmuxName := fmt.Sprintf("wmux-test-%d-%d", os.Getpid(), time.Now().UnixNano())
 	repository := newMemorySessionRepository()
 	directory, err := transcript.NewDirectory(transcript.DirectoryConfig{Root: t.TempDir()})

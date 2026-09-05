@@ -60,14 +60,16 @@ type Host struct {
 }
 
 type Session struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	Kind           string     `json:"kind"`
-	HostID         *string    `json:"hostId,omitempty"`
-	HostName       *string    `json:"hostName,omitempty"`
-	Cwd            string     `json:"cwd,omitempty"`
-	Command        string     `json:"command,omitempty"`
-	Persistence    string     `json:"persistence"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Kind        string  `json:"kind"`
+	HostID      *string `json:"hostId,omitempty"`
+	HostName    *string `json:"hostName,omitempty"`
+	Cwd         string  `json:"cwd,omitempty"`
+	Command     string  `json:"command,omitempty"`
+	Persistence string  `json:"persistence"`
+	// Backend is the persistence kind the runtime actually resolved to
+	// ("tmux", "screen" or "none"), not the name of a multiplexer session.
 	Backend        string     `json:"backend,omitempty"`
 	BackendName    string     `json:"backendName,omitempty"`
 	Status         string     `json:"status"`

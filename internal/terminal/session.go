@@ -221,7 +221,7 @@ func (s *runtimeSession) retryAfterStartError(err error, attempt int) (int, bool
 	if s.ctx.Err() != nil || !s.keepRunning() {
 		return attempt, false
 	}
-	if errors.Is(err, ErrBackendMissing) {
+	if errors.Is(err, ErrMuxSessionMissing) {
 		s.finishExited(err)
 		return attempt, false
 	}
@@ -244,7 +244,7 @@ func (s *runtimeSession) retryAfterStartError(err error, attempt int) (int, bool
 // retryAfterBackendError reports whether the run loop should reconnect after a
 // live backend failed, and the attempt count to continue from.
 func (s *runtimeSession) retryAfterBackendError(b backend, err error, attempt int) (int, bool) {
-	if errors.Is(err, ErrBackendMissing) || !b.Reconnectable(err) {
+	if errors.Is(err, ErrMuxSessionMissing) || !b.Reconnectable(err) {
 		s.finishExited(err)
 		return attempt, false
 	}

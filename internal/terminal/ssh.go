@@ -73,7 +73,7 @@ func (l *execLauncher) startSSH(ctx context.Context, spec SessionSpec, requested
 	}
 	// A direct remote shell has nothing to reattach to.
 	if resolved == PersistenceNone && !create {
-		return nil, "", ErrBackendMissing
+		return nil, "", ErrMuxSessionMissing
 	}
 	if sess, err = client.NewSession(); err != nil {
 		return nil, "", fmt.Errorf("terminal: create SSH session: %w", err)
@@ -95,7 +95,7 @@ func (l *execLauncher) startSSH(ctx context.Context, spec SessionSpec, requested
 	sess.Stdout = writer
 	sess.Stderr = writer
 
-	if command := l.remoteAttachCommand(spec, resolved, BackendName(spec.ID), create); command == "" {
+	if command := l.remoteAttachCommand(spec, resolved, MuxSessionName(spec.ID), create); command == "" {
 		err = sess.Shell()
 	} else {
 		err = sess.Start(posixScript(command))
@@ -462,7 +462,7 @@ func (l *execLauncher) terminateSSH(ctx context.Context, spec SessionSpec, resol
 		return fmt.Errorf("terminal: create SSH termination session: %w", err)
 	}
 	defer sess.Close()
-	name := BackendName(spec.ID)
+	name := MuxSessionName(spec.ID)
 	output, err := runSSHOutput(ctx, sess, posixScript(l.remoteTerminateCommand(resolved, name)))
 	if err != nil && !sessionAbsent(resolved, output) {
 		return fmt.Errorf("terminal: terminate remote %s: %w", resolved, err)
@@ -524,7 +524,7 @@ func (b *sshBackend) Wait(ctx context.Context) error {
 		// The attach script reports a vanished session with a dedicated status.
 		var exitErr *ssh.ExitError
 		if b.kind != PersistenceNone && errors.As(err, &exitErr) && exitErr.ExitStatus() == remoteMissingExitStatus {
-			return ErrBackendMissing
+			return ErrMuxSessionMissing
 		}
 		return err
 	case <-ctx.Done():
@@ -555,7 +555,7 @@ func (b *sshBackend) Terminate(ctx context.Context) error {
 }
 
 func (b *sshBackend) Reconnectable(err error) bool {
-	if b.kind == PersistenceNone || err == nil || errors.Is(err, ErrBackendMissing) {
+	if b.kind == PersistenceNone || err == nil || errors.Is(err, ErrMuxSessionMissing) {
 		return false
 	}
 	var exitErr *ssh.ExitError

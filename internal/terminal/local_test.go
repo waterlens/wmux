@@ -55,7 +55,7 @@ func TestLocalBackendReconnectDecisionTreatsPTYClosureAsExit(t *testing.T) {
 func TestLocalMuxConfigurationIsIsolated(t *testing.T) {
 	runtimeDir := t.TempDir()
 	l := newExecLauncher(Config{MuxName: "my wmux!", MuxRuntimeDir: runtimeDir})
-	name := BackendName("session/id")
+	name := MuxSessionName("session/id")
 	tmuxArgs := l.tmuxArgs("kill-session", "-t", "="+name)
 	wantArgs := []string{"-L", "my-wmux", "-f", "/dev/null", "kill-session", "-t", "=" + name}
 	if !slices.Equal(tmuxArgs, wantArgs) {
@@ -165,7 +165,7 @@ func TestTerminateLocalTargetsOnlyNamedIsolatedSession(t *testing.T) {
 	t.Setenv("WMUX_ENV_CAPTURE_PATH", environmentCapture)
 
 	spec := SessionSpec{ID: "one/session"}
-	name := BackendName(spec.ID)
+	name := MuxSessionName(spec.ID)
 	tmuxLauncher := newExecLauncher(Config{tmuxPath: tool, MuxName: "isolated"})
 	if err := tmuxLauncher.terminateLocal(context.Background(), spec, PersistenceTmux); err != nil {
 		t.Fatal(err)
@@ -270,7 +270,7 @@ func TestLocalTmuxAttachOnlyReportsMissingSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	spec := SessionSpec{ID: namespace + "-gone", Shell: "/bin/sh", Args: []string{"-i"}}
-	if _, _, err := l.startLocal(ctx, spec, PersistenceTmux, false); !errors.Is(err, ErrBackendMissing) {
-		t.Fatalf("attach-only launch of a missing session = %v, want ErrBackendMissing", err)
+	if _, _, err := l.startLocal(ctx, spec, PersistenceTmux, false); !errors.Is(err, ErrMuxSessionMissing) {
+		t.Fatalf("attach-only launch of a missing session = %v, want ErrMuxSessionMissing", err)
 	}
 }

@@ -356,7 +356,7 @@ func publicTerminalMessage(status terminal.SessionStatus) string {
 		return ""
 	}
 	// A missing tmux/screen session is an ordinary outcome, not a fault.
-	if publicTerminalState(status.State) == "exited" && status.LastError == terminal.ErrBackendMissing.Error() {
+	if publicTerminalState(status.State) == "exited" && status.LastError == terminal.ErrMuxSessionMissing.Error() {
 		return "后台会话已不存在"
 	}
 	return "终端暂时不可用，请检查会话配置或主机连接"

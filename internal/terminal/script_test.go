@@ -41,7 +41,7 @@ func TestRemoteScriptsRunUnderPOSIXAndFishLoginShells(t *testing.T) {
 	}
 
 	l := newExecLauncher(Config{MuxName: "wmux script test"})
-	name := BackendName("ses_script")
+	name := MuxSessionName("ses_script")
 	spec := SessionSpec{
 		ID:    "ses_script",
 		Cwd:   "~/work/a'b",

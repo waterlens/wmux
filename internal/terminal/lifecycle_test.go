@@ -574,7 +574,7 @@ func TestRestoreOnlyAttachesAndExitsWhenTheBackendIsGone(t *testing.T) {
 		Active:              true,
 	}}}
 	backends := &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence, bool) (backend, Persistence, error) {
-		return nil, "", ErrBackendMissing
+		return nil, "", ErrMuxSessionMissing
 	}}
 	manager := managerWithLauncher(t, backends, func(cfg *Config) { cfg.Repository = repository })
 	defer manager.Close()

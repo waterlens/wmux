@@ -42,7 +42,7 @@ func (l *execLauncher) startLocal(ctx context.Context, spec SessionSpec, request
 	}
 
 	cols, rows := terminalSize(spec)
-	name := BackendName(spec.ID)
+	name := MuxSessionName(spec.ID)
 	var cmd *exec.Cmd
 	switch resolved {
 	case PersistenceTmux:
@@ -63,7 +63,7 @@ func (l *execLauncher) startLocal(ctx context.Context, spec SessionSpec, request
 	case PersistenceNone:
 		// A plain PTY has nothing to reattach to.
 		if !create {
-			return nil, "", ErrBackendMissing
+			return nil, "", ErrMuxSessionMissing
 		}
 		shell := spec.Shell
 		if shell == "" {
@@ -109,7 +109,7 @@ func (l *execLauncher) ensureLocalTmux(ctx context.Context, path, name string, s
 		return l.configureLocalTmux(ctx, path)
 	}
 	if !create {
-		return ErrBackendMissing
+		return ErrMuxSessionMissing
 	}
 	// update-environment and new-session run in one invocation; ";" is a separate
 	// argv element because it is tmux's command separator.
@@ -175,7 +175,7 @@ func (l *execLauncher) ensureLocalScreen(ctx context.Context, path, config strin
 		return nil
 	}
 	if !create {
-		return ErrBackendMissing
+		return ErrMuxSessionMissing
 	}
 	args := []string{"-c", config, "-dmS", name}
 	if spec.Shell != "" {
@@ -220,7 +220,7 @@ func localScreenExists(ctx context.Context, path, config string, env []string, n
 }
 
 func (l *execLauncher) terminateLocal(ctx context.Context, spec SessionSpec, resolved Persistence) error {
-	name := BackendName(spec.ID)
+	name := MuxSessionName(spec.ID)
 	var path, config string
 	var args, env []string
 	switch resolved {
