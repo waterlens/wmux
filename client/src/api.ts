@@ -1,70 +1,8 @@
 import { z } from 'zod';
 import type { HostInput, SessionInput } from './types';
+import { hostSchema, sessionSchema, sshConfigDiscoverySchema, statusSchema, userSchema } from './types';
 
 export const AUTH_EXPIRED_EVENT = 'wmux:auth-expired';
-
-const userSchema = z.object({
-  username: z.string(),
-  createdAt: z.string(),
-});
-
-const statusSchema = z.object({
-  setupRequired: z.boolean(),
-  authenticated: z.boolean(),
-  version: z.string(),
-  commit: z.string().optional(),
-});
-
-const hostSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  address: z.string(),
-  port: z.number().int(),
-  username: z.string(),
-  authType: z.enum(['password', 'privateKey', 'agent']),
-  fingerprint: z.string().optional(),
-  hasSecret: z.boolean(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
-
-const sshConfigCandidateSchema = z.object({
-  alias: z.string(),
-  address: z.string(),
-  port: z.number().int().min(1).max(65_535),
-  username: z.string(),
-  hasIdentityFile: z.boolean(),
-  unsupported: z.array(z.string()),
-  existingHostId: z.string().optional(),
-});
-
-const sshConfigDiscoverySchema = z.object({
-  available: z.boolean(),
-  source: z.string(),
-  candidates: z.array(sshConfigCandidateSchema),
-});
-
-const sessionSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  kind: z.enum(['local', 'ssh']),
-  hostId: z.string().optional(),
-  hostName: z.string().optional(),
-  cwd: z.string().optional(),
-  command: z.string().optional(),
-  persistence: z.enum(['auto', 'tmux', 'screen', 'none']),
-  backend: z.string().optional(),
-  backendName: z.string().optional(),
-  status: z.enum(['connecting', 'running', 'reconnecting', 'detached', 'exited', 'error']),
-  generation: z.number().int().optional(),
-  cols: z.number().int(),
-  rows: z.number().int(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  lastAttachedAt: z.string().optional(),
-  exitCode: z.number().int().optional(),
-  error: z.string().optional(),
-});
 
 /** DELETE answers 204, or 200 with a warning when the backend could not be confirmed stopped. */
 const deleteSessionSchema = z.object({ warning: z.string().optional() }).optional();
@@ -89,14 +27,12 @@ const apiErrorSchema = z.object({
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string | undefined;
-  readonly details: unknown;
 
-  constructor(message: string, status: number, options: { code?: string | undefined; details?: unknown } = {}) {
+  constructor(message: string, status: number, options: { code?: string | undefined } = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = options.code;
-    this.details = options.details;
   }
 }
 
@@ -104,11 +40,16 @@ export function signalAuthExpired(): void {
   if (typeof window !== 'undefined') window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
 }
 
+type RequestOptions = {
+  /** Set to false where a 401 means "wrong credentials" rather than an expired session. */
+  redirectOnUnauthorized?: boolean;
+};
+
 async function request<T>(
   path: string,
   schema: z.ZodType<T>,
   init: RequestInit = {},
-  redirectOnUnauthorized = true,
+  { redirectOnUnauthorized = true }: RequestOptions = {},
 ): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body !== undefined && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json');
@@ -133,53 +74,66 @@ async function request<T>(
     const code = parsedError.success ? parsedError.data.error.code : undefined;
     const message = parsedError.success ? parsedError.data.error.message : `请求失败 (${response.status})`;
     if (response.status === 401 && redirectOnUnauthorized) signalAuthExpired();
-    throw new ApiError(message, response.status, { code, details: payload });
+    throw new ApiError(message, response.status, { code });
   }
 
   const parsed = schema.safeParse(payload);
   if (!parsed.success) {
-    throw new ApiError('服务返回的数据格式不正确。', 502, { code: 'invalid_response', details: parsed.error });
+    throw new ApiError('服务返回的数据格式不正确。', 502, { code: 'invalid_response' });
   }
   return parsed.data;
-}
-
-function body(value: unknown): string {
-  return JSON.stringify(value);
 }
 
 export const api = {
   status: () => request('/api/status', statusSchema),
   setup: (username: string, password: string) =>
-    request('/api/setup', userSchema, { method: 'POST', body: body({ username, password }) }, false),
+    request(
+      '/api/setup',
+      userSchema,
+      { method: 'POST', body: JSON.stringify({ username, password }) },
+      { redirectOnUnauthorized: false },
+    ),
   login: (username: string, password: string) =>
-    request('/api/login', userSchema, { method: 'POST', body: body({ username, password }) }, false),
+    request(
+      '/api/login',
+      userSchema,
+      { method: 'POST', body: JSON.stringify({ username, password }) },
+      { redirectOnUnauthorized: false },
+    ),
   logout: () => request('/api/logout', z.undefined(), { method: 'POST' }),
   me: () => request('/api/me', userSchema),
-  // 401 here is a wrong password, not an expired session.
   changePassword: (currentPassword: string, newPassword: string) =>
-    request('/api/me/password', z.undefined(), { method: 'POST', body: body({ currentPassword, newPassword }) }, false),
+    request(
+      '/api/me/password',
+      z.undefined(),
+      { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) },
+      { redirectOnUnauthorized: false },
+    ),
 
   hosts: () => request('/api/hosts', z.array(hostSchema)),
   sshConfigHosts: () => request('/api/hosts/ssh-config', sshConfigDiscoverySchema),
   importSSHConfigHost: (alias: string) =>
-    request('/api/hosts/import-ssh-config', hostSchema, { method: 'POST', body: body({ alias }) }),
-  createHost: (input: HostInput) => request('/api/hosts', hostSchema, { method: 'POST', body: body(input) }),
+    request('/api/hosts/import-ssh-config', hostSchema, { method: 'POST', body: JSON.stringify({ alias }) }),
+  createHost: (input: HostInput) => request('/api/hosts', hostSchema, { method: 'POST', body: JSON.stringify(input) }),
   updateHost: (id: string, input: Partial<HostInput>) =>
-    request(`/api/hosts/${encodeURIComponent(id)}`, hostSchema, { method: 'PATCH', body: body(input) }),
+    request(`/api/hosts/${encodeURIComponent(id)}`, hostSchema, { method: 'PATCH', body: JSON.stringify(input) }),
   deleteHost: (id: string) => request(`/api/hosts/${encodeURIComponent(id)}`, z.undefined(), { method: 'DELETE' }),
   probeHost: (id: string) => request(`/api/hosts/${encodeURIComponent(id)}/probe`, probeSchema, { method: 'POST' }),
   trustHost: (id: string, fingerprint: string) =>
     request(`/api/hosts/${encodeURIComponent(id)}/trust`, z.undefined(), {
       method: 'POST',
-      body: body({ fingerprint }),
+      body: JSON.stringify({ fingerprint }),
     }),
   testHost: (id: string) => request(`/api/hosts/${encodeURIComponent(id)}/test`, testResultSchema, { method: 'POST' }),
 
   sessions: () => request('/api/sessions', z.array(sessionSchema)),
   createSession: (input: SessionInput) =>
-    request('/api/sessions', sessionSchema, { method: 'POST', body: body(input) }),
+    request('/api/sessions', sessionSchema, { method: 'POST', body: JSON.stringify(input) }),
   updateSession: (id: string, input: { name: string }) =>
-    request(`/api/sessions/${encodeURIComponent(id)}`, sessionSchema, { method: 'PATCH', body: body(input) }),
+    request(`/api/sessions/${encodeURIComponent(id)}`, sessionSchema, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    }),
   deleteSession: (id: string) =>
     request(`/api/sessions/${encodeURIComponent(id)}`, deleteSessionSchema, { method: 'DELETE' }),
   restartSession: (id: string) =>
@@ -204,7 +158,6 @@ const publicMessages: Partial<Record<string, string>> = {
   ssh_test_failed: '无法连接到 SSH 主机，请检查地址、端口和认证信息。',
   terminal_start_failed: '无法启动会话，请检查工作目录、启动命令与主机连接。',
   terminal_stop_failed: '无法结束会话，请稍后重试。',
-  terminal_config: '会话配置无效，请检查工作目录和启动命令。',
   internal_error: '服务暂时不可用，请稍后重试。',
 };
 
@@ -215,12 +168,3 @@ export function errorMessage(error: unknown): string {
   }
   return error instanceof Error ? error.message : '发生未知错误。';
 }
-
-export const schemas = {
-  statusSchema,
-  userSchema,
-  hostSchema,
-  sshConfigCandidateSchema,
-  sshConfigDiscoverySchema,
-  sessionSchema,
-};

@@ -1,55 +1,86 @@
-export type StatusResponse = {
-  setupRequired: boolean;
-  authenticated: boolean;
-  version: string;
-  commit?: string | undefined;
-};
+import { z } from 'zod';
 
-export type User = {
-  username: string;
-  createdAt: string;
-};
+// Response contracts are defined once as zod schemas; the TypeScript types are inferred from them so
+// the runtime validation in api.ts and the compile-time shape can never drift apart.
 
-export type AuthType = 'password' | 'privateKey' | 'agent';
+export const statusSchema = z.object({
+  setupRequired: z.boolean(),
+  authenticated: z.boolean(),
+  version: z.string(),
+  commit: z.string().optional(),
+});
+export type StatusResponse = z.infer<typeof statusSchema>;
 
-export type Host = {
-  id: string;
-  name: string;
-  address: string;
-  port: number;
-  username: string;
-  authType: AuthType;
-  fingerprint?: string | undefined;
-  hasSecret: boolean;
-  createdAt: string;
-  updatedAt: string;
-};
+export const userSchema = z.object({
+  username: z.string(),
+  createdAt: z.string(),
+});
+export type User = z.infer<typeof userSchema>;
 
-export type SessionKind = 'local' | 'ssh';
-export type PersistenceMode = 'auto' | 'tmux' | 'screen' | 'none';
-export type SessionStatus = 'connecting' | 'running' | 'reconnecting' | 'detached' | 'exited' | 'error';
+export const authTypeSchema = z.enum(['password', 'privateKey', 'agent']);
+export type AuthType = z.infer<typeof authTypeSchema>;
 
-export type Session = {
-  id: string;
-  name: string;
-  kind: SessionKind;
-  hostId?: string | undefined;
-  hostName?: string | undefined;
-  cwd?: string | undefined;
-  command?: string | undefined;
-  persistence: PersistenceMode;
-  backend?: string | undefined;
-  backendName?: string | undefined;
-  status: SessionStatus;
-  generation?: number | undefined;
-  cols: number;
-  rows: number;
-  createdAt: string;
-  updatedAt: string;
-  lastAttachedAt?: string | undefined;
-  exitCode?: number | undefined;
-  error?: string | undefined;
-};
+export const hostSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  address: z.string(),
+  port: z.number().int(),
+  username: z.string(),
+  authType: authTypeSchema,
+  fingerprint: z.string().optional(),
+  hasSecret: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type Host = z.infer<typeof hostSchema>;
+
+export const sessionKindSchema = z.enum(['local', 'ssh']);
+export type SessionKind = z.infer<typeof sessionKindSchema>;
+
+export const persistenceModeSchema = z.enum(['auto', 'tmux', 'screen', 'none']);
+export type PersistenceMode = z.infer<typeof persistenceModeSchema>;
+
+export const sessionStatusSchema = z.enum(['connecting', 'running', 'reconnecting', 'detached', 'exited', 'error']);
+export type SessionStatus = z.infer<typeof sessionStatusSchema>;
+
+export const sessionSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: sessionKindSchema,
+  hostId: z.string().optional(),
+  hostName: z.string().optional(),
+  cwd: z.string().optional(),
+  command: z.string().optional(),
+  persistence: persistenceModeSchema,
+  backend: persistenceModeSchema.optional(),
+  status: sessionStatusSchema,
+  // Bumped by the server on every restart; used as the remount key of the terminal view.
+  generation: z.number().int().optional(),
+  cols: z.number().int(),
+  rows: z.number().int(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  lastAttachedAt: z.string().optional(),
+});
+export type Session = z.infer<typeof sessionSchema>;
+
+export const sshConfigCandidateSchema = z.object({
+  alias: z.string(),
+  address: z.string(),
+  port: z.number().int().min(1).max(65_535),
+  username: z.string(),
+  hasIdentityFile: z.boolean(),
+  unsupported: z.array(z.string()),
+  existingHostId: z.string().optional(),
+});
+export type SSHConfigCandidate = z.infer<typeof sshConfigCandidateSchema>;
+
+export const sshConfigDiscoverySchema = z.object({
+  available: z.boolean(),
+  source: z.string(),
+  candidates: z.array(sshConfigCandidateSchema),
+});
+export type SSHConfigDiscovery = z.infer<typeof sshConfigDiscoverySchema>;
 
 export type HostInput = {
   name: string;
@@ -60,22 +91,6 @@ export type HostInput = {
   password?: string;
   privateKey?: string;
   passphrase?: string;
-};
-
-export type SSHConfigCandidate = {
-  alias: string;
-  address: string;
-  port: number;
-  username: string;
-  hasIdentityFile: boolean;
-  unsupported: string[];
-  existingHostId?: string | undefined;
-};
-
-export type SSHConfigDiscovery = {
-  available: boolean;
-  source: string;
-  candidates: SSHConfigCandidate[];
 };
 
 export type SessionInput = {
@@ -100,3 +115,5 @@ export type Toast = {
   tone: 'success' | 'error' | 'info';
   message: string;
 };
+
+export type Notify = (message: string, tone?: Toast['tone']) => void;

@@ -1,12 +1,12 @@
 import { FileInput, KeyRound, LoaderCircle, RefreshCw, ShieldAlert } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { api, errorMessage } from '../api';
-import type { Host, SSHConfigCandidate, SSHConfigDiscovery } from '../types';
+import type { Host, Notify, SSHConfigCandidate, SSHConfigDiscovery } from '../types';
 import { Button, Modal } from './UI';
 
 type SSHConfigImportProps = {
   onImported: (host: Host) => void;
-  notify: (message: string, tone?: 'success' | 'error' | 'info') => void;
+  notify: Notify;
 };
 
 export function SSHConfigImport({ onImported, notify }: SSHConfigImportProps) {

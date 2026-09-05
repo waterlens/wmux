@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { type FormEvent, useId, useState } from 'react';
 import { api, errorMessage } from '../api';
-import type { AuthType, Host, HostInput } from '../types';
+import type { AuthType, Host, HostInput, Notify } from '../types';
 import { SSHConfigImport } from './SSHConfigImport';
 import { ActionMenu, Button, ConfirmDialog, EmptyState, Field, Input, Modal, Textarea } from './UI';
 
@@ -24,7 +24,7 @@ type HostManagerProps = {
   hosts: Host[];
   onHostsChange: (hosts: Host[]) => void;
   onStartSession: (hostId: string) => void;
-  notify: (message: string, tone?: 'success' | 'error' | 'info') => void;
+  notify: Notify;
 };
 
 type ProbeResult = {

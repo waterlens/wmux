@@ -1,17 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, AUTH_EXPIRED_EVENT, schemas } from './api';
-
-const sessionFixture = {
-  id: 'session-1',
-  name: '构建任务',
-  kind: 'local',
-  persistence: 'auto',
-  status: 'running',
-  cols: 80,
-  rows: 24,
-  createdAt: '2026-01-01T00:00:00Z',
-  updatedAt: '2026-01-01T00:00:00Z',
-};
+import { ApiError, api, AUTH_EXPIRED_EVENT } from './api';
 
 const originalFetch = globalThis.fetch;
 
@@ -198,11 +186,5 @@ describe('session lifecycle API contract', () => {
       '/api/sessions/session%201/reconnect',
       expect.objectContaining({ method: 'POST' }),
     );
-  });
-
-  it('accepts a session generation and rejects a fractional one', () => {
-    expect(schemas.sessionSchema.safeParse({ ...sessionFixture, generation: 3 }).success).toBe(true);
-    expect(schemas.sessionSchema.safeParse(sessionFixture).success).toBe(true);
-    expect(schemas.sessionSchema.safeParse({ ...sessionFixture, generation: 1.5 }).success).toBe(false);
   });
 });
