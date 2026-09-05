@@ -247,6 +247,27 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		// Diagnostics for hosts whose screen behaves differently: whatever the
+		// attach printed before exiting, and what screen itself thinks exists.
+		var output bytes.Buffer
+		for drained := false; !drained; {
+			select {
+			case frame := <-firstAttachment.Frames:
+				output.Write(frame.Data)
+			default:
+				drained = true
+			}
+		}
+		t.Logf("terminal output before failure:\n%s", output.String())
+		list := exec.Command(screenPath, "-c", screenConfig, "-ls")
+		list.Env = screenEnv
+		listing, _ := list.CombinedOutput()
+		t.Logf("screen -ls:\n%s", listing)
+	})
 	waitState(ctx, t, firstManager, id, StateRunning)
 	status, _ := firstManager.Status(id)
 	if status.Persistence != PersistenceScreen {

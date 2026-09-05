@@ -81,7 +81,7 @@ func waitState(ctx context.Context, t *testing.T, manager *Manager, id string, w
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("state = %s, want %s", status.State, want)
+			t.Fatalf("state = %s (last error %q), want %s", status.State, status.LastError, want)
 		case <-ticker.C:
 		}
 	}
