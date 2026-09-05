@@ -16,7 +16,7 @@ func (s *Store) IsSetup(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("check setup state: %w", err)
+		return false, fmt.Errorf("store: check setup state: %w", err)
 	}
 	return true, nil
 }
@@ -37,13 +37,9 @@ INSERT INTO users(id, username, password_hash, created_at, updated_at)
 VALUES (1, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING`, username, passwordHash, now, now)
 	if err != nil {
-		return fmt.Errorf("set up owner: %w", err)
+		return fmt.Errorf("store: set up owner: %w", err)
 	}
-	created, err := rowsChanged(result)
-	if err != nil {
-		return fmt.Errorf("check setup result: %w", err)
-	}
-	if !created {
+	if !rowsChanged(result) {
 		return ErrAlreadySetup
 	}
 	return nil
@@ -59,7 +55,7 @@ FROM users WHERE id = 1`).Scan(&user.Username, &user.PasswordHash, &createdAt, &
 		return User{}, ErrNotFound
 	}
 	if err != nil {
-		return User{}, fmt.Errorf("get owner: %w", err)
+		return User{}, fmt.Errorf("store: get owner: %w", err)
 	}
 	user.CreatedAt = fromUnixMillis(createdAt)
 	user.UpdatedAt = fromUnixMillis(updatedAt)
@@ -81,7 +77,7 @@ FROM users WHERE id = 1 AND username = ?`, strings.TrimSpace(username)).Scan(
 		return User{}, ErrNotFound
 	}
 	if err != nil {
-		return User{}, fmt.Errorf("get owner by username: %w", err)
+		return User{}, fmt.Errorf("store: get owner by username: %w", err)
 	}
 	user.CreatedAt = fromUnixMillis(createdAt)
 	user.UpdatedAt = fromUnixMillis(updatedAt)
@@ -92,18 +88,7 @@ func (s *Store) UpdatePassword(ctx context.Context, passwordHash string) error {
 	if strings.TrimSpace(passwordHash) == "" {
 		return fmt.Errorf("%w: password hash is empty", ErrInvalidInput)
 	}
-	result, err := s.db.ExecContext(ctx, `
+	return s.execAffecting(ctx, "update owner password", `
 UPDATE users SET password_hash = ?, updated_at = ? WHERE id = 1`,
 		passwordHash, unixMillis(s.utcNow()))
-	if err != nil {
-		return fmt.Errorf("update owner password: %w", err)
-	}
-	updated, err := rowsChanged(result)
-	if err != nil {
-		return fmt.Errorf("check password update: %w", err)
-	}
-	if !updated {
-		return ErrNotFound
-	}
-	return nil
 }

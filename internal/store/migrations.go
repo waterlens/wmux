@@ -72,12 +72,12 @@ ALTER TABLE sessions ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;
 func migrate(ctx context.Context, db *sql.DB) (returnErr error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("acquire migration connection: %w", err)
+		return fmt.Errorf("store: acquire migration connection: %w", err)
 	}
 	defer conn.Close()
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return fmt.Errorf("begin database migration: %w", err)
+		return fmt.Errorf("store: begin database migration: %w", err)
 	}
 	defer func() {
 		if returnErr != nil {
@@ -87,24 +87,21 @@ func migrate(ctx context.Context, db *sql.DB) (returnErr error) {
 
 	var version int
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("read schema version: %w", err)
+		return fmt.Errorf("store: read schema version: %w", err)
 	}
 	if version > currentSchemaVersion {
-		return fmt.Errorf("database schema version %d is newer than supported version %d", version, currentSchemaVersion)
+		return fmt.Errorf("store: database schema version %d is newer than supported version %d", version, currentSchemaVersion)
 	}
 	for next := version + 1; next <= currentSchemaVersion; next++ {
-		if next >= len(migrations) || migrations[next] == "" {
-			return fmt.Errorf("database migration %d is missing", next)
-		}
 		if _, err := conn.ExecContext(ctx, migrations[next]); err != nil {
-			return fmt.Errorf("apply database migration %d: %w", next, err)
+			return fmt.Errorf("store: apply database migration %d: %w", next, err)
 		}
 		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", next)); err != nil {
-			return fmt.Errorf("record database migration %d: %w", next, err)
+			return fmt.Errorf("store: record database migration %d: %w", next, err)
 		}
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("commit database migration: %w", err)
+		return fmt.Errorf("store: commit database migration: %w", err)
 	}
 	return nil
 }

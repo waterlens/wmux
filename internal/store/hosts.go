@@ -15,7 +15,7 @@ func (s *Store) CreateHost(ctx context.Context, host Host) (Host, error) {
 		return Host{}, err
 	}
 	if host.ID == "" {
-		id, err := newID()
+		id, err := NewID("")
 		if err != nil {
 			return Host{}, err
 		}
@@ -42,7 +42,7 @@ INSERT INTO hosts(
 		unixMillis(host.UpdatedAt),
 	)
 	if err != nil {
-		return Host{}, fmt.Errorf("create host: %w", err)
+		return Host{}, fmt.Errorf("store: create host: %w", err)
 	}
 	return host, nil
 }
@@ -59,7 +59,7 @@ FROM hosts WHERE id = ?`, id))
 		return Host{}, ErrNotFound
 	}
 	if err != nil {
-		return Host{}, fmt.Errorf("get host: %w", err)
+		return Host{}, fmt.Errorf("store: get host: %w", err)
 	}
 	return host, nil
 }
@@ -71,19 +71,19 @@ SELECT id, name, address, port, username, auth_type,
 FROM hosts
 ORDER BY name COLLATE NOCASE, id`)
 	if err != nil {
-		return nil, fmt.Errorf("list hosts: %w", err)
+		return nil, fmt.Errorf("store: list hosts: %w", err)
 	}
 	defer rows.Close()
 	hosts := make([]Host, 0)
 	for rows.Next() {
 		host, scanErr := scanHost(rows)
 		if scanErr != nil {
-			return nil, fmt.Errorf("scan host: %w", scanErr)
+			return nil, fmt.Errorf("store: scan host: %w", scanErr)
 		}
 		hosts = append(hosts, host)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate hosts: %w", err)
+		return nil, fmt.Errorf("store: iterate hosts: %w", err)
 	}
 	return hosts, nil
 }
@@ -96,7 +96,7 @@ func (s *Store) UpdateHost(ctx context.Context, host Host) (Host, error) {
 	if err := validateHost(host); err != nil {
 		return Host{}, err
 	}
-	result, err := s.db.ExecContext(ctx, `
+	err := s.execAffecting(ctx, "update host", `
 UPDATE hosts
 SET name = ?, address = ?, port = ?, username = ?, auth_type = ?,
     encrypted_credentials = ?, fingerprint = ?, updated_at = ?
@@ -112,57 +112,32 @@ WHERE id = ?`,
 		host.ID,
 	)
 	if err != nil {
-		return Host{}, fmt.Errorf("update host: %w", err)
-	}
-	updated, err := rowsChanged(result)
-	if err != nil {
-		return Host{}, fmt.Errorf("check host update: %w", err)
-	}
-	if !updated {
-		return Host{}, ErrNotFound
+		return Host{}, err
 	}
 	return s.GetHost(ctx, host.ID)
 }
 
 // UpdateHostFingerprint records a confirmed SSH host key and nothing else.
 func (s *Store) UpdateHostFingerprint(ctx context.Context, id, fingerprint string) error {
-	result, err := s.db.ExecContext(ctx, `
+	return s.execAffecting(ctx, "update host fingerprint", `
 UPDATE hosts SET fingerprint = ?, updated_at = ? WHERE id = ?`,
 		fingerprint, unixMillis(s.utcNow()), id)
-	if err != nil {
-		return fmt.Errorf("update host fingerprint: %w", err)
-	}
-	updated, err := rowsChanged(result)
-	if err != nil {
-		return fmt.Errorf("check host fingerprint update: %w", err)
-	}
-	if !updated {
-		return ErrNotFound
-	}
-	return nil
 }
 
 func (s *Store) DeleteHost(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, "DELETE FROM hosts WHERE id = ?", id)
-	if err != nil {
-		var sqliteErr *sqliteDriver.Error
-		if errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqliteConstraint {
-			return fmt.Errorf("%w: host still has sessions", ErrInUse)
-		}
-		return fmt.Errorf("delete host: %w", err)
+	err := s.execAffecting(ctx, "delete host", "DELETE FROM hosts WHERE id = ?", id)
+	var sqliteErr *sqliteDriver.Error
+	if errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqliteConstraint {
+		return fmt.Errorf("%w: host still has sessions", ErrInUse)
 	}
-	deleted, err := rowsChanged(result)
-	if err != nil {
-		return fmt.Errorf("check host deletion: %w", err)
-	}
-	if !deleted {
-		return ErrNotFound
-	}
-	return nil
+	return err
 }
 
 const sqliteConstraint = 19
 
+// validateHost covers only what the hosts table cannot: its CHECK constraints
+// already reject an out-of-range port and an unknown auth type, and the API
+// layer owns the user-facing messages.
 func validateHost(host Host) error {
 	if strings.TrimSpace(host.Name) == "" {
 		return fmt.Errorf("%w: host name is empty", ErrInvalidInput)
@@ -170,16 +145,8 @@ func validateHost(host Host) error {
 	if strings.TrimSpace(host.Address) == "" {
 		return fmt.Errorf("%w: host address is empty", ErrInvalidInput)
 	}
-	if host.Port < 1 || host.Port > 65535 {
-		return fmt.Errorf("%w: host port must be between 1 and 65535", ErrInvalidInput)
-	}
 	if strings.TrimSpace(host.Username) == "" {
 		return fmt.Errorf("%w: host username is empty", ErrInvalidInput)
-	}
-	switch host.AuthType {
-	case HostAuthPassword, HostAuthKey, HostAuthAgent:
-	default:
-		return fmt.Errorf("%w: unsupported host auth type %q", ErrInvalidInput, host.AuthType)
 	}
 	return nil
 }

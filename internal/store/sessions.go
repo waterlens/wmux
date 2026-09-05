@@ -23,7 +23,7 @@ func (s *Store) CreateSession(ctx context.Context, session Session) (Session, er
 		return Session{}, err
 	}
 	if session.ID == "" {
-		id, err := newID()
+		id, err := NewID("")
 		if err != nil {
 			return Session{}, err
 		}
@@ -58,7 +58,7 @@ INSERT INTO sessions(
 		nullableString(session.Error),
 	)
 	if err != nil {
-		return Session{}, fmt.Errorf("create session: %w", err)
+		return Session{}, fmt.Errorf("store: create session: %w", err)
 	}
 	return s.GetSession(ctx, session.ID)
 }
@@ -72,7 +72,7 @@ func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 		return Session{}, ErrNotFound
 	}
 	if err != nil {
-		return Session{}, fmt.Errorf("get session: %w", err)
+		return Session{}, fmt.Errorf("store: get session: %w", err)
 	}
 	return session, nil
 }
@@ -84,84 +84,25 @@ func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 func (s *Store) listSessions(ctx context.Context, query string, args []any) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list sessions: %w", err)
+		return nil, fmt.Errorf("store: list sessions: %w", err)
 	}
 	defer rows.Close()
 	sessions := make([]Session, 0)
 	for rows.Next() {
 		session, scanErr := scanSession(rows)
 		if scanErr != nil {
-			return nil, fmt.Errorf("scan session: %w", scanErr)
+			return nil, fmt.Errorf("store: scan session: %w", scanErr)
 		}
 		sessions = append(sessions, session)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate sessions: %w", err)
+		return nil, fmt.Errorf("store: iterate sessions: %w", err)
 	}
 	return sessions, nil
 }
 
-// UpdateSession replaces product-owned session fields; runtime-owned fields and
-// the UpdatedAt of a size-only change are preserved.
-func (s *Store) UpdateSession(ctx context.Context, session Session) (Session, error) {
-	if strings.TrimSpace(session.ID) == "" {
-		return Session{}, fmt.Errorf("%w: session id is empty", ErrInvalidInput)
-	}
-	if err := validateSession(session); err != nil {
-		return Session{}, err
-	}
-	result, err := s.db.ExecContext(ctx, `
-UPDATE sessions
-SET name = ?, kind = ?, host_id = ?, cwd = ?, command = ?,
-    persistence = ?, cols = ?, rows = ?,
-    updated_at = CASE
-        WHEN name IS NOT ? OR kind IS NOT ? OR host_id IS NOT ?
-          OR cwd IS NOT ? OR command IS NOT ? OR persistence IS NOT ?
-        THEN ? ELSE updated_at END
-WHERE id = ?`,
-		session.Name,
-		session.Kind,
-		nullableString(session.HostID),
-		session.Cwd,
-		session.Command,
-		session.Persistence,
-		session.Cols,
-		session.Rows,
-		session.Name,
-		session.Kind,
-		nullableString(session.HostID),
-		session.Cwd,
-		session.Command,
-		session.Persistence,
-		unixMillis(s.utcNow()),
-		session.ID,
-	)
-	if err != nil {
-		return Session{}, fmt.Errorf("update session: %w", err)
-	}
-	updated, err := rowsChanged(result)
-	if err != nil {
-		return Session{}, fmt.Errorf("check session update: %w", err)
-	}
-	if !updated {
-		return Session{}, ErrNotFound
-	}
-	return s.GetSession(ctx, session.ID)
-}
-
 func (s *Store) DeleteSession(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
-	if err != nil {
-		return fmt.Errorf("delete session: %w", err)
-	}
-	deleted, err := rowsChanged(result)
-	if err != nil {
-		return fmt.Errorf("check session deletion: %w", err)
-	}
-	if !deleted {
-		return ErrNotFound
-	}
-	return nil
+	return s.execAffecting(ctx, "delete session", "DELETE FROM sessions WHERE id = ?", id)
 }
 
 // UpdateSessionName renames a session and returns the joined row.
@@ -174,7 +115,7 @@ func (s *Store) UpdateSessionName(ctx context.Context, id, name string) (Session
 UPDATE sessions SET name = ?, updated_at = ?
 WHERE id = ? AND name IS NOT ?`, name, unixMillis(s.utcNow()), id, name)
 	if err != nil {
-		return Session{}, fmt.Errorf("update session name: %w", err)
+		return Session{}, fmt.Errorf("store: update session name: %w", err)
 	}
 	if err := s.requireSession(ctx, id, result); err != nil {
 		return Session{}, err
@@ -191,7 +132,7 @@ UPDATE sessions SET cols = ?, rows = ?
 WHERE id = ? AND (cols IS NOT ? OR rows IS NOT ?)`,
 		cols, rows, id, cols, rows)
 	if err != nil {
-		return fmt.Errorf("update session size: %w", err)
+		return fmt.Errorf("store: update session size: %w", err)
 	}
 	return s.requireSession(ctx, id, result)
 }
@@ -208,7 +149,7 @@ UPDATE sessions SET last_attached_at = ?
 WHERE id = ? AND last_attached_at IS NOT ?`,
 		attachedMillis, id, attachedMillis)
 	if err != nil {
-		return fmt.Errorf("touch session: %w", err)
+		return fmt.Errorf("store: touch session: %w", err)
 	}
 	return s.requireSession(ctx, id, result)
 }
@@ -243,7 +184,7 @@ WHERE id = ? AND generation = ? AND (
 		nullableString(sessionError),
 	)
 	if err != nil {
-		return fmt.Errorf("update session runtime: %w", err)
+		return fmt.Errorf("store: update session runtime: %w", err)
 	}
 	return s.requireSession(ctx, id, result)
 }
@@ -261,26 +202,25 @@ RETURNING generation`, SessionStatusConnecting, id).Scan(&generation)
 		return 0, ErrNotFound
 	}
 	if err != nil {
-		return 0, fmt.Errorf("begin session restart: %w", err)
+		return 0, fmt.Errorf("store: begin session restart: %w", err)
 	}
 	return generation, nil
 }
 
+// requireSession accepts a statement that changed nothing as long as the row
+// still exists: an update that is already applied, or one superseded by a newer
+// generation, is not an error.
 func (s *Store) requireSession(ctx context.Context, id string, result sql.Result) error {
-	changed, err := rowsChanged(result)
-	if err != nil {
-		return fmt.Errorf("check session update: %w", err)
-	}
-	if changed {
+	if rowsChanged(result) {
 		return nil
 	}
 	var exists int
-	err = s.db.QueryRowContext(ctx, "SELECT 1 FROM sessions WHERE id = ?", id).Scan(&exists)
+	err := s.db.QueryRowContext(ctx, "SELECT 1 FROM sessions WHERE id = ?", id).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("check session existence: %w", err)
+		return fmt.Errorf("store: check session existence: %w", err)
 	}
 	return nil
 }
@@ -303,10 +243,11 @@ func applySessionDefaults(session *Session) {
 	}
 }
 
+// validateSession covers only the host/kind agreement, which no single-column
+// CHECK can express. The sessions table already constrains kind, persistence,
+// status and the terminal dimensions, and the API layer owns the user-facing
+// messages.
 func validateSession(session Session) error {
-	if strings.TrimSpace(session.Name) == "" {
-		return fmt.Errorf("%w: session name is empty", ErrInvalidInput)
-	}
 	switch session.Kind {
 	case SessionKindLocal:
 		if session.HostID != nil {
@@ -316,19 +257,6 @@ func validateSession(session Session) error {
 		if session.HostID == nil || strings.TrimSpace(*session.HostID) == "" {
 			return fmt.Errorf("%w: SSH session requires a host", ErrInvalidInput)
 		}
-	default:
-		return fmt.Errorf("%w: unsupported session kind %q", ErrInvalidInput, session.Kind)
-	}
-	switch session.Persistence {
-	case SessionPersistenceAuto, SessionPersistenceTmux, SessionPersistenceScreen, SessionPersistenceNone:
-	default:
-		return fmt.Errorf("%w: unsupported session persistence %q", ErrInvalidInput, session.Persistence)
-	}
-	if !validSessionStatus(session.Status) {
-		return fmt.Errorf("%w: unsupported session status %q", ErrInvalidInput, session.Status)
-	}
-	if session.Cols <= 0 || session.Rows <= 0 {
-		return fmt.Errorf("%w: session dimensions must be positive", ErrInvalidInput)
 	}
 	return nil
 }
