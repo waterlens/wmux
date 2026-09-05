@@ -26,7 +26,6 @@ type fakeSSHConfigDiscoverer struct {
 	discoverErr  error
 	resolveValue sshconfig.Candidate
 	resolveErr   error
-	resolveFunc  func(string) (sshconfig.Candidate, error)
 
 	discoverCalls int
 	resolveCalls  int
@@ -46,12 +45,8 @@ func (f *fakeSSHConfigDiscoverer) Resolve(_ context.Context, alias string) (sshc
 	f.mu.Lock()
 	f.resolveCalls++
 	f.resolvedAlias = alias
-	resolve := f.resolveFunc
 	value, err := f.resolveValue, f.resolveErr
 	f.mu.Unlock()
-	if resolve != nil {
-		return resolve(alias)
-	}
 	return value, err
 }
 
@@ -401,35 +396,4 @@ func TestSSHConfigMissingAndFailuresHaveStableSafeResponses(t *testing.T) {
 			t.Fatalf("resolve error leaked details: %s", response.Body.String())
 		}
 	})
-}
-
-func assertAPIError(t *testing.T, response interface {
-	Result() *http.Response
-}, status int, code string) {
-	t.Helper()
-	result := response.Result()
-	defer result.Body.Close()
-	if result.StatusCode != status {
-		t.Fatalf("status = %d, want %d", result.StatusCode, status)
-	}
-	var body errorBody
-	if err := json.NewDecoder(result.Body).Decode(&body); err != nil {
-		t.Fatal(err)
-	}
-	if body.Error.Code != code {
-		t.Fatalf("error code = %q, want %q", body.Error.Code, code)
-	}
-}
-
-func responseErrorCode(t *testing.T, response interface {
-	Result() *http.Response
-}) string {
-	t.Helper()
-	result := response.Result()
-	defer result.Body.Close()
-	var body errorBody
-	if err := json.NewDecoder(result.Body).Decode(&body); err != nil {
-		t.Fatal(err)
-	}
-	return body.Error.Code
 }
