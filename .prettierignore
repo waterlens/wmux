@@ -1,4 +1,7 @@
-dist
+bin
+docs
 internal/webui/dist
 node_modules
+playwright-report
 pnpm-lock.yaml
+test-results

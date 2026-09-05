@@ -17,17 +17,15 @@ COPY . .
 COPY --from=web /src/internal/webui/dist ./internal/webui/dist
 ARG VERSION=dev
 ARG COMMIT=unknown
-RUN CGO_ENABLED=0 go build -trimpath \
-    -ldflags "-s -w -X github.com/waterlens/wmux/internal/version.Version=${VERSION} -X github.com/waterlens/wmux/internal/version.Commit=${COMMIT}" \
-    -o /out/wmux ./cmd/wmux
+RUN WMUX_VERSION=${VERSION} WMUX_COMMIT=${COMMIT} sh scripts/build-server.sh
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends bash ca-certificates curl tmux tini \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl tmux tini \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 --shell /bin/bash wmux \
     && install -d -o wmux -g wmux /data
-COPY --from=server /out/wmux /usr/local/bin/wmux
+COPY --from=server /src/bin/wmux /usr/local/bin/wmux
 USER wmux
 ENV WMUX_HOST=0.0.0.0 WMUX_PORT=8787 WMUX_DATA_DIR=/data
 VOLUME ["/data"]

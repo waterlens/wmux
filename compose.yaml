@@ -3,11 +3,13 @@ services:
     build:
       context: .
       args:
-        VERSION: ${WMUX_VERSION:-0.1.0}
+        VERSION: ${WMUX_VERSION:-dev}
         COMMIT: ${WMUX_COMMIT:-unknown}
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8787:8787"
+      - '127.0.0.1:8787:8787'
+    # README.md 的“配置”表格是全部 WMUX_* 变量的唯一说明；这里只覆盖容器部署
+    # 必须改掉的几个。
     environment:
       WMUX_HOST: 0.0.0.0
       WMUX_PORT: 8787
@@ -15,8 +17,8 @@ services:
       WMUX_LOG_LEVEL: ${WMUX_LOG_LEVEL:-info}
       # Set these when a TLS reverse proxy fronts wmux:
       # WMUX_PUBLIC_URL: https://terminal.example.com
-      # WMUX_COOKIE_SECURE: "true"
-      # WMUX_TRUST_PROXY: "true"
+      # WMUX_COOKIE_SECURE: 'true'
+      # WMUX_TRUST_PROXY: 'true'
     volumes:
       - wmux-data:/data
       # Optional SSH config discovery. Use explicit host paths and keep these
