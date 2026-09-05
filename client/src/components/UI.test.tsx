@@ -9,6 +9,33 @@ import { ActionMenu, Button, ConfirmDialog, Input, Modal } from './UI';
 afterEach(cleanup);
 
 describe('Modal', () => {
+  it('omits empty regions and restores them when conditional content is present', () => {
+    const { rerender } = render(<Modal open title="确认" onClose={vi.fn()} />);
+    const dialog = screen.getByRole('dialog', { name: '确认' });
+    expect(dialog.querySelector('.modal__body')).toBeNull();
+    expect(dialog.querySelector('.modal__footer')).toBeNull();
+
+    rerender(
+      <Modal open title="确认" onClose={vi.fn()} footer={<>{null}</>}>
+        <>
+          {false}
+          {null}
+          {''}
+        </>
+      </Modal>,
+    );
+    expect(dialog.querySelector('.modal__body')).toBeNull();
+    expect(dialog.querySelector('.modal__footer')).toBeNull();
+
+    rerender(
+      <Modal open title="确认" onClose={vi.fn()} footer={<Button>完成</Button>}>
+        <p>请核对指纹。</p>
+      </Modal>,
+    );
+    expect(dialog.querySelector('.modal__body')?.textContent).toBe('请核对指纹。');
+    expect(screen.getByRole('button', { name: '完成' })).toBeTruthy();
+  });
+
   it('keeps focus in the form while an inline close callback changes', async () => {
     const user = userEvent.setup();
 
@@ -53,6 +80,44 @@ describe('Modal', () => {
     await user.keyboard('{Escape}');
     expect(closeTop).toHaveBeenCalledOnce();
     expect(closeBottom).not.toHaveBeenCalled();
+  });
+
+  it('hides the lower modal from interaction and restores it after a nested modal closes', () => {
+    function NestedDialogs() {
+      const [confirmOpen, setConfirmOpen] = useState(false);
+      return (
+        <>
+          <Modal open title="设置" onClose={vi.fn()}>
+            <Button onClick={() => setConfirmOpen(true)}>退出登录</Button>
+          </Modal>
+          <ConfirmDialog
+            open={confirmOpen}
+            title="退出？"
+            description="将断开当前浏览器。"
+            onCancel={() => setConfirmOpen(false)}
+            onConfirm={vi.fn()}
+          />
+        </>
+      );
+    }
+
+    render(<NestedDialogs />);
+    const settings = screen.getByRole('dialog', { name: '设置' });
+    const lowerLayer = settings.parentElement!;
+    const trigger = screen.getByRole('button', { name: '退出登录' });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    expect(lowerLayer.inert).toBe(true);
+    expect(lowerLayer.getAttribute('aria-hidden')).toBe('true');
+    expect(screen.queryByRole('dialog', { name: '设置' })).toBeNull();
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(lowerLayer.inert).toBe(false);
+    expect(lowerLayer.hasAttribute('aria-hidden')).toBe(false);
+    expect(screen.getByRole('dialog', { name: '设置' })).toBe(settings);
+    expect(document.activeElement).toBe(trigger);
   });
 });
 
@@ -127,7 +192,34 @@ describe('ActionMenu and Button', () => {
 });
 
 describe('ConfirmDialog', () => {
+  it('blocks every dismissal path while busy and restores dismissal afterward', () => {
+    const onCancel = vi.fn();
+    const props = {
+      open: true,
+      title: '结束会话？',
+      description: '将结束进程。',
+      onCancel,
+      onConfirm: vi.fn(),
+    };
+    const { rerender } = render(<ConfirmDialog {...props} busy />);
+    const dialog = screen.getByRole('dialog', { name: '结束会话？' });
+    const close = screen.getByRole('button', { name: '关闭' });
+    expect(close.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(close);
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    fireEvent.mouseDown(dialog.parentElement!);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onCancel).not.toHaveBeenCalled();
+
+    rerender(<ConfirmDialog {...props} busy={false} />);
+    expect(close.hasAttribute('disabled')).toBe(false);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
   it('shows only the caller-provided consequence for a dangerous action', () => {
+    const cancel = vi.fn();
+    const confirm = vi.fn();
     render(
       <ConfirmDialog
         open
@@ -135,13 +227,23 @@ describe('ConfirmDialog', () => {
         description="将删除这条记录。"
         confirmLabel="删除"
         danger
-        onCancel={vi.fn()}
-        onConfirm={vi.fn()}
+        onCancel={cancel}
+        onConfirm={confirm}
       />,
     );
 
     expect(screen.getByText('将删除这条记录。')).toBeTruthy();
     expect(screen.queryByText('这个操作无法撤销。')).toBeNull();
+    const dialog = screen.getByRole('dialog', { name: '删除记录？' });
+    expect(dialog.querySelector('.modal__body')).toBeNull();
+    expect(document.getElementById(dialog.getAttribute('aria-describedby') ?? '')?.textContent).toBe(
+      '将删除这条记录。',
+    );
     expect(screen.getByRole('button', { name: '删除' }).classList.contains('button--danger')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(confirm).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    expect(confirm).toHaveBeenCalledOnce();
   });
 });

@@ -6,7 +6,7 @@ import type {
   SelectHTMLAttributes,
   TextareaHTMLAttributes,
 } from 'react';
-import { useEffect, useId, useRef } from 'react';
+import { Children, Fragment, isValidElement, useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import type { Toast } from '../types';
 
@@ -77,12 +77,33 @@ type ModalProps = {
   title: string;
   description?: string | undefined;
   size?: 'sm' | 'md' | 'lg';
+  variant?: 'form' | 'confirm' | 'settings';
+  closeDisabled?: boolean;
   onClose: () => void;
   children?: ReactNode | undefined;
   footer?: ReactNode | undefined;
 };
 
-const modalStack: symbol[] = [];
+const modalStack: { instance: symbol; layer: HTMLDivElement }[] = [];
+
+function updateModalLayers() {
+  const top = modalStack.at(-1);
+  for (const entry of modalStack) {
+    const hidden = entry !== top;
+    entry.layer.inert = hidden;
+    if (hidden) entry.layer.setAttribute('aria-hidden', 'true');
+    else entry.layer.removeAttribute('aria-hidden');
+  }
+}
+
+function hasContent(content: ReactNode): boolean {
+  return Children.toArray(content).some((child) => {
+    if (isValidElement<{ children?: ReactNode }>(child) && child.type === Fragment) {
+      return hasContent(child.props.children);
+    }
+    return child !== '';
+  });
+}
 
 function focusableElements(container: HTMLElement): HTMLElement[] {
   return Array.from(
@@ -95,27 +116,42 @@ function focusableElements(container: HTMLElement): HTMLElement[] {
   );
 }
 
-export function Modal({ open, title, description, size = 'md', onClose, children, footer }: ModalProps) {
+export function Modal({
+  open,
+  title,
+  description,
+  size = 'md',
+  variant = 'form',
+  closeDisabled = false,
+  onClose,
+  children,
+  footer,
+}: ModalProps) {
   const titleId = useId();
   const descriptionId = useId();
+  const layerRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef(Symbol('modal'));
   const onCloseRef = useRef(onClose);
 
   useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
+    onCloseRef.current = () => {
+      if (!closeDisabled) onClose();
+    };
+  }, [onClose, closeDisabled]);
 
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open || !layerRef.current) return undefined;
     const instance = instanceRef.current;
     const previous = document.activeElement as HTMLElement | null;
-    modalStack.push(instance);
+    const entry = { instance, layer: layerRef.current };
+    modalStack.push(entry);
+    updateModalLayers();
     const root = document.getElementById('root');
     if (root) root.inert = true;
 
     const onKey = (event: KeyboardEvent) => {
-      if (modalStack.at(-1) !== instance) return;
+      if (modalStack.at(-1) !== entry) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -144,7 +180,7 @@ export function Modal({ open, title, description, size = 'md', onClose, children
     document.addEventListener('keydown', onKey, true);
     document.body.classList.add('modal-open');
     const focusTimer = window.setTimeout(() => {
-      if (modalStack.at(-1) !== instance || !panelRef.current) return;
+      if (modalStack.at(-1) !== entry || !panelRef.current) return;
       const preferred = panelRef.current.querySelector<HTMLElement>(
         '[autofocus], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not([data-modal-close]):not(:disabled)',
       );
@@ -153,28 +189,33 @@ export function Modal({ open, title, description, size = 'md', onClose, children
     return () => {
       window.clearTimeout(focusTimer);
       document.removeEventListener('keydown', onKey, true);
-      const index = modalStack.lastIndexOf(instance);
+      const wasTop = modalStack.at(-1) === entry;
+      const index = modalStack.lastIndexOf(entry);
       if (index >= 0) modalStack.splice(index, 1);
+      updateModalLayers();
       if (!modalStack.length) {
         document.body.classList.remove('modal-open');
         if (root) root.inert = false;
       }
-      if (previous?.isConnected) previous.focus();
+      if (wasTop && previous?.isConnected) previous.focus();
     };
   }, [open]);
 
   if (!open) return null;
   return createPortal(
     <div
-      className="modal-layer"
+      ref={layerRef}
+      className={`modal-layer modal-layer--${variant}`}
       role="presentation"
       onMouseDown={(event) => {
-        if (event.currentTarget === event.target && modalStack.at(-1) === instanceRef.current) onCloseRef.current();
+        if (event.currentTarget === event.target && modalStack.at(-1)?.instance === instanceRef.current) {
+          onCloseRef.current();
+        }
       }}
     >
       <div
         ref={panelRef}
-        className={`modal modal--${size}`}
+        className={`modal modal--${size} modal--${variant}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -186,12 +227,19 @@ export function Modal({ open, title, description, size = 'md', onClose, children
             <h2 id={titleId}>{title}</h2>
             {description && <p id={descriptionId}>{description}</p>}
           </div>
-          <Button data-modal-close size="icon" tone="ghost" onClick={() => onCloseRef.current()} aria-label="关闭">
+          <Button
+            data-modal-close
+            size="icon"
+            tone="ghost"
+            disabled={closeDisabled}
+            onClick={() => onCloseRef.current()}
+            aria-label="关闭"
+          >
             <X size={19} />
           </Button>
         </header>
-        <div className="modal__body">{children}</div>
-        {footer && <footer className="modal__footer">{footer}</footer>}
+        {hasContent(children) && <div className="modal__body">{children}</div>}
+        {hasContent(footer) && <footer className="modal__footer">{footer}</footer>}
       </div>
     </div>,
     document.body,
@@ -323,6 +371,8 @@ export function ConfirmDialog({
       title={title}
       description={description}
       size="sm"
+      variant="confirm"
+      closeDisabled={Boolean(busy)}
       onClose={onCancel}
       footer={
         <>

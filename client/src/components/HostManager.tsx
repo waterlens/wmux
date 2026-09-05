@@ -1,5 +1,4 @@
 import {
-  CheckCircle2,
   Edit3,
   Fingerprint,
   KeyRound,
@@ -15,7 +14,7 @@ import {
   Trash2,
   Wifi,
 } from 'lucide-react';
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useId, useState } from 'react';
 import { api, errorMessage } from '../api';
 import type { AuthType, Host, HostInput } from '../types';
 import { SSHConfigImport } from './SSHConfigImport';
@@ -252,7 +251,7 @@ export function HostManager({ hosts, onHostsChange, onStartSession, notify }: Ho
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title={`删除 ${deleteTarget?.name ?? '主机'}？`}
-        description="保存的认证信息和主机配置将被移除；仍有会话使用这台主机时无法删除。"
+        description="将删除连接配置和凭据；有关联会话时无法删除。"
         confirmLabel="删除主机"
         danger
         busy={deleting}
@@ -264,6 +263,7 @@ export function HostManager({ hosts, onHostsChange, onStartSession, notify }: Ho
         open={Boolean(probe)}
         title="验证主机身份"
         description={`首次连接 ${probe?.host.address ?? ''}，请与服务器管理员或控制台显示的指纹核对。`}
+        closeDisabled={trusting}
         onClose={() => setProbe(null)}
         footer={
           <>
@@ -304,6 +304,7 @@ type HostEditorProps = {
 };
 
 function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
+  const authTypeLabelId = useId();
   const [name, setName] = useState(host?.name ?? '');
   const [address, setAddress] = useState(host?.address ?? '');
   const [port, setPort] = useState(String(host?.port ?? 22));
@@ -372,6 +373,7 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
     <Modal
       open={open}
       title={host ? '编辑 SSH 主机' : '添加 SSH 主机'}
+      closeDisabled={busy}
       onClose={onClose}
       footer={
         <>
@@ -422,11 +424,14 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
           />
         </Field>
 
-        <div className="segment-label">认证方式</div>
-        <div className="choice-grid choice-grid--three">
+        <div id={authTypeLabelId} className="segment-label">
+          认证方式
+        </div>
+        <div className="choice-grid choice-grid--three" role="group" aria-labelledby={authTypeLabelId}>
           <button
             type="button"
             className={`choice-card ${authType === 'privateKey' ? 'is-active' : ''}`}
+            aria-pressed={authType === 'privateKey'}
             onClick={() => setAuthType('privateKey')}
           >
             <span className="choice-card__icon">
@@ -434,12 +439,12 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
             </span>
             <span>
               <strong>SSH 私钥</strong>
-              <small>推荐，更安全</small>
             </span>
           </button>
           <button
             type="button"
             className={`choice-card ${authType === 'password' ? 'is-active' : ''}`}
+            aria-pressed={authType === 'password'}
             onClick={() => setAuthType('password')}
           >
             <span className="choice-card__icon">
@@ -447,12 +452,12 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
             </span>
             <span>
               <strong>密码</strong>
-              <small>传统认证</small>
             </span>
           </button>
           <button
             type="button"
             className={`choice-card ${authType === 'agent' ? 'is-active' : ''}`}
+            aria-pressed={authType === 'agent'}
             onClick={() => setAuthType('agent')}
           >
             <span className="choice-card__icon">
@@ -460,16 +465,12 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
             </span>
             <span>
               <strong>SSH 代理</strong>
-              <small>使用 SSH_AUTH_SOCK</small>
             </span>
           </button>
         </div>
 
         {authType === 'agent' ? (
-          <div className="info-callout">
-            <Network size={17} />
-            <span>wmux 将使用服务进程可访问的 SSH_AUTH_SOCK。请确保部署环境已正确挂载 Agent socket。</span>
-          </div>
+          <p className="field__hint">使用运行 wmux 的系统用户的 SSH agent（SSH_AUTH_SOCK）。</p>
         ) : authType === 'password' ? (
           <Field label="SSH 密码" hint={host?.hasSecret ? '留空以保留已保存的密码' : undefined}>
             <Input
@@ -503,12 +504,6 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
           </>
         )}
 
-        {host?.fingerprint && (
-          <div className="success-callout">
-            <CheckCircle2 size={17} />
-            <span>已为这台主机保存可信指纹。</span>
-          </div>
-        )}
         {error && (
           <div className="form-error" role="alert">
             {error}

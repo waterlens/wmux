@@ -316,6 +316,7 @@ code {
 .field {
   display: grid;
   min-width: 0;
+  align-content: start;
   gap: var(--space-2);
 }
 .field__label {
@@ -398,6 +399,7 @@ code {
 .form-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: var(--space-4);
 }
 .form-row--address {
@@ -465,10 +467,10 @@ code {
 .choice-card {
   display: flex;
   min-width: 0;
-  min-height: 4.75rem;
+  min-height: 3.5rem;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3);
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
@@ -487,23 +489,22 @@ code {
 }
 .choice-card__icon {
   display: inline-flex;
-  width: 2.25rem;
-  height: 2.25rem;
-  flex: 0 0 2.25rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: 0 0 1.5rem;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-md);
-  background: var(--surface-muted);
+  background: transparent;
   color: var(--text-secondary);
 }
 .choice-card.is-active .choice-card__icon {
-  background: var(--surface);
   color: var(--accent);
 }
 .choice-card > span:last-child {
   display: grid;
   min-width: 0;
-  gap: var(--space-1);
+  gap: 0;
 }
 .choice-card strong,
 .choice-card small {
@@ -1595,6 +1596,7 @@ code {
 }
 .ssh-config-import__source {
   display: flex;
+  min-width: 0;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
@@ -1604,12 +1606,16 @@ code {
   background: var(--bg);
 }
 .ssh-config-import__source > span {
+  min-width: 0;
   overflow: hidden;
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.ssh-config-import__source > .button {
+  flex: 0 0 auto;
 }
 .ssh-config-import__empty {
   display: flex;
@@ -1632,8 +1638,8 @@ code {
   list-style: none;
 }
 .ssh-config-candidate {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, auto) auto;
+  display: flex;
+  min-width: 0;
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-3);
@@ -1643,6 +1649,7 @@ code {
 }
 .ssh-config-candidate__identity {
   display: grid;
+  flex: 1;
   min-width: 0;
   gap: var(--space-1);
 }
@@ -1658,6 +1665,7 @@ code {
 }
 .ssh-config-candidate__meta {
   display: flex;
+  min-width: 0;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--space-2);
@@ -1672,6 +1680,9 @@ code {
 .ssh-config-candidate__meta > .is-unsupported {
   color: var(--danger);
 }
+.ssh-config-candidate > .button {
+  flex: 0 0 auto;
+}
 /* Dialogs */
 .modal-layer {
   position: fixed;
@@ -1684,7 +1695,10 @@ code {
   background: var(--overlay);
 }
 .modal {
+  --control-md: 2.25rem;
+  --modal-inset: 1.25rem;
   display: flex;
+  min-width: 0;
   width: min(100%, 36rem);
   max-height: min(48rem, calc(var(--app-height) - var(--space-7)));
   flex-direction: column;
@@ -1706,47 +1720,70 @@ code {
   flex: 0 0 auto;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-5);
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-3);
+  padding: var(--modal-inset) var(--modal-inset) var(--space-4);
 }
 .modal__header > div {
   display: grid;
-  gap: var(--space-1);
+  flex: 1;
+  min-width: 0;
+  gap: var(--space-2);
+  overflow-wrap: anywhere;
+}
+.modal__header > [data-modal-close] {
+  flex: 0 0 auto;
 }
 .modal__header h2 {
-  font-size: var(--text-lg);
+  font-size: 1.125rem;
+  line-height: 1.5;
   letter-spacing: -0.025em;
 }
 .modal__header p {
   color: var(--text-secondary);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
 }
 .modal__body {
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: var(--space-5);
+  padding: 0 var(--modal-inset) var(--modal-inset);
 }
 .modal__footer {
   display: flex;
   flex: 0 0 auto;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: var(--space-2);
-  padding: var(--space-4) var(--space-5);
-  border-top: 1px solid var(--border);
-  background: var(--bg);
+  padding: 0 var(--modal-inset) var(--modal-inset);
+}
+.modal--confirm {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.modal--form .form-grid,
+.modal--settings .password-change {
+  gap: var(--space-3);
+}
+.modal .field {
+  gap: 0.375rem;
+}
+.modal .key-textarea {
+  min-height: 7rem;
+}
+.modal--settings .modal__header {
+  padding-bottom: var(--space-3);
 }
 .probe-result {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 .probe-result__icon {
   display: inline-flex;
-  width: 3.5rem;
-  height: 3.5rem;
+  width: 2.5rem;
+  height: 2.5rem;
   grid-row: span 2;
   align-items: center;
   justify-content: center;
@@ -1772,16 +1809,15 @@ code {
 /* Settings */
 .settings-layout {
   display: grid;
-  min-height: 28rem;
-  grid-template-columns: 10.5rem minmax(0, 1fr);
-  gap: var(--space-5);
+  align-items: start;
+  grid-template-columns: 9rem minmax(0, 1fr);
+  gap: var(--space-4);
 }
 .settings-nav {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  padding-right: var(--space-5);
-  border-right: 1px solid var(--border);
+  min-width: 0;
 }
 .settings-nav > button {
   display: flex;
@@ -1816,33 +1852,20 @@ code {
   display: flex;
   align-items: flex-start;
   gap: var(--space-3);
-  padding-bottom: var(--space-4);
-  border-bottom: 1px solid var(--border);
-}
-.settings-section__title > svg {
-  flex: 0 0 auto;
-  margin-top: var(--space-1);
-  color: var(--accent);
 }
 .settings-section__title h3 {
   font-size: var(--text-md);
 }
-.settings-section__title p {
-  margin-top: var(--space-1);
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
 .setting-row {
   display: grid;
-  min-height: 4rem;
+  min-height: 2.5rem;
   grid-template-columns: minmax(0, 1fr) minmax(7.5rem, auto);
   align-items: center;
-  gap: var(--space-5);
-  padding-bottom: var(--space-4);
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-4);
 }
 .setting-row > div {
   display: grid;
+  min-width: 0;
   gap: var(--space-1);
 }
 .setting-row > div > span {
@@ -1865,7 +1888,8 @@ code {
   position: relative;
   display: inline-flex;
   width: 2.75rem;
-  height: 1.625rem;
+  height: var(--control-md);
+  align-items: center;
   justify-self: end;
 }
 .switch input {
@@ -1874,7 +1898,9 @@ code {
   pointer-events: none;
 }
 .switch span {
+  position: relative;
   width: 100%;
+  height: 1.625rem;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-round);
   background: var(--surface-muted);
@@ -1884,13 +1910,14 @@ code {
 }
 .switch span::after {
   position: absolute;
-  top: 0.25rem;
-  left: 0.25rem;
+  top: 50%;
+  left: 0.1875rem;
   width: 1.125rem;
   height: 1.125rem;
   border-radius: 50%;
   background: var(--text-secondary);
   content: '';
+  transform: translateY(-50%);
   transition:
     transform 140ms ease,
     background 140ms ease;
@@ -1901,87 +1928,70 @@ code {
 }
 .switch input:checked + span::after {
   background: var(--accent-contrast);
-  transform: translateX(1.125rem);
+  transform: translate(1.125rem, -50%);
 }
 .switch input:focus-visible + span {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
-.account-card,
-.security-note,
-.danger-zone,
 .about-mark,
 .about-meta {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
-.account-card > div,
 .about-mark > div {
   display: grid;
   min-width: 0;
   gap: var(--space-1);
 }
-.account-card span:not(.user-avatar),
 .about-mark div > span {
   color: var(--text-muted);
   font-size: var(--text-xs);
 }
-.security-note {
-  align-items: flex-start;
-  color: var(--accent);
-}
-.security-note > svg {
-  flex: 0 0 auto;
-  margin-top: var(--space-1);
-}
-.security-note p {
-  display: grid;
-  gap: var(--space-1);
-  color: var(--text);
-}
-.security-note p > span {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
 .password-change {
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.settings-account,
+.settings-account__identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+}
+.settings-account {
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.settings-account__identity > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.settings-account > .button {
+  flex: 0 0 auto;
+}
+.password-change__fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--space-3) var(--space-4);
+}
+.password-change__fields > :first-child {
+  grid-column: 1 / -1;
 }
 .password-change__title {
   display: grid;
   gap: var(--space-1);
 }
-.password-change__title > span {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
 .password-change__action {
   display: flex;
   justify-content: flex-end;
 }
-.danger-zone {
-  justify-content: space-between;
-  border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
-  background: var(--danger-soft);
-}
-.danger-zone > div {
-  display: grid;
-  gap: var(--space-1);
-}
-.danger-zone > div > span {
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-}
 .about-mark {
-  border: 0;
-  background: transparent;
-  padding-inline: 0;
+  padding-block: var(--space-2);
 }
 .about-mark .brand__mark {
   width: 3rem;
@@ -1990,9 +2000,6 @@ code {
 }
 .about-mark div > strong {
   font-size: var(--text-lg);
-}
-.about-copy {
-  color: var(--text-secondary);
 }
 .about-stats {
   display: grid;
@@ -2003,10 +2010,7 @@ code {
   display: grid;
   justify-items: center;
   gap: var(--space-1);
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg);
+  padding: var(--space-2);
   color: var(--text-secondary);
 }
 .about-stats strong {
@@ -2019,6 +2023,9 @@ code {
 }
 .about-meta {
   justify-content: space-between;
+  flex-wrap: wrap;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
 }
 .about-meta > span {
   color: var(--text-muted);
@@ -2283,6 +2290,7 @@ code {
     flex-direction: column;
   }
   .ssh-config-candidate {
+    display: grid;
     grid-template-columns: minmax(0, 1fr);
   }
   .ssh-config-candidate__meta {
@@ -2390,31 +2398,49 @@ code {
   .modal,
   .modal--sm,
   .modal--lg {
+    --control-md: var(--control-touch);
+    --modal-inset: var(--space-4);
     width: 100%;
     max-height: calc(var(--app-height) - var(--space-3));
     border-bottom: 0;
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   }
-  .modal__header,
-  .modal__body {
-    padding: var(--space-4);
-  }
   .modal__footer {
-    padding: var(--space-3) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom));
+    padding-bottom: calc(var(--modal-inset) + env(safe-area-inset-bottom));
   }
   .modal__footer .button {
     flex: 1;
   }
+  .modal-layer--confirm {
+    align-items: center;
+    padding: var(--space-4);
+  }
+  .modal--confirm {
+    max-height: calc(var(--app-height) - var(--space-6));
+    border-bottom: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+  }
+  .modal--confirm .modal__footer {
+    padding-bottom: var(--modal-inset);
+  }
   .form-row,
-  .form-row--address,
-  .choice-grid--three {
+  .password-change__fields {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .form-row--address {
+    grid-template-columns: minmax(0, 1fr) 5.5rem;
+  }
+  .choice-grid--three {
+    gap: var(--space-2);
+  }
+  .choice-grid--three .choice-card {
+    flex-direction: column;
+    justify-content: center;
+    gap: var(--space-1);
+    padding-inline: var(--space-2);
   }
   .choice-grid--two {
     gap: var(--space-2);
-  }
-  .choice-card {
-    min-height: 4.5rem;
   }
 
   .settings-layout {
@@ -2425,9 +2451,7 @@ code {
   .settings-nav {
     flex-direction: row;
     overflow-x: auto;
-    padding: 0 0 var(--space-3);
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
+    padding: 0;
     scrollbar-width: none;
   }
   .settings-nav > button {
@@ -2435,7 +2459,7 @@ code {
     min-height: var(--control-touch);
   }
   .setting-row {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(6.5rem, 8rem);
     gap: var(--space-3);
   }
   .setting-row > .select,
@@ -2444,17 +2468,13 @@ code {
     justify-self: stretch;
   }
   .switch {
-    justify-self: start;
+    justify-self: end;
   }
   .about-stats {
     gap: var(--space-2);
   }
   .about-stats > div {
     padding: var(--space-3) var(--space-2);
-  }
-  .danger-zone {
-    align-items: stretch;
-    flex-direction: column;
   }
 
   .toast-stack {

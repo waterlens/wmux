@@ -110,18 +110,20 @@ export function SSHConfigImport({ onImported, notify }: SSHConfigImportProps) {
                         {candidate.username}@{candidate.address}:{candidate.port}
                       </code>
                     </div>
-                    <div className="ssh-config-candidate__meta">
-                      {candidate.hasIdentityFile && (
-                        <span>
-                          <KeyRound size={14} /> IdentityFile 不会导入
-                        </span>
-                      )}
-                      {unsupported && (
-                        <span className="is-unsupported">
-                          <ShieldAlert size={14} /> {unavailableReason}
-                        </span>
-                      )}
-                    </div>
+                    {(candidate.hasIdentityFile || unsupported) && (
+                      <div className="ssh-config-candidate__meta">
+                        {candidate.hasIdentityFile && (
+                          <span>
+                            <KeyRound size={14} /> IdentityFile 不会导入
+                          </span>
+                        )}
+                        {unsupported && (
+                          <span className="is-unsupported">
+                            <ShieldAlert size={14} /> {unavailableReason}
+                          </span>
+                        )}
+                      </div>
+                    )}
                     <Button
                       size="sm"
                       disabled={imported || unsupported}

@@ -1,4 +1,4 @@
-import { Info, LogOut, Monitor, RotateCcw, ShieldCheck, SlidersHorizontal, TerminalSquare } from 'lucide-react';
+import { Info, LogOut, Monitor, RotateCcw, ShieldCheck, TerminalSquare } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { api, errorMessage } from '../api';
 import { DEFAULT_PREFERENCES } from '../preferences';
@@ -87,28 +87,42 @@ export function SettingsDialog({
 
   return (
     <>
-      <Modal open={open} title="设置" description="调整当前浏览器上的 wmux 体验。" size="lg" onClose={onClose}>
+      <Modal open={open} title="设置" size="lg" variant="settings" closeDisabled={passwordBusy} onClose={onClose}>
         <div className="settings-layout">
-          <nav className="settings-nav">
-            <button className={section === 'terminal' ? 'is-active' : ''} onClick={() => setSection('terminal')}>
+          <nav className="settings-nav" aria-label="设置类别">
+            <button
+              type="button"
+              className={section === 'terminal' ? 'is-active' : ''}
+              aria-current={section === 'terminal' ? 'page' : undefined}
+              onClick={() => setSection('terminal')}
+            >
               <TerminalSquare size={16} /> 终端
             </button>
-            <button className={section === 'security' ? 'is-active' : ''} onClick={() => setSection('security')}>
+            <button
+              type="button"
+              className={section === 'security' ? 'is-active' : ''}
+              aria-current={section === 'security' ? 'page' : undefined}
+              onClick={() => setSection('security')}
+            >
               <ShieldCheck size={16} /> 账户与安全
             </button>
-            <button className={section === 'about' ? 'is-active' : ''} onClick={() => setSection('about')}>
+            <button
+              type="button"
+              className={section === 'about' ? 'is-active' : ''}
+              aria-current={section === 'about' ? 'page' : undefined}
+              onClick={() => setSection('about')}
+            >
               <Info size={16} /> 关于
             </button>
           </nav>
 
           <div className="settings-content">
             {section === 'terminal' && (
-              <section className="settings-section">
+              <section className="settings-section" aria-labelledby="terminal-settings-title">
                 <div className="settings-section__title">
-                  <SlidersHorizontal size={18} />
                   <div>
-                    <h3>终端显示</h3>
-                    <p>设置只保存在这个浏览器中。</p>
+                    <h3 id="terminal-settings-title">终端显示</h3>
+                    <p className="field__hint">仅保存在此浏览器</p>
                   </div>
                 </div>
 
@@ -131,9 +145,9 @@ export function SettingsDialog({
                 <div className="setting-row">
                   <div>
                     <strong>界面主题</strong>
-                    <span>默认使用浅色，也可跟随系统</span>
                   </div>
                   <Select
+                    aria-label="界面主题"
                     value={preferences.theme}
                     onChange={(event) =>
                       onPreferencesChange({ ...preferences, theme: event.target.value as TerminalPreferences['theme'] })
@@ -148,9 +162,9 @@ export function SettingsDialog({
                 <div className="setting-row">
                   <div>
                     <strong>光标样式</strong>
-                    <span>选择更容易辨认的输入光标</span>
                   </div>
                   <Select
+                    aria-label="光标样式"
                     value={preferences.cursorStyle}
                     onChange={(event) =>
                       onPreferencesChange({
@@ -168,10 +182,10 @@ export function SettingsDialog({
                 <div className="setting-row">
                   <div>
                     <strong>光标闪烁</strong>
-                    <span>让当前输入位置保持醒目</span>
                   </div>
                   <label className="switch">
                     <input
+                      aria-label="光标闪烁"
                       type="checkbox"
                       checked={preferences.cursorBlink}
                       onChange={(event) => onPreferencesChange({ ...preferences, cursorBlink: event.target.checked })}
@@ -183,9 +197,9 @@ export function SettingsDialog({
                 <div className="setting-row">
                   <div>
                     <strong>回滚缓冲区</strong>
-                    <span>浏览器中保留的最大行数</span>
                   </div>
                   <Select
+                    aria-label="回滚缓冲区"
                     value={String(preferences.scrollback)}
                     onChange={(event) =>
                       onPreferencesChange({ ...preferences, scrollback: Number(event.target.value) })
@@ -207,42 +221,38 @@ export function SettingsDialog({
             )}
 
             {section === 'security' && (
-              <section className="settings-section">
+              <section className="settings-section" aria-labelledby="security-settings-title">
                 <div className="settings-section__title">
-                  <ShieldCheck size={18} />
-                  <div>
-                    <h3>账户与安全</h3>
-                    <p>当前 wmux 管理员。</p>
-                  </div>
+                  <h3 id="security-settings-title">账户与安全</h3>
                 </div>
-                <div className="account-card">
-                  <span className="user-avatar user-avatar--large">{user.username.slice(0, 1).toUpperCase()}</span>
-                  <div>
+                <div className="settings-account">
+                  <div className="settings-account__identity">
+                    <span className="user-avatar" aria-hidden="true">
+                      {user.username.slice(0, 1).toUpperCase()}
+                    </span>
                     <strong>{user.username}</strong>
-                    <span>本地管理员账户</span>
                   </div>
+                  <Button size="sm" disabled={passwordBusy} onClick={() => setLogoutOpen(true)}>
+                    <LogOut size={15} /> 退出登录
+                  </Button>
                 </div>
-                <div className="security-note">
-                  <ShieldCheck size={18} />
-                  <p>
-                    <strong>Cookie 会话认证</strong>
-                    <span>终端 WebSocket 与所有 API 请求都复用当前安全会话。</span>
-                  </p>
-                </div>
-                <form className="password-change" onSubmit={(event) => void changePassword(event)}>
+                <form
+                  className="password-change"
+                  aria-labelledby="password-change-title"
+                  onSubmit={(event) => void changePassword(event)}
+                >
                   <div className="password-change__title">
-                    <strong>修改管理员密码</strong>
-                    <span>更新后请在其他设备上使用新密码登录。</span>
+                    <strong id="password-change-title">修改密码</strong>
                   </div>
-                  <Field label="当前密码">
-                    <Input
-                      type="password"
-                      autoComplete="current-password"
-                      value={currentPassword}
-                      onChange={(event) => setCurrentPassword(event.target.value)}
-                    />
-                  </Field>
-                  <div className="form-row">
+                  <div className="password-change__fields">
+                    <Field label="当前密码">
+                      <Input
+                        type="password"
+                        autoComplete="current-password"
+                        value={currentPassword}
+                        onChange={(event) => setCurrentPassword(event.target.value)}
+                      />
+                    </Field>
                     <Field label="新密码" hint="至少 10 个字符">
                       <Input
                         type="password"
@@ -277,15 +287,6 @@ export function SettingsDialog({
                     </Button>
                   </div>
                 </form>
-                <div className="danger-zone">
-                  <div>
-                    <strong>退出当前设备</strong>
-                    <span>持久化终端不会因此结束。</span>
-                  </div>
-                  <Button tone="danger" size="sm" onClick={() => setLogoutOpen(true)}>
-                    <LogOut size={15} /> 退出登录
-                  </Button>
-                </div>
               </section>
             )}
 
@@ -303,7 +304,6 @@ export function SettingsDialog({
                     </span>
                   </div>
                 </div>
-                <p className="about-copy">一个属于自己的持久化 Web 终端，把本机 shell 和 SSH 工作流放在同一个地方。</p>
                 <div className="about-stats">
                   <div>
                     <Monitor size={17} />
@@ -320,10 +320,6 @@ export function SettingsDialog({
                     <strong>{hosts.length}</strong>
                     <span>SSH 主机</span>
                   </div>
-                </div>
-                <div className="about-meta">
-                  <span>部署方式</span>
-                  <strong>自托管</strong>
                 </div>
                 <div className="about-meta">
                   <span>开源字体与组件</span>

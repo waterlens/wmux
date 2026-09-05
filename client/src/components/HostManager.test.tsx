@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Host } from '../types';
 import { HostManager } from './HostManager';
@@ -49,6 +49,24 @@ function renderManager(hosts: Host[]) {
 }
 
 describe('HostManager copy and identity verification', () => {
+  it('exposes and updates the selected authentication method', () => {
+    renderManager([]);
+    fireEvent.click(screen.getByRole('button', { name: /添加主机/ }));
+
+    const group = screen.getByRole('group', { name: '认证方式' });
+    const privateKey = within(group).getByRole('button', { name: 'SSH 私钥' });
+    const password = within(group).getByRole('button', { name: '密码' });
+    const agent = within(group).getByRole('button', { name: 'SSH 代理' });
+    expect(privateKey.getAttribute('aria-pressed')).toBe('true');
+    expect(password.getAttribute('aria-pressed')).toBe('false');
+    expect(agent.getAttribute('aria-pressed')).toBe('false');
+
+    fireEvent.click(agent);
+    expect(privateKey.getAttribute('aria-pressed')).toBe('false');
+    expect(password.getAttribute('aria-pressed')).toBe('false');
+    expect(agent.getAttribute('aria-pressed')).toBe('true');
+  });
+
   it('keeps create/edit chrome concise while preserving field validation', () => {
     renderManager([]);
 

@@ -9,6 +9,9 @@ import { chromium } from 'playwright-core';
 const projectDir = resolve(import.meta.dirname, '..');
 const username = process.env.WMUX_BROWSER_USERNAME ?? 'browser-smoke';
 const password = process.env.WMUX_BROWSER_PASSWORD ?? 'browser-smoke-password';
+const desktopViewport = { width: 1440, height: 960 };
+const mobileViewport = { width: 390, height: 844 };
+const longFixtureName = `wmux-${'x'.repeat(69)}`;
 const outputDir = resolve(
   process.env.WMUX_BROWSER_OUTPUT_DIR ?? (await mkdtemp(join(tmpdir(), 'wmux-browser-output-'))),
 );
@@ -25,6 +28,11 @@ let browser;
 let pasteBytes = 0;
 let replayIsolation = 'not-run';
 let sshConfigImport = 'not-run';
+const modalChecks = {};
+
+if (longFixtureName.length !== 74 || !/^[\x20-\x7e]+$/.test(longFixtureName)) {
+  throw new Error(`long-name fixture must be exactly 74 printable ASCII characters: ${longFixtureName.length}`);
+}
 
 try {
   if (!baseURL) {
@@ -59,6 +67,8 @@ Host *
 Host proxy-box
   HostName 192.0.2.45
   ProxyJump bastion
+Host ${longFixtureName}
+  HostName 192.0.2.46
 `,
       { mode: 0o600 },
     );
@@ -97,7 +107,7 @@ Host proxy-box
   }
 
   browser = await chromium.launch({ executablePath, headless: true });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+  const context = await browser.newContext({ viewport: desktopViewport });
   if (ownedServer) {
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(baseURL).origin });
   }
@@ -180,7 +190,35 @@ Host proxy-box
   if (await hostEditor.getByText(/保存后还需要探测并确认主机指纹/).count()) {
     throw new Error('host editor still duplicates the post-save fingerprint flow');
   }
+
+  const privateKeyChoice = hostEditor.getByRole('button', { name: /^SSH 私钥/ });
+  if (!(await privateKeyChoice.evaluate((element) => element.classList.contains('is-active')))) {
+    throw new Error('new host form does not default to private-key authentication');
+  }
+  await hostEditor.getByLabel('私钥', { exact: true }).waitFor();
+  const choiceCardHeights = await hostEditor
+    .locator('.choice-card')
+    .evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height));
+  if (choiceCardHeights.length !== 3 || choiceCardHeights.some((height) => height > 60.5)) {
+    throw new Error(`desktop host authentication choices exceed 60px: ${JSON.stringify(choiceCardHeights)}`);
+  }
+  modalChecks.hostFormDesktop = await assertDialogLayout(hostEditor, 'desktop new-host form', {
+    mobile: false,
+    bodyMustFit: true,
+  });
+  await page.screenshot({ path: join(outputDir, 'new-host.png'), fullPage: true });
+
+  await page.setViewportSize(mobileViewport);
+  await page.waitForTimeout(150);
+  modalChecks.hostFormMobile = await assertDialogLayout(hostEditor, 'mobile new-host form', {
+    mobile: true,
+    bodyMustFit: false,
+  });
+  await page.screenshot({ path: join(outputDir, 'new-host-mobile.png'), fullPage: true });
   await hostEditor.getByRole('button', { name: '关闭' }).click();
+  await hostEditor.waitFor({ state: 'detached' });
+  await page.setViewportSize(desktopViewport);
+  await page.waitForTimeout(150);
 
   if (ownedServer) {
     const discovery = await page.evaluate(async () => {
@@ -231,6 +269,12 @@ Host proxy-box
     if (imported.status() !== 201) throw new Error(`SSH config import returned ${imported.status()}`);
     await importDialog.getByRole('button', { name: 'review-box 已导入' }).waitFor();
     sshConfigImport = 'review-box';
+    const longCandidate = importDialog.getByRole('listitem').filter({ hasText: longFixtureName });
+    if (await longCandidate.locator('.ssh-config-candidate__meta').count()) {
+      throw new Error('SSH candidate without metadata still renders an empty region');
+    }
+    await importDialog.getByRole('button', { name: `导入 ${longFixtureName}` }).click();
+    await importDialog.getByRole('button', { name: `${longFixtureName} 已导入` }).waitFor();
     await importDialog.getByRole('button', { name: '完成' }).click();
     const importedCard = page.locator('.host-card').filter({ has: page.getByRole('heading', { name: 'review-box' }) });
     await importedCard.getByText('待验证指纹', { exact: true }).waitFor();
@@ -240,6 +284,27 @@ Host proxy-box
     page.off('request', recordProbe);
     if (probeRequests.length)
       throw new Error(`SSH config import unexpectedly probed a host: ${probeRequests.join(', ')}`);
+
+    await page.getByRole('button', { name: `${longFixtureName} 操作` }).click();
+    await page.getByRole('menuitem', { name: '删除主机' }).click();
+    const deleteHostDialog = page.getByRole('dialog', { name: `删除 ${longFixtureName}？` });
+    modalChecks.longHostDesktop = await assertDialogLayout(deleteHostDialog, 'long host confirmation', {
+      confirm: true,
+    });
+    await page.screenshot({ path: join(outputDir, 'confirm-host.png'), fullPage: true });
+    await page.setViewportSize(mobileViewport);
+    modalChecks.longHostMobile = await assertDialogLayout(deleteHostDialog, 'mobile long host confirmation', {
+      confirm: true,
+      mobile: true,
+    });
+    await page.screenshot({ path: join(outputDir, 'confirm-host-mobile.png'), fullPage: true });
+    await deleteHostDialog.getByRole('button', { name: '关闭' }).click();
+    await deleteHostDialog.waitFor({ state: 'detached' });
+    await page.setViewportSize(desktopViewport);
+    await page.getByRole('button', { name: `${longFixtureName} 操作` }).click();
+    await page.getByRole('menuitem', { name: '删除主机' }).click();
+    await deleteHostDialog.getByRole('button', { name: '删除主机' }).click();
+    await deleteHostDialog.waitFor({ state: 'detached' });
   }
 
   await page
@@ -249,7 +314,40 @@ Host proxy-box
   const settingsDialog = page.getByRole('dialog', { name: '设置' });
   await settingsDialog.waitFor();
   await page.screenshot({ path: join(outputDir, 'settings.png'), fullPage: true });
+  await settingsDialog.getByRole('button', { name: '账户与安全', exact: true }).click();
+  const newPasswordBox = await settingsDialog.getByLabel(/^新密码/).boundingBox();
+  const confirmPasswordBox = await settingsDialog.getByLabel('确认新密码', { exact: true }).boundingBox();
+  if (!newPasswordBox || !confirmPasswordBox || Math.abs(newPasswordBox.y - confirmPasswordBox.y) > 1) {
+    throw new Error(`password fields are not top-aligned: ${JSON.stringify({ newPasswordBox, confirmPasswordBox })}`);
+  }
+  modalChecks.settingsDesktop = await assertDialogLayout(settingsDialog, 'desktop account settings', {
+    bodyMustFit: true,
+  });
+  await page.screenshot({ path: join(outputDir, 'settings-account.png'), fullPage: true });
+  await settingsDialog.getByRole('button', { name: '退出登录', exact: true }).click();
+  const logoutDialog = page.getByRole('dialog', { name: '退出 wmux？' });
+  modalChecks.logoutDesktop = await assertDialogLayout(logoutDialog, 'logout confirmation', {
+    confirm: true,
+    maxHeight: 190,
+  });
+  if ((await page.getByRole('dialog').count()) !== 1)
+    throw new Error('nested confirmation exposes the lower dialog to assistive technology');
+  await page.screenshot({ path: join(outputDir, 'confirm-logout.png'), fullPage: true });
+  await page.setViewportSize(mobileViewport);
+  modalChecks.logoutMobile = await assertDialogLayout(logoutDialog, 'mobile logout confirmation', {
+    confirm: true,
+    mobile: true,
+    maxHeight: 220,
+  });
+  await page.screenshot({ path: join(outputDir, 'confirm-logout-mobile.png'), fullPage: true });
+  await logoutDialog.getByRole('button', { name: '取消' }).click();
+  modalChecks.settingsMobile = await assertDialogLayout(settingsDialog, 'mobile account settings', {
+    mobile: true,
+    bodyMustFit: true,
+  });
+  await page.screenshot({ path: join(outputDir, 'settings-account-mobile.png'), fullPage: true });
   await settingsDialog.getByRole('button', { name: '关闭' }).click();
+  await page.setViewportSize(desktopViewport);
 
   await page
     .getByRole('button', { name: /新建会话/ })
@@ -266,6 +364,8 @@ Host proxy-box
   await dialog.getByText('不持久化会话会在服务连接终止时结束。', { exact: true }).waitFor();
   await dialog.getByLabel('会话名称').fill('浏览器验收');
   await dialog.getByLabel('持久化方式').selectOption(ownedServer ? 'tmux' : 'none');
+  modalChecks.sessionForm = await assertDialogLayout(dialog, 'new session form', { bodyMustFit: true });
+  await page.screenshot({ path: join(outputDir, 'new-session.png'), fullPage: true });
   await page.evaluate(() => {
     globalThis.__wmuxTerminalOpenedAt = 0;
     const observer = new globalThis.MutationObserver(() => {
@@ -353,7 +453,7 @@ Host proxy-box
   await page.locator('.terminal-view.is-active .xterm-rows > div').filter({ hasText: commandMarker }).waitFor();
 
   await page.screenshot({ path: join(outputDir, 'desktop.png'), fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize(mobileViewport);
   await page.waitForTimeout(250);
   const mobileOverflow = await page.evaluate(
     () => globalThis.document.documentElement.scrollWidth - globalThis.window.innerWidth,
@@ -370,6 +470,7 @@ Host proxy-box
     throw new Error('mobile sidebar did not exclusively expose its close action');
   }
   await mobileClose.click();
+  await page.waitForTimeout(200);
   await page.screenshot({ path: join(outputDir, 'mobile.png'), fullPage: true });
 
   if (ownedServer) {
@@ -460,6 +561,7 @@ finally:
     replayIsolation = 'REPLAY_SAFE';
   }
 
+  await page.setViewportSize(desktopViewport);
   await page.getByRole('button', { name: /结束会话 浏览器验收/ }).click();
   const confirmDialog = page.getByRole('dialog', { name: /结束「浏览器验收」/ });
   await confirmDialog.waitFor();
@@ -469,10 +571,39 @@ finally:
   if (await confirmDialog.getByText('这个操作无法撤销。', { exact: true }).count()) {
     throw new Error('session confirmation still contains the generic duplicate warning');
   }
+  modalChecks.sessionConfirm = await assertDialogLayout(confirmDialog, 'session confirmation', {
+    confirm: true,
+    maxHeight: 190,
+  });
+  await page.screenshot({ path: join(outputDir, 'confirm-session.png'), fullPage: true });
+  await confirmDialog.getByRole('button', { name: '取消' }).click();
+  await page.getByRole('button', { name: '浏览器验收 操作' }).click();
+  await page.getByRole('menuitem', { name: '重命名', exact: true }).click();
+  const renameDialog = page.getByRole('dialog', { name: '重命名会话' });
+  await renameDialog.getByLabel('会话名称').fill(longFixtureName);
+  modalChecks.rename = await assertDialogLayout(renameDialog, 'rename session form', { bodyMustFit: true });
+  await renameDialog.getByRole('button', { name: '保存', exact: true }).click();
+  await renameDialog.waitFor({ state: 'detached' });
+  const longTerminate = page.getByRole('button', { name: `结束会话 ${longFixtureName}` });
+  await longTerminate.click();
+  const longConfirm = page.getByRole('dialog', { name: new RegExp(longFixtureName) });
+  modalChecks.longSessionDesktop = await assertDialogLayout(longConfirm, 'long session confirmation', {
+    confirm: true,
+  });
+  await page.screenshot({ path: join(outputDir, 'confirm-session-long.png'), fullPage: true });
+  await longConfirm.getByRole('button', { name: '关闭' }).click();
+  await longConfirm.waitFor({ state: 'detached' });
+  await longTerminate.click();
+  await page.setViewportSize({ width: 320, height: 568 });
+  modalChecks.longSessionNarrow = await assertDialogLayout(longConfirm, 'narrow long session confirmation', {
+    confirm: true,
+    mobile: true,
+  });
+  await page.screenshot({ path: join(outputDir, 'confirm-session-long-mobile.png'), fullPage: true });
   const deletedResponse = page.waitForResponse(
     (response) => response.request().method() === 'DELETE' && response.url().includes('/api/sessions/'),
   );
-  await confirmDialog.getByRole('button', { name: '结束会话' }).click();
+  await longConfirm.getByRole('button', { name: '结束会话' }).click();
   const deleted = await deletedResponse;
   if (deleted.status() !== 204) throw new Error(`UI session termination returned ${deleted.status()}`);
 
@@ -500,6 +631,7 @@ finally:
         pasteBytes,
         replayIsolation,
         sshConfigImport,
+        modalChecks,
         uiTerminationStatus: deleted.status(),
         remainingSessions: remaining.length,
       },
@@ -511,6 +643,99 @@ finally:
   if (browser) await browser.close();
   if (ownedServer) await stopChild(ownedServer);
   if (ownedDataDir) await rm(ownedDataDir, { recursive: true, force: true });
+}
+
+async function assertDialogLayout(
+  dialog,
+  label,
+  { mobile = false, bodyMustFit = false, confirm = false, maxHeight = Infinity } = {},
+) {
+  await dialog.waitFor();
+  // Let viewport-driven app-height updates settle before taking measurements.
+  await dialog.evaluate(
+    () =>
+      new Promise((resolveFrame) => {
+        globalThis.requestAnimationFrame(() => globalThis.requestAnimationFrame(resolveFrame));
+      }),
+  );
+  await dialog.page().evaluate(async () => {
+    await Promise.all(
+      globalThis.document
+        .getAnimations()
+        .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => undefined)),
+    );
+  });
+  const metrics = await dialog.evaluate((panel) => {
+    const header = panel.querySelector('.modal__header');
+    const title = header.querySelector('h2');
+    const description = header.querySelector('p');
+    const close = panel.querySelector('[data-modal-close]');
+    const body = panel.querySelector('.modal__body');
+    const footer = panel.querySelector('.modal__footer');
+    const closeRect = close.getBoundingClientRect();
+    const style = (element) => globalThis.getComputedStyle(element);
+    return {
+      panel: panel.getBoundingClientRect().toJSON(),
+      overflow: panel.scrollWidth - panel.clientWidth,
+      titleOverflow: title.scrollWidth - title.clientWidth,
+      titleRight: title.getBoundingClientRect().right,
+      titleSize: parseFloat(style(title).fontSize),
+      descriptionSize: description ? parseFloat(style(description).fontSize) : null,
+      close: closeRect.toJSON(),
+      closeHit: close.contains(
+        globalThis.document.elementFromPoint(closeRect.x + closeRect.width / 2, closeRect.y + closeRect.height / 2),
+      ),
+      body: body ? { height: body.clientHeight, scrollHeight: body.scrollHeight } : null,
+      footer: footer?.getBoundingClientRect().toJSON(),
+      buttonHeights: Array.from(
+        footer?.querySelectorAll('button') ?? [],
+        (button) => button.getBoundingClientRect().height,
+      ),
+      headerBorder: parseFloat(style(header).borderBottomWidth),
+      footerBorder: footer ? parseFloat(style(footer).borderTopWidth) : 0,
+      footerBackground: footer ? style(footer).backgroundColor : null,
+      background: style(panel).backgroundColor,
+      viewport: { width: globalThis.innerWidth, height: globalThis.innerHeight },
+    };
+  });
+  const { panel, close, footer, viewport } = metrics;
+  const inside = (rect, outer) =>
+    rect.left >= outer.left - 1 &&
+    rect.right <= outer.right + 1 &&
+    rect.top >= outer.top - 1 &&
+    rect.bottom <= outer.bottom + 1;
+  const visibleArea = { left: 0, top: 0, right: viewport.width, bottom: viewport.height };
+  const actionHeight = mobile ? 44 : 36;
+  const errors = [];
+  if (!inside(panel, visibleArea) || metrics.overflow > 1) errors.push('panel overflows viewport');
+  if (panel.height > maxHeight) errors.push(`panel exceeds ${maxHeight}px`);
+  if (!inside(close, panel) || !metrics.closeHit || close.width < actionHeight || close.height < actionHeight)
+    errors.push('close button is clipped, obstructed, or too small');
+  if (metrics.titleOverflow > 1 || metrics.titleRight > close.left + 1)
+    errors.push('title overflows or crowds the close button');
+  if (footer && !inside(footer, panel)) errors.push('footer is outside panel');
+  if (metrics.buttonHeights.some((height) => height < actionHeight || (!mobile && height > 36.5)))
+    errors.push('actions have incorrect desktop/mobile height');
+  if (bodyMustFit && (!metrics.body || metrics.body.scrollHeight > metrics.body.height + 1))
+    errors.push('form requires unnecessary internal scrolling');
+  if (confirm) {
+    if (metrics.body) errors.push('confirmation has an empty body region');
+    if (metrics.titleSize < 16 || metrics.titleSize > 18 || metrics.descriptionSize !== 14)
+      errors.push('confirmation typography is disproportionate');
+    if (metrics.headerBorder || metrics.footerBorder) errors.push('confirmation has internal separators');
+    if (!['rgba(0, 0, 0, 0)', 'transparent', metrics.background].includes(metrics.footerBackground))
+      errors.push('confirmation has a separate footer background');
+  }
+  if (errors.length) throw new Error(`${label}: ${errors.join('; ')}\n${JSON.stringify(metrics)}`);
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click({ trial: true });
+  return {
+    height: panel.height,
+    width: panel.width,
+    body: metrics.body,
+    buttonHeights: metrics.buttonHeights,
+    closeWidth: close.width,
+  };
 }
 
 async function findChrome() {

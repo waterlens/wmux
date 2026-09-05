@@ -1,5 +1,5 @@
 import { Command, Server, TerminalSquare } from 'lucide-react';
-import { type FormEvent, useMemo, useState } from 'react';
+import { type FormEvent, useId, useMemo, useState } from 'react';
 import { api, errorMessage } from '../api';
 import type { Host, PersistenceMode, Session, SessionInput, SessionKind } from '../types';
 import { Button, Field, Input, Modal, Select } from './UI';
@@ -14,6 +14,7 @@ type SessionDialogProps = {
 };
 
 export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, onCreated }: SessionDialogProps) {
+  const locationLabelId = useId();
   const [kind, setKind] = useState<SessionKind>(() => (initialHostId ? 'ssh' : 'local'));
   const [hostId, setHostId] = useState(initialHostId ?? '');
   const [name, setName] = useState('');
@@ -67,6 +68,7 @@ export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, o
     <Modal
       open={open}
       title="新建会话"
+      closeDisabled={busy}
       onClose={onClose}
       footer={
         <>
@@ -80,11 +82,14 @@ export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, o
       }
     >
       <form id="new-session-form" className="form-grid" onSubmit={(event) => void submit(event)}>
-        <div className="segment-label">运行位置</div>
-        <div className="choice-grid choice-grid--two">
+        <div id={locationLabelId} className="segment-label">
+          运行位置
+        </div>
+        <div className="choice-grid choice-grid--two" role="group" aria-labelledby={locationLabelId}>
           <button
             type="button"
             className={`choice-card ${kind === 'local' ? 'is-active' : ''}`}
+            aria-pressed={kind === 'local'}
             onClick={() => setKind('local')}
           >
             <span className="choice-card__icon">
@@ -98,6 +103,7 @@ export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, o
           <button
             type="button"
             className={`choice-card ${kind === 'ssh' ? 'is-active' : ''}`}
+            aria-pressed={kind === 'ssh'}
             onClick={() => setKind('ssh')}
           >
             <span className="choice-card__icon">
@@ -131,7 +137,7 @@ export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, o
               placeholder={availableDefaultName()}
             />
           </Field>
-          <Field label="持久化方式" hint="自动选择可用后端">
+          <Field label="持久化方式" hint={persistence === 'auto' ? '自动选择可用后端' : undefined}>
             <Select value={persistence} onChange={(event) => setPersistence(event.target.value as PersistenceMode)}>
               <option value="auto">自动（推荐）</option>
               <option value="tmux">tmux</option>
@@ -204,18 +210,21 @@ export function RenameSessionDialog({ session, onClose, onSaved }: RenameProps) 
     <Modal
       open={Boolean(session)}
       title="重命名会话"
+      closeDisabled={busy}
       onClose={onClose}
       size="sm"
       footer={
         <>
-          <Button onClick={onClose}>取消</Button>
+          <Button onClick={onClose} disabled={busy}>
+            取消
+          </Button>
           <Button type="submit" form="rename-session-form" tone="primary" busy={busy}>
             保存
           </Button>
         </>
       }
     >
-      <form id="rename-session-form" onSubmit={(event) => void submit(event)}>
+      <form id="rename-session-form" className="form-grid" onSubmit={(event) => void submit(event)}>
         <Field label="会话名称">
           <Input value={name} onChange={(event) => setName(event.target.value)} />
         </Field>

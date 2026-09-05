@@ -90,4 +90,28 @@ describe('SSHConfigImport', () => {
     fireEvent.click(button);
     expect(importHost).not.toHaveBeenCalled();
   });
+
+  it('omits the metadata region for a candidate without extra information', async () => {
+    vi.spyOn(api, 'sshConfigHosts').mockResolvedValue({
+      available: true,
+      source: '~/.ssh/config',
+      candidates: [
+        {
+          alias: 'agent-box',
+          address: 'agent.internal',
+          port: 22,
+          username: 'dev',
+          hasIdentityFile: false,
+          unsupported: [],
+        },
+      ],
+    });
+    render(<SSHConfigImport onImported={vi.fn()} notify={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '从 SSH config 导入主机' }));
+    expect(await screen.findByText('dev@agent.internal:22')).toBeTruthy();
+    const candidate = screen.getByRole('listitem');
+    expect(candidate.querySelector('.ssh-config-candidate__meta')).toBeNull();
+    expect(screen.getByRole('button', { name: '导入 agent-box' }).hasAttribute('disabled')).toBe(false);
+  });
 });
