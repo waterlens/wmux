@@ -10,7 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,7 +43,10 @@ type Config struct {
 	Dir          string
 	SegmentBytes int64
 	MaxBytes     int64
-	SyncWrites   bool
+	// SyncWrites fsyncs every record before Append reports success. It is a
+	// test hook for durability assertions, not an operator knob: production
+	// wires it to false and no environment variable turns it on.
+	SyncWrites bool
 }
 
 type diskRecord struct {
@@ -110,7 +113,7 @@ func (s *Store) load() error {
 	if err != nil {
 		return fmt.Errorf("transcript: list segments: %w", err)
 	}
-	sort.Strings(paths)
+	slices.Sort(paths)
 
 	for index, path := range paths {
 		seg, err := inspectSegment(path, index == len(paths)-1)
@@ -168,51 +171,50 @@ func inspectSegment(path string, recoverTail bool) (segment, error) {
 	reader := bufio.NewReaderSize(f, 64<<10)
 	var previous uint64
 	var validSize int64
+	// A crash can only damage the last record of the newest segment. dropTail
+	// discards exactly that record and reports whether it did; damage anywhere
+	// else stays a hard error.
+	dropTail := func(atEOF bool) (bool, error) {
+		if !recoverTail || !atEOF {
+			return false, nil
+		}
+		if err := f.Truncate(validSize); err != nil {
+			return false, fmt.Errorf("transcript: recover %s: %w", path, err)
+		}
+		seg.size = validSize
+		return true, nil
+	}
 	for {
 		line, readErr := reader.ReadBytes('\n')
 		if len(line) == 0 && errors.Is(readErr, io.EOF) {
 			break
 		}
-		if readErr != nil {
-			if recoverTail && errors.Is(readErr, io.EOF) {
-				if err := f.Truncate(validSize); err != nil {
-					return segment{}, fmt.Errorf("transcript: recover %s: %w", path, err)
-				}
-				seg.size = validSize
-				break
-			}
-			return segment{}, fmt.Errorf("transcript: read %s: %w", path, readErr)
-		}
 		var rec diskRecord
-		if err := json.Unmarshal(line, &rec); err != nil {
-			if recoverTail && readerAtEOF(reader) {
-				if truncateErr := f.Truncate(validSize); truncateErr != nil {
-					return segment{}, fmt.Errorf("transcript: recover %s: %w", path, truncateErr)
-				}
-				seg.size = validSize
-				break
-			}
-			return segment{}, fmt.Errorf("transcript: decode %s: %w", path, err)
+		var badRecord error
+		if readErr != nil {
+			badRecord = fmt.Errorf("transcript: read %s: %w", path, readErr)
+		} else if err := json.Unmarshal(line, &rec); err != nil {
+			badRecord = fmt.Errorf("transcript: decode %s: %w", path, err)
+		} else if rec.Sequence == 0 || (previous != 0 && rec.Sequence <= previous) {
+			badRecord = fmt.Errorf("transcript: non-monotonic sequence in %s", path)
+		} else if _, err := base64.StdEncoding.DecodeString(rec.Data); err != nil {
+			badRecord = fmt.Errorf("transcript: invalid base64 in %s: %w", path, err)
 		}
-		if rec.Sequence == 0 || (previous != 0 && rec.Sequence <= previous) {
-			if recoverTail && readerAtEOF(reader) {
-				if truncateErr := f.Truncate(validSize); truncateErr != nil {
-					return segment{}, fmt.Errorf("transcript: recover %s: %w", path, truncateErr)
-				}
-				seg.size = validSize
-				break
+		if badRecord != nil {
+			// A partial read is at EOF by definition; a complete but unusable
+			// record is only the tail when nothing follows it.
+			atEOF := errors.Is(readErr, io.EOF)
+			if readErr == nil {
+				atEOF = readerAtEOF(reader)
 			}
-			return segment{}, fmt.Errorf("transcript: non-monotonic sequence in %s", path)
-		}
-		if _, err := base64.StdEncoding.DecodeString(rec.Data); err != nil {
-			if recoverTail && readerAtEOF(reader) {
-				if truncateErr := f.Truncate(validSize); truncateErr != nil {
-					return segment{}, fmt.Errorf("transcript: recover %s: %w", path, truncateErr)
-				}
-				seg.size = validSize
-				break
+			dropped, err := dropTail(atEOF)
+			if err != nil {
+				return segment{}, err
 			}
-			return segment{}, fmt.Errorf("transcript: invalid base64 in %s: %w", path, err)
+			if !dropped {
+				return segment{}, badRecord
+			}
+			break
 		}
 		if seg.first == 0 {
 			seg.first = rec.Sequence
@@ -251,7 +253,7 @@ func (s *Store) Append(data []byte) (uint64, error) {
 	}
 	line = append(line, '\n')
 
-	if s.active == nil || (len(s.segments) != 0 && s.segments[len(s.segments)-1].size > 0 && s.segments[len(s.segments)-1].size+int64(len(line)) > s.cfg.SegmentBytes) {
+	if s.needsRotationLocked(len(line)) {
 		if err := s.rotateLocked(sequence); err != nil {
 			return 0, err
 		}
@@ -286,6 +288,17 @@ func (s *Store) Append(data []byte) (uint64, error) {
 	// append/open retries trimming.
 	_ = s.trimLocked()
 	return sequence, nil
+}
+
+// needsRotationLocked reports whether a record of recordSize still fits the
+// newest segment. A segment that holds nothing yet always accepts the record,
+// so a single oversized record cannot rotate forever.
+func (s *Store) needsRotationLocked(recordSize int) bool {
+	if s.active == nil || len(s.segments) == 0 {
+		return true
+	}
+	last := s.segments[len(s.segments)-1]
+	return last.size > 0 && last.size+int64(recordSize) > s.cfg.SegmentBytes
 }
 
 func (s *Store) rollbackAppendLocked(size int64, cause error) error {
@@ -359,48 +372,54 @@ func (s *Store) Replay(after uint64, limit int, yield func(sequence uint64, at t
 		if seg.last <= after {
 			continue
 		}
-		f, err := os.Open(seg.path)
+		done, err := replaySegment(seg.path, after, limit, &remaining, yield)
 		if err != nil {
-			return fmt.Errorf("transcript: open replay segment: %w", err)
+			return err
 		}
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 64<<10), maxScanToken)
-		for scanner.Scan() {
-			var rec diskRecord
-			if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
-				_ = f.Close()
-				return fmt.Errorf("transcript: decode replay: %w", err)
-			}
-			if rec.Sequence <= after {
-				continue
-			}
-			data, err := base64.StdEncoding.DecodeString(rec.Data)
-			if err != nil {
-				_ = f.Close()
-				return fmt.Errorf("transcript: decode replay data: %w", err)
-			}
-			if err := yield(rec.Sequence, rec.Time, data); err != nil {
-				_ = f.Close()
-				return err
-			}
-			if limit > 0 {
-				remaining--
-				if remaining == 0 {
-					_ = f.Close()
-					return nil
-				}
-			}
-		}
-		scanErr := scanner.Err()
-		closeErr := f.Close()
-		if scanErr != nil {
-			return fmt.Errorf("transcript: scan replay: %w", scanErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("transcript: close replay segment: %w", closeErr)
+		if done {
+			return nil
 		}
 	}
 	return nil
+}
+
+// replaySegment yields one segment's records and reports whether limit was
+// reached. remaining is only consulted when limit is positive.
+func replaySegment(path string, after uint64, limit int, remaining *int, yield func(uint64, time.Time, []byte) error) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("transcript: open replay segment: %w", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64<<10), maxScanToken)
+	for scanner.Scan() {
+		var rec diskRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			return false, fmt.Errorf("transcript: decode replay: %w", err)
+		}
+		if rec.Sequence <= after {
+			continue
+		}
+		data, err := base64.StdEncoding.DecodeString(rec.Data)
+		if err != nil {
+			return false, fmt.Errorf("transcript: decode replay data: %w", err)
+		}
+		if err := yield(rec.Sequence, rec.Time, data); err != nil {
+			return false, err
+		}
+		if limit > 0 {
+			*remaining--
+			if *remaining == 0 {
+				return true, nil
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("transcript: scan replay: %w", err)
+	}
+	return false, nil
 }
 
 func (s *Store) Bounds() (oldest, newest uint64) {
@@ -428,7 +447,8 @@ type DirectoryConfig struct {
 	Root         string
 	SegmentBytes int64
 	MaxBytes     int64
-	SyncWrites   bool
+	// SyncWrites has the same test-only meaning as Config.SyncWrites.
+	SyncWrites bool
 }
 
 // Directory is a filesystem-backed Factory. Session IDs are escaped into a
