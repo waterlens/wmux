@@ -153,7 +153,6 @@ const publicMessages: Partial<Record<string, string>> = {
   ssh_config_unsupported: '这台主机使用了 wmux 暂不支持的 SSH 代理配置。',
   ssh_config_invalid: 'SSH config 中的主机配置无效。',
   ssh_config_unavailable: '暂时无法读取 SSH config。',
-  terminal_unavailable: '终端服务暂时不可用，请稍后重试。',
   ssh_probe_failed: '无法读取 SSH 主机指纹，请检查主机地址与网络连接。',
   ssh_test_failed: '无法连接到 SSH 主机，请检查地址、端口和认证信息。',
   terminal_start_failed: '无法启动会话，请检查工作目录、启动命令与主机连接。',
