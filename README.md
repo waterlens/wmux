@@ -1,26 +1,51 @@
 # wmux
 
-wmux 是一个面向个人自托管场景的 Web 终端：在浏览器中管理本机 shell 和多台 SSH 主机，并让多个终端 session 在关闭页面、切换设备或网络中断后继续运行。
+wmux 是一个自托管的 Web 终端：在浏览器里使用本机 shell 和多台 SSH 主机，终端 session 在关闭页面、切换设备或断网后继续运行。单个 Go 二进制，内嵌完整 Web UI。
 
 ## 功能
 
-- 本机 PTY 与多 SSH 主机统一管理
-- 多 session、浏览器标签和断线输出补发
-- `tmux` / `screen` 持久化；不可用时可降级为直接 PTY
-- 单写多读：同一 session 可在多个设备打开，并显式接管输入权
-- SSH 密码、加密私钥及 `SSH_AUTH_SOCK` 三种认证方式
-- 发现运行用户的 OpenSSH config，并由管理员显式导入候选主机
-- SSH host key 指纹探测、人工信任及变更拒绝
-- SQLite 元数据、加密凭据与有上限的终端历史文件
-- 首次初始化、密码登录、会话过期及登录限流
-- 桌面、平板和手机响应式界面，支持 PWA 安装
-- 默认使用清爽的白色应用界面；终端画布保留 xterm/程序自己的 ANSI 配色
-- tmux 鼠标模式、OSC 8 链接、Nerd Font 图标与 Unicode 11 字符宽度
-- 单个 Go 二进制部署，内嵌完整 Web UI
+- 本机 PTY 与多台 SSH 主机统一管理，支持密码、私钥和 `SSH_AUTH_SOCK` 认证
+- 基于 `tmux` / `screen` 的持久化 session，可跨浏览器断线和 wmux 重启重新 attach
+- 同一 session 可在多个设备打开并显式接管输入权，断线后补发缺失的输出
+- SSH host key 指纹探测与人工信任，可从 OpenSSH config 导入主机
+- 密码登录、登录限流与会话过期，凭据用主密钥加密后存入 SQLite
+- 桌面、平板和手机响应式界面，可安装为 PWA
+- 八种等宽字体可选，终端宽度可固定列数（窄屏幕自动缩小字号）
+- tmux 鼠标模式、OSC 8 链接、Nerd Font 图标、Unicode 11 字符宽度与 24 位色
 
-## 快速开始
+## 安装
 
-需要 Go 1.26+、Node.js 24+、pnpm，以及 `tmux` 或 `screen`。前端只在构建时需要 Node.js。
+### 安装脚本（Linux / macOS）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/waterlens/wmux/main/scripts/install.sh | sudo bash
+```
+
+脚本把最新 Release 的二进制安装到 `/usr/local/bin/wmux`。在 Linux 上它还会创建 `wmux` 系统用户，并安装、启动 systemd 服务 `wmux`：配置文件为 `/etc/wmux/wmux.env`，数据目录为 `/var/lib/wmux/data`。安装完成后打开 <http://127.0.0.1:8787>，首次访问时创建管理员账户。
+
+浏览器里的“本机终端”以服务账号的身份运行。要使用自己的账号（连同它的 shell、tmux 和 `SSH_AUTH_SOCK`）：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/waterlens/wmux/main/scripts/install.sh
+sudo bash install.sh install --user "$USER"
+```
+
+其它常用命令：
+
+```bash
+sudo bash install.sh upgrade                                # 升级到最新版本
+sudo bash install.sh install -v v0.2.0                      # 安装指定版本
+bash install.sh check                                       # 查看已安装版本与最新版本
+sudo bash install.sh uninstall                              # 卸载，数据与用户会分别询问
+bash install.sh install --no-systemd --prefix ~/.local/bin  # 只安装二进制，不需要 root
+bash install.sh help
+```
+
+macOS 上脚本只安装二进制。
+
+### 从源码构建
+
+需要 Go 1.26+、Node.js 24+、pnpm，以及 `tmux` 或 `screen`。Node.js 只在构建时需要。
 
 ```bash
 pnpm install
@@ -28,42 +53,28 @@ pnpm build
 WMUX_DATA_DIR="$PWD/.wmux" ./bin/wmux
 ```
 
-默认监听 `127.0.0.1:8787`。打开 <http://127.0.0.1:8787>，首次访问时创建管理员账户。
+默认监听 `127.0.0.1:8787`。
 
-原生运行最适合“本机终端”：shell 与 wmux 运行在同一台宿主机，并可使用当前用户的 `SSH_AUTH_SOCK`。服务启动用户必须有权访问希望操作的文件。
-
-## Docker
+### Docker
 
 ```bash
 docker compose up -d --build
 ```
 
-镜像内置 `tmux`，数据保存在 `wmux-data` volume。注意：容器中的“本机”是容器本身，不是 Docker 宿主机；重启整个容器会保留会话元数据和历史，但会结束容器内的本机进程。若希望控制宿主机并让本机会话跨 wmux 服务重启继续运行，推荐在宿主机原生运行 wmux，或把宿主机作为 SSH 主机添加。
+镜像内置 `tmux`，数据保存在 `wmux-data` volume。容器中的“本机”是容器本身：重启容器会保留会话元数据与历史，但会结束容器内运行的进程。要操作宿主机，请在宿主机原生运行 wmux，或把宿主机作为 SSH 主机添加。
 
-## 从 OpenSSH config 导入主机
+### systemd 用户服务
 
-wmux 可以只读发现其运行系统账户的 `~/.ssh/config`；也可通过 `WMUX_SSH_CONFIG` 指向另一份配置文件。这里的 `~`、`%d` 和相对 `Include` 都以该账户记录的 home 为准，不受服务进程的 `HOME` 环境变量影响。发现结果不会自动写入数据库或连接网络，只有登录后的管理员显式选择别名并导入时，wmux 才会重新解析该别名并创建主机记录。
+不使用安装脚本时，可以把 [`deploy/wmux.service.example`](deploy/wmux.service.example) 复制为 `~/.config/systemd/user/wmux.service`，需要的环境变量写入 `~/.config/wmux/wmux.env`（模板见 [`deploy/wmux.env.example`](deploy/wmux.env.example)），然后：
 
-导入只复制别名、地址、端口和用户名，认证方式固定为 SSH agent。`IdentityFile` 只会显示“已配置”的提示，其路径和文件内容不会进入 API 或数据库；导入也不会读取私钥、复制密码、探测网络或自动信任 host key。首次连接仍需可用的 agent 或之后手工配置凭据，并通过 wmux 独立的指纹探测与确认流程。`ProxyJump`、`ProxyCommand` 等会改变连接路径或执行外部命令的配置目前不支持，相应候选不会被导入。
-
-解析遵循 OpenSSH 的大小写敏感 `Host` 匹配、通配/否定规则、首值优先和 Include 顺序。为避免 discovery 执行本地命令，首版只安全应用 `Match all`，其他 `Match` 条件均忽略；条件 `Include` 会在解析已知别名时按需读取，但其中新声明的别名不会额外出现在候选列表中。
-
-Docker 部署不要挂载整个宿主机 `~/.ssh`，否则 Web 本地 shell 也可能读取其中的私钥和 `known_hosts`。若需发现配置，只分别只读挂载主 config 以及它实际引用的配置片段，例如 compose 文件中的注释示例；不要挂载 `IdentityFile`、私钥或 `known_hosts`。容器以 UID `10001` 运行，宿主文件及其父目录必须允许该 UID 读取和遍历。
-
-## 安全地远程访问
-
-推荐通过 WireGuard、Tailscale 或其他私有网络访问。远程地址仍应在 wmux 前配置 HTTPS：除 `localhost` 等浏览器认可的本机来源外，工具栏的复制/粘贴依赖 Secure Context，普通私网 IP 的 HTTP 页面无法获得浏览器剪贴板权限。若需要域名访问，请设置：
-
-```env
-WMUX_HOST=127.0.0.1
-WMUX_PUBLIC_URL=https://terminal.example.com
-WMUX_COOKIE_SECURE=true
-WMUX_TRUST_PROXY=true
+```bash
+systemctl --user enable --now wmux
+loginctl enable-linger "$USER"   # 退出登录后也保持运行
 ```
 
-仓库的 [`deploy/Caddyfile.example`](deploy/Caddyfile.example) 提供了最小 Caddy 配置。直接键盘输入和浏览器原生粘贴不依赖工具栏的 Async Clipboard API，但远程访问仍不应使用明文 HTTP，也不要将未启用 TLS 的 wmux 端口直接暴露到公网。
-
 ## 配置
+
+wmux 通过环境变量配置。安装脚本部署的服务把它们写在 `/etc/wmux/wmux.env`，修改后执行 `systemctl restart wmux`。
 
 | 环境变量             | 默认值                | 说明                                              |
 | -------------------- | --------------------- | ------------------------------------------------- |
@@ -77,52 +88,61 @@ WMUX_TRUST_PROXY=true
 | `WMUX_LOG_LEVEL`     | `info`                | 日志级别：`debug`、`info`、`warn` 或 `error`      |
 | `WMUX_SSH_CONFIG`    | 空（`~/.ssh/config`） | 用于只读发现候选主机的 OpenSSH config 路径        |
 
-数据目录权限会被收紧到 `0700`，其中 `master.key` 为 `0600`。SSH 密码、私钥和 passphrase 使用该主密钥通过 AES-256-GCM 加密。备份时必须同时保存数据库和主密钥；丢失主密钥后加密凭据无法恢复。
+- 备份时同时保存数据库和 `master.key`：SSH 密码、私钥和 passphrase 用主密钥加密，丢失主密钥后无法恢复。
+- 终端历史（`recordings/`）以明文保存在数据目录中，包含终端里显示过的一切内容。数据目录权限为 `0700`，请当作敏感数据备份和清理。
+- 同一数据目录同时只能由一个 wmux 进程使用。
+- 未设置 `WMUX_PUBLIC_URL` 时只能通过 IP 地址或 `localhost` 访问；使用域名（包括内网 DNS 名）时必须设置它。
 
-同一数据目录同一时间只允许一个 wmux 进程使用，以免多个进程同时写终端历史。未设置 `WMUX_PUBLIC_URL` 时，浏览器写请求只接受通过字面 IP 地址或 `localhost` 访问；若使用自定义域名（包括内网 DNS 名），请显式设置规范 Public URL。
+## 通过域名访问
+
+建议放在 WireGuard、Tailscale 等私有网络内，并用反向代理提供 HTTPS：工具栏的复制/粘贴需要 HTTPS（`localhost` 除外），未启用 TLS 的端口也不应直接暴露到公网。
+
+```env
+WMUX_HOST=127.0.0.1
+WMUX_PUBLIC_URL=https://terminal.example.com
+WMUX_COOKIE_SECURE=true
+WMUX_TRUST_PROXY=true
+```
+
+Caddy 配置示例见 [`deploy/Caddyfile.example`](deploy/Caddyfile.example)。
+
+## 从 OpenSSH config 导入主机
+
+主机管理页面会列出运行账户的 `~/.ssh/config`（或 `WMUX_SSH_CONFIG` 指定文件）中的主机，供管理员选择导入。导入只复制别名、地址、端口和用户名，认证方式为 SSH agent；不会读取私钥或 `known_hosts`，也不会自动信任 host key，首次连接仍需探测并确认指纹。使用 `ProxyJump` / `ProxyCommand` 的主机暂不支持导入；除 `Match all` 外的 `Match` 块会被忽略。
+
+Docker 部署时只以只读方式挂载 config 及其引用的片段（见 `compose.yaml` 中的注释），不要挂载整个 `~/.ssh`。容器以 UID `10001` 运行，挂载的文件需允许该 UID 读取。
 
 ## Session 持久化
 
-本机和 SSH session 的 `auto` 模式依次选择：
+`auto` 模式依次尝试 `tmux`、`screen` 和直接 PTY。前两种可在浏览器断开和 wmux 重启后重新 attach，直接 PTY 只能跨浏览器断线。wmux 使用独立的 tmux/screen 配置与 server，不会出现在你自己的 tmux 中，也不继承你的状态栏和快捷键；界面会显示每个 session 实际使用的方式。
 
-1. `tmux`
-2. `screen`
-3. 直接 PTY
+重连和 wmux 重启后只会 attach 已有的 session，不会重新执行启动命令；后台 session 已不存在时显示为“已退出”，需要显式“重启”。删除 session 会先结束对应的后台 session；主机不可达时仍会删除本地记录，并提示远端 session 可能仍在运行。登出、修改密码或登录过期后，已打开的终端会在数秒内断开。
 
-前两种在浏览器断开和 wmux 服务重启后均可重新 attach。wmux 使用自己的 tmux/screen 配置与服务端点，不会出现在用户默认的 tmux server 中，也不会继承用户的状态栏或快捷键配置。隔离的 tmux server 会启用鼠标模式，使滚轮由 tmux/Vim 等 TUI 正确处理，而不是在 shell 中退化成方向键。直接 PTY 可以跨浏览器断线继续，但 wmux 进程退出时会结束。界面会显示实际使用的 backend，避免把降级 session 误认为完全持久化。
+每个 session 内会设置 `WMUX_SESSION_ID` 和 `COLORTERM=truecolor`。SSH 主机的登录 shell 可以是 fish、csh 等非 POSIX shell。
 
-## 终端协议边界
+## 限制
 
-wmux 支持普通 UTF-8/ANSI 终端流、OSC 8 链接以及分片传输。历史输出重放与实时输出之间有显式边界；客户端在重放完成前不会把终端查询回复或用户输入写回当前 PTY。
-
-OSC 52 剪贴板写入、Kitty/iTerm2 文件传输、桌面通知、SIXEL/inline image、Kitty graphics/keyboard 和任意 tmux passthrough 当前有意保持关闭。这些协议能从远端程序触发浏览器或系统副作用，必须先定义用户授权、活动标签页、多客户端选择、限流及文件大小/名称校验，不能仅靠打开 passthrough 安全实现。
-
-内嵌 Symbols Nerd Font Mono 的来源、版本、哈希和许可见 [`client/public/third-party-notices.txt`](client/public/third-party-notices.txt)，运行中的 wmux 也可从“设置 → 关于”打开同一份文件。
-
-仓库中的 [`deploy/wmux.service.example`](deploy/wmux.service.example) 是 systemd 用户服务示例。它使用 `KillMode=process`，让 systemd 重启 wmux 时不清理同一 cgroup 中已经分离的 tmux/screen 进程。需要额外环境变量时，把 [`deploy/wmux.env.example`](deploy/wmux.env.example) 复制到 unit 引用的 `~/.config/wmux/wmux.env`。安装后执行 `systemctl --user enable --now wmux`；若希望退出登录后服务仍运行，再执行 `loginctl enable-linger "$USER"`。
-
-远程 SSH session 在目标主机上运行独立的 `tmux`/`screen` session；SSH 网络中断后 wmux 会重新连接并 attach。因此持久化不依赖一条永久存活的 TCP 连接。
-
-重连、wmux 服务重启后的恢复都只会 attach 已有的 tmux/screen session，不会再次执行启动命令；后台 session 已不存在时会话显示为“已退出”，只有显式“重启”才会开始新的一次执行（会话的 `generation` 加一）。删除会话时 wmux 会先通过独立的控制连接结束后台 session；主机不可达时仍会删除本地记录和历史，并提示远端 session 可能仍在运行。登出、修改密码或登录过期后，已打开的终端连接会在数秒内被服务端关闭。
-
-每个 session 内都会设置 `WMUX_SESSION_ID`（当前会话 ID）和 `COLORTERM=truecolor`；隔离的 tmux server 同时开启 24 位色。远端主机上执行的所有脚本都通过 `/bin/sh -c` 运行，登录 shell 为 fish、csh 等非 POSIX shell 的主机同样可用。
-
-终端历史（`WMUX_DATA_DIR/recordings`）以明文 JSONL 保存，只受数据目录的 `0700` 权限保护；其中会包含终端里显示过的一切内容。请把数据目录当作敏感数据备份与清理。
+- OSC 52 剪贴板写入、终端文件传输、桌面通知、SIXEL / Kitty 图形、Kitty 键盘协议和 tmux passthrough 目前关闭。
+- 内嵌字体与组件的许可见 [`client/public/third-party-notices.txt`](client/public/third-party-notices.txt)，“设置 → 关于”中也可打开。
 
 ## 开发
 
 ```bash
-pnpm dev       # Go API :8787 + Vite :5173
-pnpm typecheck
-pnpm lint
-pnpm test      # CI 跑的同一条流水线：format:check、lint、typecheck、vitest、go test -race + go vet
-pnpm build
-pnpm exec playwright install chromium # 首次运行浏览器验收前执行一次
-pnpm test:browser # 自建临时实例，走真实浏览器流程并自动清理测试数据
+pnpm dev          # Go API :8787 + Vite :5173
+pnpm test         # format:check、lint、typecheck、vitest、go test -race、go vet
+pnpm build        # 构建 Web UI 并编译 bin/wmux
+pnpm exec playwright install chromium   # 首次运行浏览器验收前执行一次
+pnpm test:browser # 浏览器验收，需要 bin/wmux、python3 和 tmux
 WMUX_TMUX_INTEGRATION=1 go test ./internal/terminal -run TestTmuxSessionSurvivesManagerRestore
 WMUX_SCREEN_INTEGRATION=1 go test ./internal/terminal -run TestScreenSessionSurvivesManagerClose
 ```
 
-浏览器验收（`playwright.config.ts` + `tests/browser/`）只做 jsdom 覆盖不到的部分：真实 xterm 与 tmux PTY 往返、冷缓存字体时序、超过 128 KiB 的 Unicode bracketed paste、reload 后的历史查询回放隔离，以及对话框在真实布局下是否塌掉。纯 DOM 与文案断言留给 `pnpm test:unit`。它需要先 `pnpm build`（使用 `bin/wmux`），并依赖 `python3` 和 `tmux`。
+### 发布
 
-详细的数据流、实时协议和安全模型见 [`docs/architecture.md`](docs/architecture.md)。
+```bash
+git tag v0.2.0
+pnpm release                      # 构建四个平台的归档和 SHA256SUMS 到 release/
+sh scripts/release.sh --publish   # 需要 gh CLI，上传到该 tag 的 GitHub Release
+```
+
+架构、实时协议与安全模型见 [`docs/architecture.md`](docs/architecture.md)。
