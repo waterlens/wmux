@@ -8,7 +8,7 @@
 # Actions:
 #   install    (default) Install or reinstall wmux; on Linux also installs a systemd service
 #   upgrade    Upgrade to the latest (or specified) version and restart the service
-#   uninstall  Remove wmux, its service and optionally its data and service user
+#   uninstall  Remove wmux, its service and optionally its data
 #   check      Show installed vs latest version
 #   show-unit  Print the systemd unit and environment file this script installs
 #   help       Print this help message
@@ -17,7 +17,8 @@
 #   -v, --version VERSION   Install a specific version (e.g. v0.2.0)
 #   -f, --file PATH         Install from a local release archive (.tar.gz) or binary
 #   -r, --repo OWNER/REPO   GitHub repository (default: waterlens/wmux)
-#   -u, --user NAME         Account the service runs as (default: wmux, created if missing)
+#   -u, --user NAME         Existing account the service runs as (default: the account running
+#                           the installer, i.e. \$SUDO_USER when invoked through sudo)
 #   --prefix DIR            Directory for the binary (default: /usr/local/bin)
 #   --no-systemd            Binary only, no service (always the case on macOS)
 #   -y, --yes               Skip confirmation prompts
@@ -38,7 +39,8 @@ STATE_DIR="/var/lib/wmux"
 DATA_DIR="${STATE_DIR}/data"
 SERVICE_NAME="wmux"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-SERVICE_USER="wmux"
+SERVICE_USER=""            # resolved by resolve_service_user (default: the installing account)
+SERVICE_USER_EXPLICIT=false
 
 ACTION="install"
 VERSION=""
@@ -83,7 +85,7 @@ parse_args() {
                 REPO="$2"; shift 2 ;;
             -u|--user)
                 [[ $# -ge 2 ]] || die "$1 needs a value"
-                SERVICE_USER="$2"; shift 2 ;;
+                SERVICE_USER="$2"; SERVICE_USER_EXPLICIT=true; shift 2 ;;
             --prefix)
                 [[ $# -ge 2 ]] || die "$1 needs a value"
                 INSTALL_DIR="$2"; shift 2 ;;
@@ -112,7 +114,7 @@ Usage:
 Actions:
   install    (default) Install or reinstall wmux; on Linux also installs a systemd service
   upgrade    Upgrade to the latest (or specified) version and restart the service
-  uninstall  Remove wmux, its service and optionally its data and service user
+  uninstall  Remove wmux, its service and optionally its data
   check      Show installed vs latest version
   show-unit  Print the systemd unit and environment file this script installs
   help       Print this help message
@@ -121,7 +123,8 @@ Options:
   -v, --version VERSION   Install a specific version (e.g. v0.2.0)
   -f, --file PATH         Install from a local release archive (.tar.gz) or binary
   -r, --repo OWNER/REPO   GitHub repository (default: waterlens/wmux)
-  -u, --user NAME         Account the service runs as (default: wmux, created if missing)
+  -u, --user NAME         Existing account the service runs as (default: the account
+                          running the installer, i.e. $SUDO_USER when invoked via sudo)
   --prefix DIR            Directory for the binary (default: /usr/local/bin)
   --no-systemd            Binary only, no service (always the case on macOS)
   -y, --yes               Skip confirmation prompts
@@ -131,20 +134,19 @@ Installed layout (Linux with systemd):
   Binary:   /usr/local/bin/wmux
   Config:   /etc/wmux/wmux.env
   Data:     /var/lib/wmux/data      (SQLite, master key, terminal history)
-  Home:     /var/lib/wmux           (home of the wmux service user)
   Service:  /etc/systemd/system/wmux.service
 
-The web terminal opens shells as the service user. The default `wmux` account is
-created with a real login shell but no sudo rights; pass --user to run wmux as
-an existing account instead (its shell, dotfiles and tmux sessions are then what
-the browser gets).
+The web terminal opens shells as the service user, which is the account that ran
+the installer (the account before sudo). The browser therefore gets your own
+shell, dotfiles, tmux sessions and SSH agent. Pass --user to run wmux as another
+existing account instead; no account is ever created.
 
 Examples:
   # Install the latest release with a systemd service
   curl -fsSL https://raw.githubusercontent.com/waterlens/wmux/main/scripts/install.sh | sudo bash
 
-  # Run the service as your own account instead of the wmux user
-  sudo bash install.sh install --user "$USER"
+  # Run the service as another existing account
+  sudo bash install.sh install --user alice
 
   # Install a specific version, or from a downloaded archive
   sudo bash install.sh install -v v0.2.0
@@ -321,6 +323,29 @@ service_group() {
     id -gn "$SERVICE_USER" 2>/dev/null || echo "$SERVICE_USER"
 }
 
+service_home() {
+    local home
+    home="$(getent passwd "$SERVICE_USER" 2>/dev/null | cut -d: -f6)"
+    echo "${home:-/home/${SERVICE_USER}}"
+}
+
+# The service runs as the account that invoked the installer (the account before
+# sudo) unless --user names another existing account. No account is created.
+resolve_service_user() {
+    if [[ -z "$SERVICE_USER" ]]; then
+        SERVICE_USER="${SUDO_USER:-$(id -un)}"
+    fi
+}
+
+require_service_user() {
+    resolve_service_user
+    id "$SERVICE_USER" >/dev/null 2>&1 \
+        || die "User '${SERVICE_USER}' does not exist. Pass --user with an existing account."
+    if [[ "$SERVICE_USER" == "root" && "$SERVICE_USER_EXPLICIT" == false ]]; then
+        die "Refusing to run the web terminal as root by default. Run the installer through sudo from your own account, or pass --user root explicitly."
+    fi
+}
+
 render_env() {
     cat <<ENVEOF
 # wmux service configuration. Edit this file, then run: systemctl restart wmux
@@ -340,7 +365,7 @@ WMUX_DATA_DIR=${DATA_DIR}
 # WMUX_SESSION_TTL=168h
 # WMUX_LOG_LEVEL=info
 # OpenSSH config used for read-only host discovery (default: ~/.ssh/config of the service user).
-# WMUX_SSH_CONFIG=${STATE_DIR}/.ssh/config
+# WMUX_SSH_CONFIG=$(service_home)/.ssh/config
 ENVEOF
 }
 
@@ -367,25 +392,10 @@ KillMode=process
 LimitNOFILE=65536
 # wmux spawns interactive shells as its user, so the usual unit sandboxing
 # (ProtectSystem, ProtectHome, NoNewPrivileges) would cripple those shells.
-# Restrict the account instead of the unit.
 
 [Install]
 WantedBy=multi-user.target
 UNITEOF
-}
-
-create_user() {
-    if id "$SERVICE_USER" >/dev/null 2>&1; then
-        return
-    fi
-    if [[ "$SERVICE_USER" != "wmux" ]]; then
-        die "User '${SERVICE_USER}' does not exist. Create it first or use the default wmux account."
-    fi
-    local shell="/bin/sh"
-    [[ -x /bin/bash ]] && shell="/bin/bash"
-    info "Creating system user '${SERVICE_USER}' (home ${STATE_DIR}, shell ${shell})..."
-    # A real login shell: this account is what the browser terminal runs as.
-    useradd --system --create-home --home-dir "$STATE_DIR" --shell "$shell" "$SERVICE_USER"
 }
 
 install_systemd() {
@@ -397,10 +407,19 @@ install_systemd() {
         return
     fi
 
-    create_user
+    require_service_user
 
     mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$DATA_DIR"
-    chown "${SERVICE_USER}:$(service_group)" "$STATE_DIR" "$DATA_DIR"
+    chown "${SERVICE_USER}:$(service_group)" "$STATE_DIR"
+    # Existing data may belong to the account a previous install ran as (for
+    # example the former wmux system user); hand it to the current service user
+    # so it can open its database, master key and recordings.
+    if [[ -n "$(find "$DATA_DIR" ! -user "$SERVICE_USER" -print -quit 2>/dev/null)" ]]; then
+        info "Transferring ownership of ${DATA_DIR} to ${SERVICE_USER}..."
+        chown -R "${SERVICE_USER}:$(service_group)" "$DATA_DIR"
+    else
+        chown "${SERVICE_USER}:$(service_group)" "$DATA_DIR"
+    fi
     chmod 0750 "$STATE_DIR"
     chmod 0700 "$DATA_DIR"
 
@@ -485,7 +504,7 @@ print_summary() {
         echo "  Configure:  ${ENV_FILE}  (WMUX_PUBLIC_URL when behind a domain or proxy)"
         echo "  Status:     systemctl status ${SERVICE_NAME}"
         echo "  Logs:       journalctl -u ${SERVICE_NAME} -f"
-        echo "  Shell user: ${SERVICE_USER}  (change with: install.sh install --user NAME)"
+        echo "  Runs as:    ${SERVICE_USER}  (another existing account: install.sh install --user NAME)"
     else
         echo "  Run:        WMUX_DATA_DIR=\$HOME/.local/share/wmux ${BINARY}"
         echo "  Open:       http://127.0.0.1:8787  (the first visit creates the admin account)"
@@ -567,7 +586,7 @@ do_uninstall() {
     detect_platform
     require_privileges
 
-    info "This removes the wmux binary and service. Data and the service user are asked about separately."
+    info "This removes the wmux binary and service. Data is asked about separately."
     if ! confirm "Uninstall wmux?"; then
         die "Aborted."
     fi
@@ -600,16 +619,6 @@ do_uninstall() {
         fi
     fi
 
-    if [[ "$SERVICE_USER" == "wmux" ]] && id "$SERVICE_USER" >/dev/null 2>&1; then
-        warn "Removing the user also kills its remaining processes, including detached tmux/screen sessions."
-        if confirm "Remove system user '${SERVICE_USER}'?"; then
-            pkill -u "$SERVICE_USER" 2>/dev/null || true
-            sleep 1
-            userdel "$SERVICE_USER" 2>/dev/null || warn "userdel failed; remove the account manually."
-            info "User removed."
-        fi
-    fi
-
     info "wmux uninstalled."
 }
 
@@ -631,6 +640,7 @@ do_check() {
 }
 
 do_show_unit() {
+    resolve_service_user
     echo "# ${ENV_FILE}"
     render_env
     echo ""

@@ -21,13 +21,13 @@ wmux 是一个自托管的 Web 终端：在浏览器里使用本机 shell 和多
 curl -fsSL https://raw.githubusercontent.com/waterlens/wmux/main/scripts/install.sh | sudo bash
 ```
 
-脚本把最新 Release 的二进制安装到 `/usr/local/bin/wmux`。在 Linux 上它还会创建 `wmux` 系统用户，并安装、启动 systemd 服务 `wmux`：配置文件为 `/etc/wmux/wmux.env`，数据目录为 `/var/lib/wmux/data`。安装完成后打开 <http://127.0.0.1:8787>，首次访问时创建管理员账户。
+脚本把最新 Release 的二进制安装到 `/usr/local/bin/wmux`。在 Linux 上它还会安装、启动 systemd 服务 `wmux`：配置文件为 `/etc/wmux/wmux.env`，数据目录为 `/var/lib/wmux/data`。安装完成后打开 <http://127.0.0.1:8787>，首次访问时创建管理员账户。
 
-浏览器里的“本机终端”以服务账号的身份运行。要使用自己的账号（连同它的 shell、tmux 和 `SSH_AUTH_SOCK`）：
+服务以运行安装脚本的账号（`sudo` 之前的那个账号）身份运行，不会创建单独的系统用户：浏览器里的“本机终端”得到的就是你自己的 shell、dotfiles、tmux 会话和 `SSH_AUTH_SOCK`。要改用另一个已存在的账号：
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/waterlens/wmux/main/scripts/install.sh
-sudo bash install.sh install --user "$USER"
+sudo bash install.sh install --user alice
 ```
 
 其它常用命令：
