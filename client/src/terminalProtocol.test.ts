@@ -97,22 +97,20 @@ describe('terminal binary protocol', () => {
 });
 
 describe('terminal control protocol', () => {
-  it('normalizes legacy lifecycle states', () => {
-    expect(normalizeLiveStatus('disconnected')).toBe('reconnecting');
-    expect(normalizeLiveStatus('terminated')).toBe('exited');
+  it('accepts only the lifecycle states the server can send', () => {
+    expect(normalizeLiveStatus('reconnecting')).toBe('reconnecting');
     expect(normalizeLiveStatus('unexpected')).toBeNull();
   });
 
-  it('parses disconnect reasons and compatible writer fields', () => {
+  it('parses disconnect reasons and the writer flag', () => {
     expect(
-      parseControlMessage('{"type":"disconnect","status":"reconnecting","reason":"server_shutdown","isWriter":false}'),
+      parseControlMessage('{"type":"disconnect","status":"reconnecting","reason":"server_shutdown","writer":false}'),
     ).toMatchObject({
       type: 'disconnect',
       status: 'reconnecting',
       reason: 'server_shutdown',
       writer: false,
     });
-    expect(parseControlMessage('{"type":"writer","writable":true}')).toMatchObject({ writer: true });
     expect(parseControlMessage('{"type":"replay_end","sequence":42}')).toEqual({
       type: 'replay_end',
       sequence: 42,

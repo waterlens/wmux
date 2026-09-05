@@ -76,7 +76,6 @@ const statusText: Record<LiveStatus, string> = {
   detached: '已分离',
   exited: '已退出',
   error: '连接错误',
-  offline: '已断开',
 };
 
 export function TerminalView({
@@ -702,7 +701,7 @@ export function TerminalView({
           </div>
         )}
 
-        {(liveStatus === 'error' || liveStatus === 'offline' || liveStatus === 'exited') && (
+        {(liveStatus === 'error' || liveStatus === 'exited') && (
           <div className="terminal-state-card">
             <span className="terminal-state-card__icon">
               <AlertTriangle size={22} />

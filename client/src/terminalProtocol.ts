@@ -1,4 +1,4 @@
-export type LiveStatus = 'connecting' | 'running' | 'reconnecting' | 'detached' | 'exited' | 'error' | 'offline';
+export type LiveStatus = 'connecting' | 'running' | 'reconnecting' | 'detached' | 'exited' | 'error';
 
 export type ControlMessage = {
   type?: string;
@@ -11,8 +11,14 @@ export type ControlMessage = {
   truncated?: boolean;
 };
 
+// keep in sync with internal/api/websocket.go
+export const CLIENT_INPUT_FRAME = 0;
+export const SERVER_OUTPUT_FRAME = 1;
+export const OUTPUT_FRAME_HEADER_BYTES = 9;
 export const MAX_INPUT_FRAME_BYTES = 128 * 1024;
+
 const INPUT_FRAME_HEADER_BYTES = 1;
+const MAX_INPUT_PAYLOAD_BYTES = MAX_INPUT_FRAME_BYTES - INPUT_FRAME_HEADER_BYTES;
 
 export function websocketAddress(
   sessionId: string,
@@ -23,34 +29,25 @@ export function websocketAddress(
   return `${scheme}//${location.host}/ws/sessions/${encodeURIComponent(sessionId)}?since=${sequence}`;
 }
 
-function assertUsableFrameSize(maxFrameBytes: number): void {
-  // Four payload bytes are required for the largest UTF-8 scalar value.
-  if (!Number.isInteger(maxFrameBytes) || maxFrameBytes < INPUT_FRAME_HEADER_BYTES + 4) {
-    throw new RangeError('maxFrameBytes must leave room for a complete UTF-8 code point');
-  }
-}
-
 function inputPacket(content: Uint8Array): ArrayBuffer {
   const packet = new Uint8Array(new ArrayBuffer(content.length + INPUT_FRAME_HEADER_BYTES));
-  packet[0] = 0;
+  packet[0] = CLIENT_INPUT_FRAME;
   packet.set(content, INPUT_FRAME_HEADER_BYTES);
   return packet.buffer;
 }
 
 /** Encode terminal text as independently valid UTF-8 WebSocket messages. */
-export function encodeTerminalTextFrames(value: string, maxFrameBytes = MAX_INPUT_FRAME_BYTES): ArrayBuffer[] {
-  assertUsableFrameSize(maxFrameBytes);
+export function encodeTerminalTextFrames(value: string): ArrayBuffer[] {
   if (!value) return [];
 
   const encoder = new TextEncoder();
-  const maxPayloadBytes = maxFrameBytes - INPUT_FRAME_HEADER_BYTES;
   const frames: ArrayBuffer[] = [];
   let offset = 0;
 
   while (offset < value.length) {
-    const payload = new Uint8Array(new ArrayBuffer(maxPayloadBytes));
+    const payload = new Uint8Array(new ArrayBuffer(MAX_INPUT_PAYLOAD_BYTES));
+    // encodeInto stops on a code point boundary, so no frame splits a UTF-8 scalar value.
     const { read, written } = encoder.encodeInto(value.slice(offset), payload);
-    if (!read) throw new Error('Unable to encode terminal input without splitting a UTF-8 code point');
     frames.push(inputPacket(payload.subarray(0, written)));
     offset += read;
   }
@@ -59,14 +56,12 @@ export function encodeTerminalTextFrames(value: string, maxFrameBytes = MAX_INPU
 }
 
 /** Preserve xterm's onBinary payload as 8-bit bytes rather than UTF-8 text. */
-export function encodeTerminalBinaryFrames(value: string, maxFrameBytes = MAX_INPUT_FRAME_BYTES): ArrayBuffer[] {
-  assertUsableFrameSize(maxFrameBytes);
+export function encodeTerminalBinaryFrames(value: string): ArrayBuffer[] {
   if (!value) return [];
 
-  const maxPayloadBytes = maxFrameBytes - INPUT_FRAME_HEADER_BYTES;
   const frames: ArrayBuffer[] = [];
-  for (let offset = 0; offset < value.length; offset += maxPayloadBytes) {
-    const chunkLength = Math.min(maxPayloadBytes, value.length - offset);
+  for (let offset = 0; offset < value.length; offset += MAX_INPUT_PAYLOAD_BYTES) {
+    const chunkLength = Math.min(MAX_INPUT_PAYLOAD_BYTES, value.length - offset);
     const payload = new Uint8Array(new ArrayBuffer(chunkLength));
     for (let index = 0; index < chunkLength; index += 1) {
       payload[index] = value.charCodeAt(offset + index) & 0xff;
@@ -78,10 +73,10 @@ export function encodeTerminalBinaryFrames(value: string, maxFrameBytes = MAX_IN
 
 export function decodeTerminalOutput(data: ArrayBuffer): { sequence: number; output: Uint8Array<ArrayBuffer> } | null {
   const packet = new Uint8Array(data);
-  if (packet.length < 9 || packet[0] !== 1) return null;
+  if (packet.length < OUTPUT_FRAME_HEADER_BYTES || packet[0] !== SERVER_OUTPUT_FRAME) return null;
   const sequence = Number(new DataView(data, 1, 8).getBigUint64(0, false));
   if (!Number.isSafeInteger(sequence)) return null;
-  return { sequence, output: new Uint8Array(data.slice(9)) };
+  return { sequence, output: new Uint8Array(data.slice(OUTPUT_FRAME_HEADER_BYTES)) };
 }
 
 export function applyTerminalModifiers(value: string, ctrl: boolean, alt: boolean): string {
@@ -170,8 +165,6 @@ export function normalizeLiveStatus(value: unknown): LiveStatus | null {
     value === 'error'
   )
     return value;
-  if (value === 'disconnected') return 'reconnecting';
-  if (value === 'terminated' || value === 'stopped') return 'exited';
   return null;
 }
 
@@ -184,19 +177,11 @@ export function parseControlMessage(value: string): ControlMessage | null {
     const candidate = JSON.parse(value) as unknown;
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
     const record = candidate as Record<string, unknown>;
-    const writer =
-      typeof record.writer === 'boolean'
-        ? record.writer
-        : typeof record.isWriter === 'boolean'
-          ? record.isWriter
-          : typeof record.writable === 'boolean'
-            ? record.writable
-            : undefined;
     return {
       ...(typeof record.type === 'string' ? { type: record.type } : {}),
       ...(typeof record.status === 'string' ? { status: record.status } : {}),
       ...(typeof record.reason === 'string' ? { reason: record.reason } : {}),
-      ...(typeof writer === 'boolean' ? { writer } : {}),
+      ...(typeof record.writer === 'boolean' ? { writer: record.writer } : {}),
       ...(typeof record.message === 'string' ? { message: record.message } : {}),
       ...(typeof record.sequence === 'number' ? { sequence: record.sequence } : {}),
       ...(typeof record.generation === 'number' ? { generation: record.generation } : {}),
