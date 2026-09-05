@@ -15,7 +15,7 @@ import (
 
 func TestStoreSegmentsCapsAndReopens(t *testing.T) {
 	dir := t.TempDir()
-	store, err := Open(Config{Dir: dir, SegmentBytes: 150, MaxBytes: 450, SyncWrites: true})
+	store, err := Open(Config{Dir: dir, Limits: Limits{SegmentBytes: 150, MaxBytes: 450, SyncWrites: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestStoreSegmentsCapsAndReopens(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err = Open(Config{Dir: dir, SegmentBytes: 150, MaxBytes: 450, SyncWrites: true})
+	store, err = Open(Config{Dir: dir, Limits: Limits{SegmentBytes: 150, MaxBytes: 450, SyncWrites: true}})
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestAppendFailureRollsBackAndReusesSequence(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
-			store, err := Open(Config{Dir: dir, SyncWrites: true})
+			store, err := Open(Config{Dir: dir, Limits: Limits{SyncWrites: true}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -197,7 +197,7 @@ func TestStoreUsesJSONLBase64(t *testing.T) {
 
 func TestStoreRecoversTruncatedLastRecord(t *testing.T) {
 	dir := t.TempDir()
-	store, err := Open(Config{Dir: dir, SyncWrites: true})
+	store, err := Open(Config{Dir: dir, Limits: Limits{SyncWrites: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestStoreRecoversTruncatedLastRecord(t *testing.T) {
 
 func TestStoreRecoversMalformedCompleteTail(t *testing.T) {
 	dir := t.TempDir()
-	store, err := Open(Config{Dir: dir, SyncWrites: true})
+	store, err := Open(Config{Dir: dir, Limits: Limits{SyncWrites: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestStoreRecoversMalformedCompleteTail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err = Open(Config{Dir: dir, SyncWrites: true})
+	store, err = Open(Config{Dir: dir, Limits: Limits{SyncWrites: true}})
 	if err != nil {
 		t.Fatalf("recover malformed tail: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestStoreRecoversMalformedCompleteTail(t *testing.T) {
 
 func TestStoreRejectsCorruptionBeforeTail(t *testing.T) {
 	dir := t.TempDir()
-	store, err := Open(Config{Dir: dir, SyncWrites: true})
+	store, err := Open(Config{Dir: dir, Limits: Limits{SyncWrites: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestStoreRejectsCorruptionBeforeTail(t *testing.T) {
 
 func TestAppendRollbackFailurePoisonsLiveStoreAndReopenRecovers(t *testing.T) {
 	dir := t.TempDir()
-	store, err := Open(Config{Dir: dir, SyncWrites: false})
+	store, err := Open(Config{Dir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}

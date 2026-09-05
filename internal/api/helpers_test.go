@@ -52,8 +52,8 @@ func newAPIFixture(t *testing.T, options apiOptions) *apiFixture {
 		t.Fatal(err)
 	}
 	recordings, err := transcript.NewDirectory(transcript.DirectoryConfig{
-		Root:       filepath.Join(dir, "recordings"),
-		SyncWrites: true,
+		Root:   filepath.Join(dir, "recordings"),
+		Limits: transcript.Limits{SyncWrites: true},
 	})
 	if err != nil {
 		t.Fatal(err)

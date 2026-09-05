@@ -39,14 +39,20 @@ type Factory interface {
 	Open(sessionID string) (Log, error)
 }
 
-type Config struct {
-	Dir          string
+// Limits bounds one transcript's on-disk size. A single store and a directory
+// of them are configured with the same values.
+type Limits struct {
 	SegmentBytes int64
 	MaxBytes     int64
 	// SyncWrites fsyncs every record before Append reports success. It is a
 	// test hook for durability assertions, not an operator knob: production
 	// wires it to false and no environment variable turns it on.
 	SyncWrites bool
+}
+
+type Config struct {
+	Dir string
+	Limits
 }
 
 type diskRecord struct {
@@ -444,11 +450,8 @@ func (s *Store) Close() error {
 }
 
 type DirectoryConfig struct {
-	Root         string
-	SegmentBytes int64
-	MaxBytes     int64
-	// SyncWrites has the same test-only meaning as Config.SyncWrites.
-	SyncWrites bool
+	Root string
+	Limits
 }
 
 // Directory is a filesystem-backed Factory. Session IDs are escaped into a
@@ -472,10 +475,8 @@ func (d *Directory) Open(sessionID string) (Log, error) {
 		return nil, errors.New("transcript: session ID is required")
 	}
 	return Open(Config{
-		Dir:          filepath.Join(d.cfg.Root, safeComponent(sessionID)),
-		SegmentBytes: d.cfg.SegmentBytes,
-		MaxBytes:     d.cfg.MaxBytes,
-		SyncWrites:   d.cfg.SyncWrites,
+		Dir:    filepath.Join(d.cfg.Root, safeComponent(sessionID)),
+		Limits: d.cfg.Limits,
 	})
 }
 

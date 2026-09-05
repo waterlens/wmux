@@ -81,10 +81,11 @@ func run(logger *slog.Logger) error {
 	defer stopMaintenance()
 	go purgeExpiredLogins(maintenanceContext, database, logger)
 	recordings, err := transcript.NewDirectory(transcript.DirectoryConfig{
-		Root:         cfg.RecordingsDir,
-		SegmentBytes: 1 << 20,
-		MaxBytes:     16 << 20,
-		SyncWrites:   false,
+		Root: cfg.RecordingsDir,
+		Limits: transcript.Limits{
+			SegmentBytes: 1 << 20,
+			MaxBytes:     16 << 20,
+		},
 	})
 	if err != nil {
 		return err

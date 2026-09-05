@@ -25,9 +25,8 @@ func TestMain(m *testing.M) {
 func testManager(t *testing.T, clientBuffer int) *Manager {
 	t.Helper()
 	directory, err := transcript.NewDirectory(transcript.DirectoryConfig{
-		Root:         t.TempDir(),
-		SegmentBytes: 4 << 10,
-		MaxBytes:     32 << 10,
+		Root:   t.TempDir(),
+		Limits: transcript.Limits{SegmentBytes: 4 << 10, MaxBytes: 32 << 10},
 	})
 	if err != nil {
 		t.Fatal(err)
