@@ -71,6 +71,27 @@ type sshConfigResponse struct {
 	Candidates []sshConfigCandidateResponse `json:"candidates"`
 }
 
+type sessionResponse struct {
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Kind        string  `json:"kind"`
+	HostID      *string `json:"hostId,omitempty"`
+	HostName    *string `json:"hostName,omitempty"`
+	Cwd         string  `json:"cwd,omitempty"`
+	Command     string  `json:"command,omitempty"`
+	Persistence string  `json:"persistence"`
+	// Backend is the resolved persistence kind, not a multiplexer session name.
+	Backend        string     `json:"backend,omitempty"`
+	Status         string     `json:"status"`
+	Generation     int        `json:"generation"`
+	Cols           int        `json:"cols"`
+	Rows           int        `json:"rows"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+	LastAttachedAt *time.Time `json:"lastAttachedAt,omitempty"`
+	Error          *string    `json:"error,omitempty"`
+}
+
 type sessionInput struct {
 	Name        string `json:"name"`
 	Kind        string `json:"kind"`

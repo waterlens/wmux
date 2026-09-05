@@ -35,12 +35,12 @@ func TestPublicSessionHidesRuntimeDiagnostics(t *testing.T) {
 	t.Parallel()
 	detail := "dial tcp 10.0.0.1:22: connection refused"
 	result := publicSession(store.Session{
-		BackendName: "wmux-ses_internal-deadbeef",
-		Status:      store.SessionStatusReconnecting,
-		Error:       &detail,
+		ID:     "ses_internal",
+		Status: store.SessionStatusReconnecting,
+		Error:  &detail,
 	})
-	if result.BackendName != "" {
-		t.Fatalf("backend name leaked: %q", result.BackendName)
+	if result.ID != "ses_internal" {
+		t.Fatalf("session identity lost: %#v", result)
 	}
 	if result.Error == nil || *result.Error == detail {
 		t.Fatalf("runtime detail leaked: %#v", result.Error)

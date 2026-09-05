@@ -24,6 +24,8 @@ const (
 )
 
 // Credentials is the JSON payload encrypted into Host.EncryptedCredentials.
+// Its tags are a real serialization contract; the other models here are
+// persistence types only, and the API layer owns the wire shapes.
 type Credentials struct {
 	Password   string `json:"password,omitempty"`
 	PrivateKey string `json:"privateKey,omitempty"`
@@ -31,54 +33,52 @@ type Credentials struct {
 }
 
 type User struct {
-	Username     string    `json:"username"`
-	PasswordHash string    `json:"-"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	Username     string
+	PasswordHash string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // AuthSession stores only a SHA-256 token digest, never the bearer token.
 type AuthSession struct {
-	ID         string    `json:"id"`
-	TokenHash  []byte    `json:"-"`
-	CreatedAt  time.Time `json:"createdAt"`
-	ExpiresAt  time.Time `json:"expiresAt"`
-	LastSeenAt time.Time `json:"lastSeenAt"`
+	ID         string
+	TokenHash  []byte
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastSeenAt time.Time
 }
 
 type Host struct {
-	ID                   string    `json:"id"`
-	Name                 string    `json:"name"`
-	Address              string    `json:"address"`
-	Port                 int       `json:"port"`
-	Username             string    `json:"username"`
-	AuthType             string    `json:"authType"`
-	EncryptedCredentials []byte    `json:"-"`
-	Fingerprint          string    `json:"fingerprint,omitempty"`
-	CreatedAt            time.Time `json:"createdAt"`
-	UpdatedAt            time.Time `json:"updatedAt"`
+	ID                   string
+	Name                 string
+	Address              string
+	Port                 int
+	Username             string
+	AuthType             string
+	EncryptedCredentials []byte
+	Fingerprint          string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 type Session struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	Kind        string  `json:"kind"`
-	HostID      *string `json:"hostId,omitempty"`
-	HostName    *string `json:"hostName,omitempty"`
-	Cwd         string  `json:"cwd,omitempty"`
-	Command     string  `json:"command,omitempty"`
-	Persistence string  `json:"persistence"`
+	ID          string
+	Name        string
+	Kind        string
+	HostID      *string
+	HostName    *string
+	Cwd         string
+	Command     string
+	Persistence string
 	// Backend is the persistence kind the runtime actually resolved to
 	// ("tmux", "screen" or "none"), not the name of a multiplexer session.
-	Backend        string     `json:"backend,omitempty"`
-	BackendName    string     `json:"backendName,omitempty"`
-	Status         string     `json:"status"`
-	Generation     int        `json:"generation"`
-	Cols           int        `json:"cols"`
-	Rows           int        `json:"rows"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
-	LastAttachedAt *time.Time `json:"lastAttachedAt,omitempty"`
-	ExitCode       *int       `json:"exitCode,omitempty"`
-	Error          *string    `json:"error,omitempty"`
+	Backend        string
+	Status         string
+	Generation     int
+	Cols           int
+	Rows           int
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	LastAttachedAt *time.Time
+	Error          *string
 }

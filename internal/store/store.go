@@ -158,13 +158,6 @@ func nullableString(value *string) any {
 	return *value
 }
 
-func nullableInt(value *int) any {
-	if value == nil {
-		return nil
-	}
-	return *value
-}
-
 // execAffecting runs a statement that must hit exactly one row and reports
 // ErrNotFound when it hits none. RowsAffected cannot fail after a successful
 // Exec on modernc.org/sqlite, so its error is not reported separately.

@@ -17,7 +17,7 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "列出终端会话", err)
 		return
 	}
-	result := make([]store.Session, 0, len(sessions))
+	result := make([]sessionResponse, 0, len(sessions))
 	for _, session := range sessions {
 		result = append(result, publicSession(session))
 	}
@@ -200,7 +200,7 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 	spec.Generation = generation
 	if err := s.terminals.Create(spec); err != nil {
 		message := "无法启动会话，请检查工作目录、命令或连接设置"
-		_ = s.store.UpdateSessionRuntime(r.Context(), id, generation, store.SessionStatusError, "", "", &message)
+		_ = s.store.UpdateSessionRuntime(r.Context(), id, generation, store.SessionStatusError, "", &message)
 		s.upstreamError(w, "重启终端会话", "terminal_start_failed", message, err)
 		return
 	}
@@ -268,14 +268,33 @@ func (s *Server) upstreamError(w http.ResponseWriter, action, code, message stri
 	writeError(w, http.StatusBadGateway, code, message)
 }
 
-func publicSession(session store.Session) store.Session {
-	session.BackendName = ""
+// publicSession maps a stored row onto the wire shape, replacing runtime
+// diagnostics with a message that is safe to show.
+func publicSession(session store.Session) sessionResponse {
+	response := sessionResponse{
+		ID:             session.ID,
+		Name:           session.Name,
+		Kind:           session.Kind,
+		HostID:         session.HostID,
+		HostName:       session.HostName,
+		Cwd:            session.Cwd,
+		Command:        session.Command,
+		Persistence:    session.Persistence,
+		Backend:        session.Backend,
+		Status:         session.Status,
+		Generation:     session.Generation,
+		Cols:           session.Cols,
+		Rows:           session.Rows,
+		CreatedAt:      session.CreatedAt,
+		UpdatedAt:      session.UpdatedAt,
+		LastAttachedAt: session.LastAttachedAt,
+	}
 	if session.Error != nil {
 		message := "会话暂时不可用，请检查工作目录、命令或连接设置"
 		if session.Status == store.SessionStatusReconnecting {
 			message = "后台连接已中断，wmux 正在尝试恢复"
 		}
-		session.Error = &message
+		response.Error = &message
 	}
-	return session
+	return response
 }

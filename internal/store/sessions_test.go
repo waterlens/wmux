@@ -31,7 +31,7 @@ func TestSessionCRUDAndHostJoin(t *testing.T) {
 	}
 
 	now = now.Add(time.Minute)
-	if err := s.UpdateSessionRuntime(ctx, session.ID, session.Generation, SessionStatusConnecting, "tmux", "wmux-123", nil); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, session.ID, session.Generation, SessionStatusConnecting, "tmux", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateSessionSize(ctx, session.ID, 180, 50); err != nil {
@@ -40,11 +40,11 @@ func TestSessionCRUDAndHostJoin(t *testing.T) {
 	if err := s.TouchSession(ctx, session.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpdateSessionRuntime(ctx, session.ID, session.Generation, SessionStatusRunning, "", "", nil); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, session.ID, session.Generation, SessionStatusRunning, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	session, err = s.GetSession(ctx, session.ID)
-	if err != nil || session.BackendName != "wmux-123" || session.Cols != 180 || session.Rows != 50 || session.LastAttachedAt == nil || !session.LastAttachedAt.Equal(now) || session.Status != SessionStatusRunning {
+	if err != nil || session.Backend != "tmux" || session.Cols != 180 || session.Rows != 50 || session.LastAttachedAt == nil || !session.LastAttachedAt.Equal(now) || session.Status != SessionStatusRunning {
 		t.Fatalf("atomically updated session = %+v, %v", session, err)
 	}
 
@@ -78,14 +78,14 @@ func TestSessionValidationAndExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := "process failed"
-	if err := s.UpdateSessionRuntime(ctx, local.ID, local.Generation, SessionStatusExited, "", "", &message); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, local.ID, local.Generation, SessionStatusExited, "", &message); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetSession(ctx, local.ID)
 	if err != nil || got.Status != SessionStatusExited || got.Error == nil || *got.Error != message {
 		t.Fatalf("exited session = %+v, %v", got, err)
 	}
-	if err := s.UpdateSessionRuntime(ctx, local.ID, local.Generation, "not-a-status", "", "", nil); !errors.Is(err, ErrInvalidInput) {
+	if err := s.UpdateSessionRuntime(ctx, local.ID, local.Generation, "not-a-status", "", nil); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("unsupported runtime status error = %v", err)
 	}
 	if err := s.DeleteSession(ctx, "missing"); !errors.Is(err, ErrNotFound) {
@@ -115,10 +115,10 @@ func TestRuntimeUpdatesPreserveProductFieldsAndListOrder(t *testing.T) {
 	originalUpdatedAt := first.UpdatedAt
 
 	now = now.Add(time.Hour)
-	if err := s.UpdateSessionRuntime(ctx, first.ID, first.Generation, SessionStatusRunning, "tmux", "wmux-first", nil); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, first.ID, first.Generation, SessionStatusRunning, "tmux", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpdateSessionRuntime(ctx, first.ID, first.Generation, SessionStatusRunning, "tmux", "wmux-first", nil); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, first.ID, first.Generation, SessionStatusRunning, "tmux", nil); err != nil {
 		t.Fatalf("idempotent runtime update: %v", err)
 	}
 	if err := s.UpdateSessionSize(ctx, first.ID, 200, 60); err != nil {
@@ -171,7 +171,7 @@ func TestSessionGenerationIsolatesRestartsFromLateRuntimeCallbacks(t *testing.T)
 		t.Fatalf("created generation = %d, want 1", session.Generation)
 	}
 	message := "backend session no longer exists"
-	if err := s.UpdateSessionRuntime(ctx, session.ID, session.Generation, SessionStatusExited, "", "", &message); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, session.ID, session.Generation, SessionStatusExited, "", &message); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,7 +192,7 @@ func TestSessionGenerationIsolatesRestartsFromLateRuntimeCallbacks(t *testing.T)
 
 	// The stopped execution reports its exit after the restart began.
 	staleError := "connection lost"
-	if err := s.UpdateSessionRuntime(ctx, session.ID, 1, SessionStatusExited, "tmux", "wmux-restarted", &staleError); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, session.ID, 1, SessionStatusExited, "tmux", &staleError); err != nil {
 		t.Fatalf("stale runtime callback = %v, want silently ignored", err)
 	}
 	got, err := s.GetSession(ctx, session.ID)
@@ -203,7 +203,7 @@ func TestSessionGenerationIsolatesRestartsFromLateRuntimeCallbacks(t *testing.T)
 		t.Fatalf("stale generation overwrote the current execution: %+v", got)
 	}
 
-	if err := s.UpdateSessionRuntime(ctx, session.ID, generation, SessionStatusRunning, "tmux", "wmux-restarted", nil); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, session.ID, generation, SessionStatusRunning, "tmux", nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.GetSession(ctx, session.ID)
@@ -216,7 +216,7 @@ func TestSessionGenerationIsolatesRestartsFromLateRuntimeCallbacks(t *testing.T)
 	if _, err := s.BeginSessionRestart(ctx, "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("BeginSessionRestart on a missing session = %v, want ErrNotFound", err)
 	}
-	if err := s.UpdateSessionRuntime(ctx, "missing", 1, SessionStatusRunning, "", "", nil); !errors.Is(err, ErrNotFound) {
+	if err := s.UpdateSessionRuntime(ctx, "missing", 1, SessionStatusRunning, "", nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("runtime callback for a missing session = %v, want ErrNotFound", err)
 	}
 }

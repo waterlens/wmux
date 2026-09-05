@@ -11,9 +11,9 @@ import (
 
 const sessionSelect = `
 SELECT s.id, s.name, s.kind, s.host_id, h.name,
-       s.cwd, s.command, s.persistence, s.backend, s.backend_name,
+       s.cwd, s.command, s.persistence, s.backend,
        s.status, s.generation, s.cols, s.rows, s.created_at, s.updated_at,
-       s.last_attached_at, s.exit_code, s.last_error
+       s.last_attached_at, s.last_error
 FROM sessions s
 LEFT JOIN hosts h ON h.id = s.host_id`
 
@@ -35,9 +35,9 @@ func (s *Store) CreateSession(ctx context.Context, session Session) (Session, er
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO sessions(
     id, name, kind, host_id, cwd, command, persistence, backend,
-    backend_name, status, generation, cols, rows, created_at, updated_at,
-    last_attached_at, exit_code, last_error
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    status, generation, cols, rows, created_at, updated_at,
+    last_attached_at, last_error
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID,
 		session.Name,
 		session.Kind,
@@ -46,7 +46,6 @@ INSERT INTO sessions(
 		session.Command,
 		session.Persistence,
 		session.Backend,
-		session.BackendName,
 		session.Status,
 		session.Generation,
 		session.Cols,
@@ -54,7 +53,6 @@ INSERT INTO sessions(
 		unixMillis(session.CreatedAt),
 		unixMillis(session.UpdatedAt),
 		nullableMillis(session.LastAttachedAt),
-		nullableInt(session.ExitCode),
 		nullableString(session.Error),
 	)
 	if err != nil {
@@ -155,33 +153,23 @@ WHERE id = ? AND last_attached_at IS NOT ?`,
 }
 
 // UpdateSessionRuntime applies a terminal callback, ignoring an empty backend
-// field and any superseded generation.
-func (s *Store) UpdateSessionRuntime(ctx context.Context, id string, generation int, status, backend, backendName string, sessionError *string) error {
+// field and any superseded generation. A repeated callback rewrites the same
+// values, which is invisible: the statement leaves updated_at alone.
+func (s *Store) UpdateSessionRuntime(ctx context.Context, id string, generation int, status, backend string, sessionError *string) error {
 	if !validSessionStatus(status) {
 		return fmt.Errorf("%w: unsupported session status %q", ErrInvalidInput, status)
 	}
 	result, err := s.db.ExecContext(ctx, `
 UPDATE sessions
 SET status = ?,
-    backend = CASE WHEN ? = '' THEN backend ELSE ? END,
-    backend_name = CASE WHEN ? = '' THEN backend_name ELSE ? END,
+    backend = COALESCE(NULLIF(?, ''), backend),
     last_error = ?
-WHERE id = ? AND generation = ? AND (
-    status IS NOT ?
-    OR (? <> '' AND backend IS NOT ?)
-    OR (? <> '' AND backend_name IS NOT ?)
-    OR last_error IS NOT ?
-)`,
+WHERE id = ? AND generation = ?`,
 		status,
-		backend, backend,
-		backend, backendName,
+		backend,
 		nullableString(sessionError),
 		id,
 		generation,
-		status,
-		backend, backend,
-		backend, backendName,
-		nullableString(sessionError),
 	)
 	if err != nil {
 		return fmt.Errorf("store: update session runtime: %w", err)
@@ -189,13 +177,13 @@ WHERE id = ? AND generation = ? AND (
 	return s.requireSession(ctx, id, result)
 }
 
-// BeginSessionRestart increments the generation, clears the previous exit and
+// BeginSessionRestart increments the generation, clears the previous error and
 // returns the row to connecting.
 func (s *Store) BeginSessionRestart(ctx context.Context, id string) (int, error) {
 	var generation int
 	err := s.db.QueryRowContext(ctx, `
 UPDATE sessions
-SET generation = generation + 1, status = ?, exit_code = NULL, last_error = NULL
+SET generation = generation + 1, status = ?, last_error = NULL
 WHERE id = ?
 RETURNING generation`, SessionStatusConnecting, id).Scan(&generation)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -272,7 +260,7 @@ func validSessionStatus(status string) bool {
 func scanSession(row scanner) (Session, error) {
 	var session Session
 	var hostID, hostName, lastError sql.NullString
-	var lastAttachedAt, exitCode sql.NullInt64
+	var lastAttachedAt sql.NullInt64
 	var createdAt, updatedAt int64
 	err := row.Scan(
 		&session.ID,
@@ -284,7 +272,6 @@ func scanSession(row scanner) (Session, error) {
 		&session.Command,
 		&session.Persistence,
 		&session.Backend,
-		&session.BackendName,
 		&session.Status,
 		&session.Generation,
 		&session.Cols,
@@ -292,7 +279,6 @@ func scanSession(row scanner) (Session, error) {
 		&createdAt,
 		&updatedAt,
 		&lastAttachedAt,
-		&exitCode,
 		&lastError,
 	)
 	if err != nil {
@@ -309,10 +295,6 @@ func scanSession(row scanner) (Session, error) {
 	if lastAttachedAt.Valid {
 		value := fromUnixMillis(lastAttachedAt.Int64)
 		session.LastAttachedAt = &value
-	}
-	if exitCode.Valid {
-		value := int(exitCode.Int64)
-		session.ExitCode = &value
 	}
 	if lastError.Valid {
 		value := lastError.String

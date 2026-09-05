@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 var migrations = []string{
 	1: `
@@ -66,6 +66,12 @@ CREATE INDEX sessions_host_id_idx ON sessions(host_id);
 	// generation numbers one execution of a session; callbacks carry their own.
 	2: `
 ALTER TABLE sessions ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;
+`,
+	// backend_name held the derived tmux/screen name and exit_code was never
+	// written; neither is read and no index covers them.
+	3: `
+ALTER TABLE sessions DROP COLUMN backend_name;
+ALTER TABLE sessions DROP COLUMN exit_code;
 `,
 }
 
