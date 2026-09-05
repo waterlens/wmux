@@ -19,7 +19,7 @@ type authContextKey struct{}
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	setup, err := s.store.IsSetup(r.Context())
 	if err != nil {
-		s.internalError(w, "读取初始化状态", err)
+		s.internalError(w, "read setup state", err)
 		return
 	}
 	_, authenticated := s.authenticate(r)
@@ -42,7 +42,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	}
 	hash, err := security.HashPassword(input.Password)
 	if err != nil {
-		s.internalError(w, "生成密码哈希", err)
+		s.internalError(w, "hash password", err)
 		return
 	}
 	if err := s.store.Setup(r.Context(), input.Username, hash); err != nil {
@@ -50,16 +50,16 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, codeAlreadySetup, "wmux 已完成初始化")
 			return
 		}
-		s.internalError(w, "创建管理员", err)
+		s.internalError(w, "create administrator", err)
 		return
 	}
 	if err := s.issueLogin(w, r.Context()); err != nil {
-		s.internalError(w, "创建登录会话", err)
+		s.internalError(w, "create login session", err)
 		return
 	}
 	user, err := s.store.GetUser(r.Context())
 	if err != nil {
-		s.internalError(w, "读取管理员", err)
+		s.internalError(w, "read administrator", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, publicUser(user))
@@ -93,7 +93,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.issueLogin(w, r.Context()); err != nil {
-		s.internalError(w, "创建登录会话", err)
+		s.internalError(w, "create login session", err)
 		return
 	}
 	s.loginRate.clear(key)
@@ -111,7 +111,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.GetUser(r.Context())
 	if err != nil {
-		s.internalError(w, "读取管理员", err)
+		s.internalError(w, "read administrator", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, publicUser(user))
@@ -131,7 +131,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := s.store.GetUser(r.Context())
 	if err != nil {
-		s.internalError(w, "读取管理员", err)
+		s.internalError(w, "read administrator", err)
 		return
 	}
 	valid, err := security.VerifyPassword(input.CurrentPassword, user.PasswordHash)
@@ -144,19 +144,19 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	hash, err := security.HashPassword(input.NewPassword)
 	if err != nil {
-		s.internalError(w, "生成密码哈希", err)
+		s.internalError(w, "hash password", err)
 		return
 	}
 	if err := s.store.UpdatePassword(r.Context(), hash); err != nil {
-		s.internalError(w, "更新密码", err)
+		s.internalError(w, "update password", err)
 		return
 	}
 	if err := s.store.DeleteAllAuthSessions(r.Context()); err != nil {
-		s.internalError(w, "注销旧登录会话", err)
+		s.internalError(w, "revoke login sessions", err)
 		return
 	}
 	if err := s.issueLogin(w, r.Context()); err != nil {
-		s.internalError(w, "刷新登录会话", err)
+		s.internalError(w, "refresh login session", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

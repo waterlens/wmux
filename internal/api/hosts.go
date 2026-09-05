@@ -15,7 +15,7 @@ import (
 func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 	hosts, err := s.store.ListHosts(r.Context())
 	if err != nil {
-		s.internalError(w, "列出 SSH 主机", err)
+		s.internalError(w, "list SSH hosts", err)
 		return
 	}
 	result := make([]hostResponse, 0, len(hosts))
@@ -37,7 +37,7 @@ func (s *Server) createHost(w http.ResponseWriter, r *http.Request) {
 	credentials := credentialsFromInput(input)
 	encrypted, err := s.encryptCredentials(credentials, input.AuthType)
 	if err != nil {
-		s.internalError(w, "加密 SSH 凭据", err)
+		s.internalError(w, "encrypt SSH credentials", err)
 		return
 	}
 	host, err := s.store.CreateHost(r.Context(), store.Host{
@@ -49,7 +49,7 @@ func (s *Server) createHost(w http.ResponseWriter, r *http.Request) {
 		EncryptedCredentials: encrypted,
 	})
 	if err != nil {
-		s.internalError(w, "创建 SSH 主机", err)
+		s.internalError(w, "create SSH host", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, publicHost(host))
@@ -58,12 +58,12 @@ func (s *Server) createHost(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateHost(w http.ResponseWriter, r *http.Request) {
 	host, err := s.store.GetHost(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.handleStoreError(w, err, "SSH 主机不存在")
+		s.handleStoreError(w, "read SSH host", err, "SSH 主机不存在")
 		return
 	}
 	credentials, err := s.decryptCredentials(host)
 	if err != nil {
-		s.internalError(w, "解密 SSH 凭据", err)
+		s.internalError(w, "decrypt SSH credentials", err)
 		return
 	}
 	var patch hostPatch
@@ -116,7 +116,7 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request) {
 	}
 	encrypted, err := s.encryptCredentials(credentialsFromInput(input), input.AuthType)
 	if err != nil {
-		s.internalError(w, "加密 SSH 凭据", err)
+		s.internalError(w, "encrypt SSH credentials", err)
 		return
 	}
 	connectionChanged := host.Address != input.Address || host.Port != input.Port
@@ -131,7 +131,7 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request) {
 	}
 	host, err = s.store.UpdateHost(r.Context(), host)
 	if err != nil {
-		s.handleStoreError(w, err, "SSH 主机不存在")
+		s.handleStoreError(w, "update SSH host", err, "SSH 主机不存在")
 		return
 	}
 	s.logger.Debug("retried host sessions after an edit", "host", host.ID, "sessions", s.terminals.RefreshHost(host.ID))
@@ -145,7 +145,7 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, codeHostInUse, "仍有会话使用这台主机")
 			return
 		}
-		s.handleStoreError(w, err, "SSH 主机不存在")
+		s.handleStoreError(w, "delete SSH host", err, "SSH 主机不存在")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -154,12 +154,12 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 func (s *Server) probeHost(w http.ResponseWriter, r *http.Request) {
 	host, err := s.store.GetHost(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.handleStoreError(w, err, "SSH 主机不存在")
+		s.handleStoreError(w, "read SSH host", err, "SSH 主机不存在")
 		return
 	}
 	fingerprint, algorithm, err := s.probeSSH(r.Context(), app.SSHAddress(host), host.Username)
 	if err != nil {
-		s.upstreamError(w, "探测 SSH 主机指纹", codeSSHProbeFailed, "无法读取 SSH 主机指纹，请检查地址和网络连接", err)
+		s.upstreamError(w, "probe SSH host key", codeSSHProbeFailed, "无法读取 SSH 主机指纹，请检查地址和网络连接", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"fingerprint": fingerprint, "algorithm": algorithm})
@@ -174,12 +174,12 @@ func (s *Server) trustHost(w http.ResponseWriter, r *http.Request) {
 	}
 	host, err := s.store.GetHost(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.handleStoreError(w, err, "SSH 主机不存在")
+		s.handleStoreError(w, "read SSH host", err, "SSH 主机不存在")
 		return
 	}
 	actual, _, err := s.probeSSH(r.Context(), app.SSHAddress(host), host.Username)
 	if err != nil {
-		s.upstreamError(w, "重新探测 SSH 主机指纹", codeSSHProbeFailed, "无法再次读取 SSH 主机指纹，请检查地址和网络连接", err)
+		s.upstreamError(w, "re-probe SSH host key", codeSSHProbeFailed, "无法再次读取 SSH 主机指纹，请检查地址和网络连接", err)
 		return
 	}
 	// The fingerprint is a public value the user just read off the screen, so a
@@ -190,7 +190,7 @@ func (s *Server) trustHost(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only the fingerprint is written, so a concurrent host edit survives.
 	if err := s.store.UpdateHostFingerprint(r.Context(), host.ID, actual); err != nil {
-		s.handleStoreError(w, err, "SSH 主机不存在")
+		s.handleStoreError(w, "trust SSH host key", err, "SSH 主机不存在")
 		return
 	}
 	s.logger.Debug("retried host sessions after trusting a new key", "host", host.ID, "sessions", s.terminals.RefreshHost(host.ID))
@@ -200,17 +200,17 @@ func (s *Server) trustHost(w http.ResponseWriter, r *http.Request) {
 func (s *Server) testHost(w http.ResponseWriter, r *http.Request) {
 	host, err := s.store.GetHost(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.handleStoreError(w, err, "SSH 主机不存在")
+		s.handleStoreError(w, "read SSH host", err, "SSH 主机不存在")
 		return
 	}
 	credentials, err := s.decryptCredentials(host)
 	if err != nil {
-		s.internalError(w, "解密 SSH 凭据", err)
+		s.internalError(w, "decrypt SSH credentials", err)
 		return
 	}
 	credential, err := app.TerminalCredential(host.AuthType, credentials)
 	if err != nil {
-		s.internalError(w, "准备 SSH 凭据", err)
+		s.internalError(w, "prepare SSH credential", err)
 		return
 	}
 	started := time.Now()
@@ -221,7 +221,7 @@ func (s *Server) testHost(w http.ResponseWriter, r *http.Request) {
 		Credential:  credential,
 	})
 	if err != nil {
-		s.upstreamError(w, "测试 SSH 主机连接", codeSSHTestFailed, "SSH 连接失败，请检查主机状态、指纹和认证信息", err)
+		s.upstreamError(w, "test SSH host connection", codeSSHTestFailed, "SSH 连接失败，请检查主机状态、指纹和认证信息", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "latencyMs": time.Since(started).Milliseconds()})

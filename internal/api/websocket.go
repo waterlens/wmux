@@ -61,7 +61,7 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if _, err := s.store.GetSession(r.Context(), id); err != nil {
-		s.handleStoreError(w, err, "终端会话不存在")
+		s.handleStoreError(w, "read session", err, "终端会话不存在")
 		return
 	}
 	after := uint64(0)
@@ -75,7 +75,7 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	clientID, err := store.NewID("client")
 	if err != nil {
-		s.internalError(w, "生成终端客户端 ID", err)
+		s.internalError(w, "generate socket client id", err)
 		return
 	}
 
@@ -91,7 +91,7 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 
 	attachment, err := s.terminals.Attach(r.Context(), id, clientID, after)
 	if err != nil {
-		s.logger.Warn("attach terminal WebSocket", "session_id", id, "error", err)
+		s.logger.Warn("attach terminal WebSocket", "session", id, "error", err)
 		if errors.Is(err, terminal.ErrSessionNotFound) {
 			// A row without a runtime means a restart is in flight.
 			_ = writeSocketJSON(r.Context(), connection, socketEvent{Type: "disconnect", Status: "reconnecting", Reason: string(terminal.AttachmentRestarted)})

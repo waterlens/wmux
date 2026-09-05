@@ -25,7 +25,7 @@ func (s *Server) discoverSSHConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	hosts, err := s.store.ListHosts(r.Context())
 	if err != nil {
-		s.internalError(w, "匹配 SSH 配置与已有主机", err)
+		s.internalError(w, "match SSH config against stored hosts", err)
 		return
 	}
 	existing := make(map[sshHostConnection]string, len(hosts))
@@ -95,7 +95,7 @@ func (s *Server) importSSHConfig(w http.ResponseWriter, r *http.Request) {
 
 	host, exists, err := s.createImportedSSHHost(r.Context(), resolved)
 	if err != nil {
-		s.internalError(w, "导入 SSH config 主机", err)
+		s.internalError(w, "import SSH config host", err)
 		return
 	}
 	if exists {

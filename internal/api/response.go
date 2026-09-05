@@ -93,20 +93,23 @@ func (s *Server) sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// internalError reports a fault the caller cannot do anything about.
+// internalError reports a fault the caller cannot do anything about. The log
+// message is fixed so it can be searched for; action names the step that
+// failed, while the response keeps the generic message the browser shows.
 func (s *Server) internalError(w http.ResponseWriter, action string, err error) {
-	s.logger.Error(action, "error", err)
+	s.logger.Error("request failed", "action", action, "error", err)
 	writeError(w, http.StatusInternalServerError, codeInternalError, "服务发生内部错误")
 }
 
 // upstreamError reports a failure that came from SSH, tmux or screen.
 func (s *Server) upstreamError(w http.ResponseWriter, action, code, message string, err error) {
-	s.logger.Warn(action, "error", err)
+	s.logger.Warn("upstream request failed", "action", action, "error", err)
 	writeError(w, http.StatusBadGateway, code, message)
 }
 
-// handleStoreError maps a storage failure onto the response it deserves.
-func (s *Server) handleStoreError(w http.ResponseWriter, err error, notFoundMessage string) {
+// handleStoreError maps a storage failure onto the response it deserves. The
+// action is only used for logging, and says which query failed.
+func (s *Server) handleStoreError(w http.ResponseWriter, action string, err error, notFoundMessage string) {
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, codeNotFound, notFoundMessage)
 		return
@@ -116,5 +119,5 @@ func (s *Server) handleStoreError(w http.ResponseWriter, err error, notFoundMess
 		writeError(w, http.StatusBadRequest, codeInvalidInput, "请求的数据不符合要求")
 		return
 	}
-	s.internalError(w, "数据库操作失败", err)
+	s.internalError(w, action, err)
 }

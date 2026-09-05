@@ -14,7 +14,7 @@ import (
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	sessions, err := s.store.ListSessions(r.Context())
 	if err != nil {
-		s.internalError(w, "列出终端会话", err)
+		s.internalError(w, "list sessions", err)
 		return
 	}
 	result := make([]sessionResponse, 0, len(sessions))
@@ -39,7 +39,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	defer s.sessionNameMu.Unlock()
 	id, err := store.NewID("ses")
 	if err != nil {
-		s.internalError(w, "生成会话 ID", err)
+		s.internalError(w, "generate session id", err)
 		return
 	}
 	model := store.Session{
@@ -55,7 +55,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	if input.Kind == store.SessionKindSSH {
 		host, hostErr := s.store.GetHost(r.Context(), input.HostID)
 		if hostErr != nil {
-			s.handleStoreError(w, hostErr, "SSH 主机不存在")
+			s.handleStoreError(w, "read SSH host", hostErr, "SSH 主机不存在")
 			return
 		}
 		if host.Fingerprint == "" {
@@ -73,7 +73,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	if autoNamed {
 		input.Name, err = s.availableSessionName(r.Context(), input.Name)
 		if err != nil {
-			s.internalError(w, "生成默认会话名称", err)
+			s.internalError(w, "generate default session name", err)
 			return
 		}
 	}
@@ -81,23 +81,23 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	// The row owns the session id and generation, so it exists before the runtime.
 	created, err := s.store.CreateSession(r.Context(), model)
 	if err != nil {
-		s.handleStoreError(w, err, "终端会话不存在")
+		s.handleStoreError(w, "create session", err, "终端会话不存在")
 		return
 	}
 	spec, err := s.runtime.SessionSpec(r.Context(), created)
 	if err != nil {
 		s.discardSessionRow(r.Context(), id)
-		s.internalError(w, "准备终端配置", err)
+		s.internalError(w, "build session spec", err)
 		return
 	}
 	if err := s.terminals.Create(spec); err != nil {
 		s.discardSessionRow(r.Context(), id)
-		s.upstreamError(w, "启动终端会话", codeTerminalStartFailed, "无法启动会话，请检查工作目录、命令或连接设置", err)
+		s.upstreamError(w, "start session runtime", codeTerminalStartFailed, "无法启动会话，请检查工作目录、命令或连接设置", err)
 		return
 	}
 	created, err = s.store.GetSession(r.Context(), id)
 	if err != nil {
-		s.internalError(w, "读取新会话", err)
+		s.internalError(w, "read created session", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, publicSession(created))
@@ -106,7 +106,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateSession(w http.ResponseWriter, r *http.Request) {
 	session, err := s.store.GetSession(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.handleStoreError(w, err, "终端会话不存在")
+		s.handleStoreError(w, "read session", err, "终端会话不存在")
 		return
 	}
 	var patch sessionPatch
@@ -120,13 +120,13 @@ func (s *Server) updateSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if _, err := s.store.UpdateSessionName(r.Context(), session.ID, name); err != nil {
-			s.handleStoreError(w, err, "终端会话不存在")
+			s.handleStoreError(w, "rename session", err, "终端会话不存在")
 			return
 		}
 	}
 	updated, err := s.store.GetSession(r.Context(), session.ID)
 	if err != nil {
-		s.handleStoreError(w, err, "终端会话不存在")
+		s.handleStoreError(w, "read session", err, "终端会话不存在")
 		return
 	}
 	writeJSON(w, http.StatusOK, publicSession(updated))
@@ -136,7 +136,7 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	defer s.sessionOps.lock(id)()
 	if _, err := s.store.GetSession(r.Context(), id); err != nil {
-		s.handleStoreError(w, err, "终端会话不存在")
+		s.handleStoreError(w, "read session", err, "终端会话不存在")
 		return
 	}
 	warning := ""
@@ -149,7 +149,7 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 		warning = "无法连接主机，远端后台会话可能仍在运行"
 	}
 	if err := s.store.DeleteSession(r.Context(), id); err != nil {
-		s.handleStoreError(w, err, "终端会话不存在")
+		s.handleStoreError(w, "delete session", err, "终端会话不存在")
 		return
 	}
 	if err := s.transcripts.Remove(id); err != nil {
@@ -167,34 +167,34 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 	defer s.sessionOps.lock(id)()
 	session, err := s.store.GetSession(r.Context(), id)
 	if err != nil {
-		s.handleStoreError(w, err, "终端会话不存在")
+		s.handleStoreError(w, "read session", err, "终端会话不存在")
 		return
 	}
 	if err := s.terminals.StopForRestart(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
-		s.upstreamError(w, "结束待重启会话", codeTerminalStopFailed, "暂时无法重启后台会话，请稍后重试", err)
+		s.upstreamError(w, "stop session for restart", codeTerminalStopFailed, "暂时无法重启后台会话，请稍后重试", err)
 		return
 	}
 	// Opening the next generation makes callbacks from the stopped execution stale.
 	generation, err := s.store.BeginSessionRestart(r.Context(), id)
 	if err != nil {
-		s.handleStoreError(w, err, "终端会话不存在")
+		s.handleStoreError(w, "begin session restart", err, "终端会话不存在")
 		return
 	}
 	spec, err := s.runtime.SessionSpec(r.Context(), session)
 	if err != nil {
-		s.internalError(w, "准备重启配置", err)
+		s.internalError(w, "build restart spec", err)
 		return
 	}
 	spec.Generation = generation
 	if err := s.terminals.Create(spec); err != nil {
 		message := "无法启动会话，请检查工作目录、命令或连接设置"
 		_ = s.store.UpdateSessionRuntime(r.Context(), id, generation, store.SessionStatusError, "", &message)
-		s.upstreamError(w, "重启终端会话", codeTerminalStartFailed, message, err)
+		s.upstreamError(w, "restart session runtime", codeTerminalStartFailed, message, err)
 		return
 	}
 	restarted, err := s.store.GetSession(r.Context(), id)
 	if err != nil {
-		s.internalError(w, "读取重启会话", err)
+		s.internalError(w, "read restarted session", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, publicSession(restarted))
@@ -209,7 +209,7 @@ func (s *Server) reconnectSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, codeNotFound, "终端会话不存在")
 			return
 		}
-		s.internalError(w, "重试后台连接", err)
+		s.internalError(w, "retry backend connection", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

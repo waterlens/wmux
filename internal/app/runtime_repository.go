@@ -169,7 +169,7 @@ func TerminalCredential(authType string, credentials store.Credentials) (termina
 	case store.HostAuthAgent:
 		return terminal.AgentCredential{}, nil
 	default:
-		return nil, errors.New("unsupported SSH authentication type")
+		return nil, errors.New("app: unsupported SSH authentication type")
 	}
 }
 
