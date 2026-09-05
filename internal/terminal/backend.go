@@ -8,6 +8,7 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -26,8 +27,12 @@ type backend interface {
 	Reconnectable(error) bool
 }
 
+// backendLauncher creates or attaches a backend connection. create is true
+// only for the very first launch of a session the application just created;
+// every reconnect and every restore attaches to an existing tmux/screen
+// session and fails with ErrBackendMissing when it is gone.
 type backendLauncher interface {
-	start(ctx context.Context, spec SessionSpec, resolved Persistence) (backend, Persistence, error)
+	start(ctx context.Context, spec SessionSpec, resolved Persistence, create bool) (backend, Persistence, error)
 	terminate(ctx context.Context, spec SessionSpec, resolved Persistence) error
 }
 
@@ -39,7 +44,23 @@ type launcher struct {
 	screenMu   *sync.Mutex
 }
 
-const tmuxHyperlinkFeatures = ",xterm*:hyperlinks"
+const (
+	tmuxHyperlinkFeatures = ",xterm*:hyperlinks"
+	tmuxTrueColorOverride = ",xterm*:Tc"
+
+	// remoteMissingExitStatus is the exit status the remote attach script uses
+	// to report that the named tmux/screen session is gone.
+	remoteMissingExitStatus = 3
+)
+
+// tmuxBaseEnvironment is tmux's documented update-environment default plus the
+// variables wmux always propagates into a session. Setting update-environment
+// and creating the session in one tmux invocation gives every session the
+// values from that client's own process environment.
+var tmuxBaseEnvironment = []string{
+	"DISPLAY", "KRB5CCNAME", "SSH_ASKPASS", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
+	"SSH_CONNECTION", "WINDOWID", "XAUTHORITY", "COLORTERM",
+}
 
 func newLauncher(cfg Config) launcher {
 	name := unsafeSessionName.ReplaceAllString(cfg.MuxName, "-")
@@ -53,11 +74,11 @@ func newLauncher(cfg Config) launcher {
 	return launcher{tmuxPath: cfg.TmuxPath, screenPath: cfg.ScreenPath, muxName: name, runtimeDir: cfg.MuxRuntimeDir, screenMu: &sync.Mutex{}}
 }
 
-func (l launcher) start(ctx context.Context, spec SessionSpec, resolved Persistence) (backend, Persistence, error) {
+func (l launcher) start(ctx context.Context, spec SessionSpec, resolved Persistence, create bool) (backend, Persistence, error) {
 	if spec.Host != nil {
-		return l.startSSH(ctx, spec, resolved)
+		return l.startSSH(ctx, spec, resolved, create)
 	}
-	return l.startLocal(ctx, spec, resolved)
+	return l.startLocal(ctx, spec, resolved, create)
 }
 
 func (l launcher) terminate(ctx context.Context, spec SessionSpec, resolved Persistence) error {
@@ -194,12 +215,35 @@ func shellJoin(command string, args []string) string {
 	return strings.Join(parts, " ")
 }
 
-func sortedEnv(env map[string]string) []string {
+// tmuxEnvironmentList is the update-environment value that lets tmux copy the
+// per-session variables out of the tmux client that creates the session.
+func tmuxEnvironmentList(env map[string]string) string {
+	names := append([]string(nil), tmuxBaseEnvironment...)
+	for _, key := range sortedKeys(env) {
+		if !slices.Contains(names, key) {
+			names = append(names, key)
+		}
+	}
+	return strings.Join(names, " ")
+}
+
+// posixScript wraps a script so it runs under /bin/sh even when the account's
+// login shell is fish, csh or another non-POSIX shell.
+func posixScript(script string) string {
+	return "exec /bin/sh -c " + shellQuote(script)
+}
+
+func sortedKeys(env map[string]string) []string {
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	return keys
+}
+
+func sortedEnv(env map[string]string) []string {
+	keys := sortedKeys(env)
 	values := make([]string, 0, len(keys))
 	for _, key := range keys {
 		values = append(values, key+"="+env[key])

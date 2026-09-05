@@ -41,6 +41,7 @@ export type Session = {
   backend?: string | undefined;
   backendName?: string | undefined;
   status: SessionStatus;
+  generation?: number | undefined;
   cols: number;
   rows: number;
   createdAt: string;

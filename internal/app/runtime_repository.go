@@ -28,36 +28,6 @@ type RuntimeRepository struct {
 	states  map[string]terminal.SessionState
 }
 
-// SaveSession creates terminal-owned metadata on first launch and updates the
-// runtime-owned fields on subsequent persistence points.
-func (r *RuntimeRepository) SaveSession(ctx context.Context, record terminal.SessionRecord) error {
-	kind := store.SessionKindLocal
-	var hostID *string
-	if record.HostID != "" {
-		kind = store.SessionKindSSH
-		value := record.HostID
-		hostID = &value
-	}
-	status := store.SessionStatusConnecting
-	if !record.Active {
-		status = store.SessionStatusExited
-	}
-	return r.Store.SaveRuntimeSession(ctx, store.Session{
-		ID:          record.ID,
-		Name:        record.Name,
-		Kind:        kind,
-		HostID:      hostID,
-		Cwd:         record.Cwd,
-		Command:     commandFromRecord(record),
-		Persistence: string(record.Persistence),
-		Backend:     resolvedBackend(record),
-		BackendName: terminal.BackendName(record.ID),
-		Status:      status,
-		Cols:        int(record.Cols),
-		Rows:        int(record.Rows),
-	})
-}
-
 // ListSessions returns every product session: active entries reconnect while
 // exited entries remain available for transcript replay.
 func (r *RuntimeRepository) ListSessions(ctx context.Context) ([]terminal.SessionRecord, error) {
@@ -73,10 +43,11 @@ func (r *RuntimeRepository) ListSessions(ctx context.Context) ([]terminal.Sessio
 			Persistence:         terminal.Persistence(session.Persistence),
 			ResolvedPersistence: terminal.Persistence(session.Backend),
 			Cwd:                 session.Cwd,
+			Env:                 sessionEnvironment(session.ID),
 			Cols:                uint16(session.Cols),
 			Rows:                uint16(session.Rows),
 			Active:              session.Status == store.SessionStatusConnecting || session.Status == store.SessionStatusRunning || session.Status == store.SessionStatusReconnecting || session.Status == store.SessionStatusDetached,
-			CreatedAt:           session.CreatedAt,
+			Generation:          uint64(session.Generation),
 		}
 		if session.HostID != nil {
 			record.HostID = *session.HostID
@@ -146,7 +117,7 @@ func (r *RuntimeRepository) OnSessionState(status terminal.SessionStatus) {
 		backend = string(status.Persistence)
 		backendName = terminal.BackendName(status.ID)
 	}
-	if err := r.Store.UpdateSessionRuntime(ctx, status.ID, state, backend, backendName, sessionError); err != nil {
+	if err := r.Store.UpdateSessionRuntime(ctx, status.ID, int(status.Generation), state, backend, backendName, sessionError); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			r.logError("persist terminal runtime", err, "session", status.ID)
 		}
@@ -174,10 +145,11 @@ func (r *RuntimeRepository) SessionSpec(ctx context.Context, session store.Sessi
 		ID:          session.ID,
 		Name:        session.Name,
 		Persistence: terminal.Persistence(session.Persistence),
+		Generation:  uint64(session.Generation),
 		Cwd:         session.Cwd,
 		Cols:        uint16(session.Cols),
 		Rows:        uint16(session.Rows),
-		Env:         map[string]string{"WMUX_SESSION_ID": session.ID},
+		Env:         sessionEnvironment(session.ID),
 	}
 	if session.Command != "" {
 		spec.Shell = "/bin/sh"
@@ -193,6 +165,13 @@ func (r *RuntimeRepository) SessionSpec(ctx context.Context, session store.Sessi
 	return spec, nil
 }
 
+// sessionEnvironment is the per-session environment every launch and restore
+// shares. WMUX_SESSION_ID lets shell integrations recognise the session, and
+// COLORTERM is what makes 24-bit colour survive tmux.
+func sessionEnvironment(id string) map[string]string {
+	return map[string]string{"WMUX_SESSION_ID": id, "COLORTERM": "truecolor"}
+}
+
 func terminalCredential(authType string, credentials store.Credentials) (terminal.Credential, error) {
 	switch authType {
 	case store.HostAuthPassword:
@@ -204,20 +183,6 @@ func terminalCredential(authType string, credentials store.Credentials) (termina
 	default:
 		return nil, errors.New("unsupported SSH authentication type")
 	}
-}
-
-func commandFromRecord(record terminal.SessionRecord) string {
-	if record.Shell == "/bin/sh" && len(record.Args) == 2 && record.Args[0] == "-lc" {
-		return record.Args[1]
-	}
-	return ""
-}
-
-func resolvedBackend(record terminal.SessionRecord) string {
-	if record.ResolvedPersistence == "" || record.ResolvedPersistence == terminal.PersistenceAuto {
-		return ""
-	}
-	return string(record.ResolvedPersistence)
 }
 
 func (r *RuntimeRepository) logError(message string, err error, args ...any) {

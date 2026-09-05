@@ -265,7 +265,7 @@ func TestSessionCRUDAndHostJoin(t *testing.T) {
 	}
 
 	now = now.Add(time.Minute)
-	if err := s.UpdateSessionBackend(ctx, session.ID, "tmux", "wmux-123"); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, session.ID, session.Generation, SessionStatusConnecting, "tmux", "wmux-123", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateSessionSize(ctx, session.ID, 180, 50); err != nil {
@@ -352,10 +352,10 @@ func TestRuntimeUpdatesPreserveProductFieldsAndListOrder(t *testing.T) {
 	originalUpdatedAt := first.UpdatedAt
 
 	now = now.Add(time.Hour)
-	if err := s.UpdateSessionRuntime(ctx, first.ID, SessionStatusRunning, "tmux", "wmux-first", nil); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, first.ID, first.Generation, SessionStatusRunning, "tmux", "wmux-first", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpdateSessionRuntime(ctx, first.ID, SessionStatusRunning, "tmux", "wmux-first", nil); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, first.ID, first.Generation, SessionStatusRunning, "tmux", "wmux-first", nil); err != nil {
 		t.Fatalf("idempotent runtime update: %v", err)
 	}
 	if err := s.UpdateSessionSize(ctx, first.ID, 200, 60); err != nil {
@@ -405,7 +405,7 @@ func TestStaleProductAndRuntimeUpdatesDoNotOverwriteEachOther(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := session
-	if err := s.UpdateSessionRuntime(ctx, session.ID, SessionStatusRunning, "tmux", "wmux-shared", nil); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, session.ID, session.Generation, SessionStatusRunning, "tmux", "wmux-shared", nil); err != nil {
 		t.Fatal(err)
 	}
 	stale.Name = "Product rename"
@@ -421,29 +421,101 @@ func TestStaleProductAndRuntimeUpdatesDoNotOverwriteEachOther(t *testing.T) {
 		t.Fatalf("stale product update overwrote runtime fields: %+v", got)
 	}
 
-	if err := s.SaveRuntimeSession(ctx, Session{
-		ID: "shared", Name: "Stale runtime name", Kind: SessionKindLocal,
-		Persistence: SessionPersistenceAuto, Backend: "screen", BackendName: "wmux-shared",
-		Status: SessionStatusConnecting, Cols: 160, Rows: 48,
-	}); err != nil {
+}
+
+func TestSessionGenerationIsolatesRestartsFromLateRuntimeCallbacks(t *testing.T) {
+	now := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	s := openTestStore(t, &now)
+	ctx := context.Background()
+	session, err := s.CreateSession(ctx, Session{
+		ID: "restarted", Name: "Restarted", Kind: SessionKindLocal,
+		Persistence: SessionPersistenceAuto,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Generation != 1 {
+		t.Fatalf("created generation = %d, want 1", session.Generation)
+	}
+	exitCode := 3
+	message := "backend session no longer exists"
+	if err := s.UpdateSessionStatus(ctx, session.ID, SessionStatusExited, &exitCode, &message); err != nil {
+		t.Fatal(err)
+	}
+
+	generation, err := s.BeginSessionRestart(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation != 2 {
+		t.Fatalf("restarted generation = %d, want 2", generation)
+	}
+	restarted, err := s.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Status != SessionStatusConnecting || restarted.ExitCode != nil || restarted.Error != nil {
+		t.Fatalf("restart did not clear the previous execution: %+v", restarted)
+	}
+
+	// The stopped execution reports its exit after the restart began. It must
+	// not resurrect the old state, and it must not look like a missing row.
+	staleError := "connection lost"
+	if err := s.UpdateSessionRuntime(ctx, session.ID, 1, SessionStatusExited, "tmux", "wmux-restarted", &staleError); err != nil {
+		t.Fatalf("stale runtime callback = %v, want silently ignored", err)
+	}
+	got, err := s.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != SessionStatusConnecting || got.Error != nil || got.Backend != "" {
+		t.Fatalf("stale generation overwrote the current execution: %+v", got)
+	}
+
+	if err := s.UpdateSessionRuntime(ctx, session.ID, generation, SessionStatusRunning, "tmux", "wmux-restarted", nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.GetSession(ctx, session.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != "Product rename" || got.Backend != "screen" || got.Cols != 160 || got.Status != SessionStatusRunning {
-		t.Fatalf("runtime save overwrote product fields or state: %+v", got)
+	if got.Status != SessionStatusRunning || got.Backend != "tmux" || got.Generation != 2 {
+		t.Fatalf("current generation callback was not applied: %+v", got)
 	}
-	if err := s.SaveRuntimeSession(ctx, Session{
-		ID: "shared", Name: "ignored", Kind: SessionKindLocal,
-		Persistence: SessionPersistenceAuto, Backend: "screen", BackendName: "wmux-shared",
-		Status: SessionStatusExited, Cols: 160, Rows: 48,
-	}); err != nil {
+	if _, err := s.BeginSessionRestart(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("BeginSessionRestart on a missing session = %v, want ErrNotFound", err)
+	}
+	if err := s.UpdateSessionRuntime(ctx, "missing", 1, SessionStatusRunning, "", "", nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("runtime callback for a missing session = %v, want ErrNotFound", err)
+	}
+}
+
+func TestUpdateHostFingerprintOnlyTouchesTheFingerprint(t *testing.T) {
+	now := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	s := openTestStore(t, &now)
+	ctx := context.Background()
+	host, err := s.CreateHost(ctx, Host{
+		Name: "Box", Address: "10.0.0.9", Port: 22, Username: "me",
+		AuthType: HostAuthPassword, EncryptedCredentials: []byte("sealed"),
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	got, err = s.GetSession(ctx, session.ID)
-	if err != nil || got.Status != SessionStatusExited {
-		t.Fatalf("inactive runtime save = %+v, %v", got, err)
+	now = now.Add(time.Minute)
+	if err := s.UpdateHostFingerprint(ctx, host.ID, "SHA256:trusted"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetHost(ctx, host.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Fingerprint != "SHA256:trusted" || got.Name != "Box" || string(got.EncryptedCredentials) != "sealed" {
+		t.Fatalf("fingerprint update changed another field: %+v", got)
+	}
+	if !got.UpdatedAt.Equal(now) {
+		t.Fatalf("fingerprint update did not touch UpdatedAt: %v", got.UpdatedAt)
+	}
+	if err := s.UpdateHostFingerprint(ctx, "missing", "SHA256:x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing host fingerprint update = %v, want ErrNotFound", err)
 	}
 }

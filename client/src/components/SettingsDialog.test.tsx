@@ -3,14 +3,15 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../api';
 import type { TerminalPreferences, User } from '../types';
 import { SettingsDialog } from './SettingsDialog';
 
 const apiHarness = vi.hoisted(() => ({ changePassword: vi.fn() }));
 
-vi.mock('../api', () => ({
+vi.mock('../api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api')>()),
   api: apiHarness,
-  errorMessage: (reason: unknown) => (reason instanceof Error ? reason.message : '请求失败'),
 }));
 
 const user: User = { username: 'waterlens', createdAt: '2026-01-01T00:00:00Z' };
@@ -156,5 +157,36 @@ describe('SettingsDialog behavior', () => {
 
     await act(async () => finishLogout());
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '退出 wmux？' })).toBeNull());
+  });
+  it('reports a rejected current password without ending the session', async () => {
+    apiHarness.changePassword.mockRejectedValue(new ApiError('未授权', 401, { code: 'unauthorized' }));
+    renderSettings();
+    openSecuritySection();
+
+    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'wrong-password' } });
+    fireEvent.change(screen.getByLabelText(/^新密码/), { target: { value: 'new-password' } });
+    fireEvent.change(screen.getByLabelText('确认新密码'), { target: { value: 'new-password' } });
+    fireEvent.click(screen.getByRole('button', { name: '更新密码' }));
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('当前密码不正确'));
+    expect((screen.getByLabelText('当前密码') as HTMLInputElement).value).toBe('wrong-password');
+  });
+
+  it('keeps the logout confirmation open and visible when logging out fails', async () => {
+    const onLogout = vi.fn(async () => {
+      throw new ApiError('服务暂时不可用，请稍后重试。', 500, { code: 'internal_error' });
+    });
+    renderSettings(onLogout);
+    openSecuritySection();
+
+    fireEvent.click(screen.getByRole('button', { name: '退出登录' }));
+    const confirmation = screen.getByRole('dialog', { name: '退出 wmux？' });
+    fireEvent.click(within(confirmation).getByRole('button', { name: '退出登录' }));
+
+    await waitFor(() =>
+      expect(within(confirmation).getByRole('alert').textContent).toBe('服务暂时不可用，请稍后重试。'),
+    );
+    expect(screen.getByRole('dialog', { name: '退出 wmux？' })).toBeTruthy();
+    expect(within(confirmation).getByRole('button', { name: '退出登录' }).getAttribute('aria-busy')).toBeNull();
   });
 });

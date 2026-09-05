@@ -30,6 +30,16 @@ Persistence is intentionally split into three independent concerns:
 
 The Go process detaches from persistent multiplexers during graceful shutdown. A user-initiated session deletion explicitly terminates only the corresponding multiplexer session and removes its recording. tmux and screen run with wmux-owned namespaces and minimal configuration, so user configuration, status bars, key bindings and unrelated sessions are isolated.
 
+## Session lifecycle
+
+A product session is a logical record in SQLite. Each time it is started it gets a new execution *generation*: creation starts generation 1 and every explicit restart increments it. The terminal manager never writes session rows itself; it reports state changes through a callback and SQLite applies them with a conditional `UPDATE` that requires the caller's generation to match, so a late callback from a superseded execution can neither resurrect a deleted row nor overwrite the state of its successor.
+
+Only the first start of a freshly created generation may create a multiplexer session. Every later connection attempt, including automatic reconnects and the restore performed after a wmux restart, attaches to the existing tmux/screen session and never re-runs the configured command. If that session no longer exists the record becomes `exited`; the user decides whether to restart it.
+
+Deleting a session first tries to terminate its backend through a dedicated control connection. When the backend is already exited nothing is contacted. When the host is unreachable the local record and recording are still removed and the API returns a warning that the remote multiplexer session may still be running, so an offline host never makes a session or its host undeletable. Restarting a session stops the current execution, bumps the generation and starts the next one; attached browsers receive `disconnect` with `reason: restarted` and re-attach to the new execution instead of being told the session ended.
+
+Delete, restart and reconnect requests for the same session ID are serialized in the HTTP layer. Terminal input is delivered through a per-backend single-writer gate: a stalled write times out for that request only and never closes the shared backend.
+
 Only one wmux process may hold a data directory at a time. A cross-process lock prevents two managers from attaching the same multiplexer and appending conflicting transcript sequences.
 
 ## WebSocket protocol
@@ -45,17 +55,19 @@ Control messages use JSON:
 {"type":"take_control"}
 ```
 
-The server sends `hello`, zero or more replay frames, then `replay_end` before any queued live frame. It also sends `state`, `writer`, `disconnect` and `error` messages. The browser keeps input disabled until every replay write has drained through xterm's parser; this prevents historical device-status queries from generating replies in the current PTY and establishes the boundary required by any future side-effecting terminal protocol.
+The server sends `hello`, zero or more replay frames, then `replay_end` before any queued live frame. It also sends `state`, `writer`, `disconnect` and `error` messages; `hello` and `state` carry the backend status and the execution `generation`, and `state` is pushed immediately when the runtime state changes as well as on a periodic heartbeat. The browser keeps input disabled until every replay write has drained through xterm's parser and the reported status is `running`; this prevents historical device-status queries from generating replies in the current PTY, keeps keystrokes from racing a backend that is still connecting, and establishes the boundary required by any future side-effecting terminal protocol.
+
+The server pings each connection periodically and drops it when no pong arrives, and it re-validates the login token on every heartbeat: after logout, a password change or token expiry the connection receives `disconnect` with `reason: unauthorized` and close code 1008, which also releases its write lease.
 
 The first attachment receives the write lease. Another attachment may explicitly take it; both clients receive the writer change immediately and input from read-only attachments is ignored. When `since` predates retained output, `hello.sequence` reports the oldest available sequence and `hello.truncated` is true.
 
-Attachment closure is explicit: a real process exit sends `state: exited` and closes normally; `disconnect` with `reason: server_shutdown` closes with code 1012, while `reason: evicted` closes with code 1013. Browsers reconnect for the latter two and never suggest restarting (and therefore killing) a persistent backend merely because the transport was interrupted.
+Attachment closure is explicit: a real process exit first flushes every output frame that is still queued for that connection, then sends `state: exited` whose `sequence` is the final delivered sequence, and closes normally; `disconnect` with `reason: server_shutdown` closes with code 1012, while `reason: evicted` and `reason: restarted` close with code 1013. Browsers reconnect for the latter three and never suggest restarting (and therefore killing) a persistent backend merely because the transport was interrupted. A session whose backend connection is down can be retried immediately through `POST /api/sessions/{id}/reconnect`, which only wakes the reconnect loop and never restarts the execution.
 
 ## Terminal compatibility and side effects
 
 The browser waits for its bundled terminal fonts before opening xterm, uses JetBrains Mono with italic faces plus a Nerd-symbol fallback, and activates xterm's Unicode 11 width tables. Application-cursor and modifier state is respected by the mobile special-key row. The application UI stays light, while the terminal theme is left unset so ANSI colors continue to come from xterm and programs running inside it.
 
-The isolated local and SSH tmux servers enable mouse handling and advertise native OSC 8 hyperlink support when the installed tmux version accepts that feature. Arbitrary tmux passthrough remains disabled. OSC 52 clipboard writes, remote file transfer, desktop notifications, terminal graphics and Kitty keyboard extensions are intentionally unsupported until wmux has an explicit permission, active-tab, multi-client and resource-limit policy for each side effect.
+The isolated local and SSH tmux servers enable mouse handling, advertise 24-bit colour to the programs inside (`terminal-overrides` `Tc` plus `COLORTERM=truecolor`), and advertise native OSC 8 hyperlink support when the installed tmux version accepts that feature. Arbitrary tmux passthrough remains disabled. Every session receives its own `WMUX_SESSION_ID` through tmux's `update-environment`, which works on every tmux release and does not leak the first session's value into later ones. All shell snippets executed on an SSH host run under `/bin/sh -c`, so a fish, csh or other non-POSIX login shell is supported. OSC 52 clipboard writes, remote file transfer, desktop notifications, terminal graphics and Kitty keyboard extensions are intentionally unsupported until wmux has an explicit permission, active-tab, multi-client and resource-limit policy for each side effect.
 
 ## SSH trust
 

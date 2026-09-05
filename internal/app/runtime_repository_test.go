@@ -22,45 +22,37 @@ func openRepositoryTestStore(t *testing.T) *store.Store {
 	return database
 }
 
-func TestRuntimeRepositorySaveSessionDoesNotOverwriteProductState(t *testing.T) {
+func TestRuntimeStateCallbacksPreserveProductMetadata(t *testing.T) {
 	ctx := context.Background()
 	database := openRepositoryTestStore(t)
 	repository := &RuntimeRepository{Store: database}
-	record := terminal.SessionRecord{
-		ID: "session-one", Name: "Original", Persistence: terminal.PersistenceAuto,
-		Shell: "/bin/sh", Args: []string{"-lc", "make watch"}, Cwd: "/work",
-		Cols: 120, Rows: 36, Active: true,
-	}
-	if err := repository.SaveSession(ctx, record); err != nil {
+	created, err := database.CreateSession(ctx, store.Session{
+		ID: "session-one", Name: "Original", Kind: store.SessionKindLocal,
+		Persistence: store.SessionPersistenceAuto, Command: "make watch",
+		Cwd: "/work", Cols: 180, Rows: 50,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := database.UpdateSessionName(ctx, record.ID, "Renamed by user")
+	session, err := database.UpdateSessionName(ctx, created.ID, "Renamed by user")
 	if err != nil {
 		t.Fatal(err)
 	}
 	metadataTime := session.UpdatedAt
 
-	// This record intentionally contains the stale name. Runtime persistence
-	// must update backend/size without replacing it.
-	record.ResolvedPersistence = terminal.PersistenceTmux
-	record.Cols = 180
-	record.Rows = 50
-	if err := repository.SaveSession(ctx, record); err != nil {
-		t.Fatal(err)
+	status := terminal.SessionStatus{
+		ID: created.ID, Generation: uint64(created.Generation),
+		State: terminal.StateRunning, Persistence: terminal.PersistenceTmux,
 	}
-	repository.OnSessionState(terminal.SessionStatus{
-		ID: record.ID, State: terminal.StateRunning, Persistence: terminal.PersistenceTmux,
-	})
-	repository.OnSessionState(terminal.SessionStatus{
-		ID: record.ID, State: terminal.StateRunning, Persistence: terminal.PersistenceTmux,
-	})
+	repository.OnSessionState(status)
+	repository.OnSessionState(status)
 
-	session, err = database.GetSession(ctx, record.ID)
+	session, err = database.GetSession(ctx, created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if session.Name != "Renamed by user" || session.Command != "make watch" {
-		t.Fatalf("runtime save overwrote product metadata: %+v", session)
+		t.Fatalf("runtime callback overwrote product metadata: %+v", session)
 	}
 	if session.Backend != "tmux" || session.Status != store.SessionStatusRunning || session.Cols != 180 || session.Rows != 50 {
 		t.Fatalf("runtime state was not persisted: %+v", session)
@@ -73,17 +65,82 @@ func TestRuntimeRepositorySaveSessionDoesNotOverwriteProductState(t *testing.T) 
 	if err != nil || len(records) != 1 {
 		t.Fatalf("ListSessions = %+v, %v", records, err)
 	}
-	if !records[0].Active || records[0].Name != "Renamed by user" || records[0].ResolvedPersistence != terminal.PersistenceTmux {
-		t.Fatalf("restored record = %+v", records[0])
+	record := records[0]
+	if !record.Active || record.Name != "Renamed by user" || record.ResolvedPersistence != terminal.PersistenceTmux {
+		t.Fatalf("restored record = %+v", record)
 	}
-	record.Active = false
-	if err := repository.SaveSession(ctx, record); err != nil {
-		t.Fatal(err)
+	if record.Generation != uint64(created.Generation) {
+		t.Fatalf("restored generation = %d, want %d", record.Generation, created.Generation)
 	}
+	if record.Env["WMUX_SESSION_ID"] != created.ID || record.Env["COLORTERM"] != "truecolor" {
+		t.Fatalf("restored record environment = %+v", record.Env)
+	}
+	if record.Shell != "/bin/sh" || len(record.Args) != 2 || record.Args[1] != "make watch" {
+		t.Fatalf("restored record command = %q %+v", record.Shell, record.Args)
+	}
+
+	repository.OnSessionState(terminal.SessionStatus{
+		ID: created.ID, Generation: uint64(created.Generation),
+		State: terminal.StateExited, Persistence: terminal.PersistenceTmux,
+	})
 	records, err = repository.ListSessions(ctx)
 	if err != nil || len(records) != 1 || records[0].Active {
 		t.Fatalf("exited restored record = %+v, %v", records, err)
 	}
+}
+
+func TestStaleGenerationCallbackIsIgnored(t *testing.T) {
+	ctx := context.Background()
+	database := openRepositoryTestStore(t)
+	repository := &RuntimeRepository{Store: database}
+	created, err := database.CreateSession(ctx, store.Session{
+		ID: "restarted", Name: "Restarted", Kind: store.SessionKindLocal,
+		Persistence: store.SessionPersistenceTmux,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := database.BeginSessionRestart(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := repository.SessionSpec(ctx, mustGetSession(t, database, created.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Generation != uint64(generation) {
+		t.Fatalf("spec generation = %d, want %d", spec.Generation, generation)
+	}
+
+	// The previous execution reports its exit only now. The restarted session
+	// must keep the state of the generation that replaced it.
+	repository.OnSessionState(terminal.SessionStatus{
+		ID: created.ID, Generation: uint64(created.Generation),
+		State: terminal.StateExited, Persistence: terminal.PersistenceTmux,
+		LastError: "terminal: backend session no longer exists",
+	})
+	session := mustGetSession(t, database, created.ID)
+	if session.Status != store.SessionStatusConnecting || session.Error != nil {
+		t.Fatalf("stale generation callback was applied: %+v", session)
+	}
+
+	repository.OnSessionState(terminal.SessionStatus{
+		ID: created.ID, Generation: spec.Generation,
+		State: terminal.StateRunning, Persistence: terminal.PersistenceTmux,
+	})
+	session = mustGetSession(t, database, created.ID)
+	if session.Status != store.SessionStatusRunning {
+		t.Fatalf("current generation callback was not applied: %+v", session)
+	}
+}
+
+func mustGetSession(t *testing.T, database *store.Store, id string) store.Session {
+	t.Helper()
+	session, err := database.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session
 }
 
 func TestRuntimeRepositorySessionSpecDecryptsEveryCredentialType(t *testing.T) {
@@ -156,8 +213,11 @@ func TestRuntimeRepositorySessionSpecDecryptsEveryCredentialType(t *testing.T) {
 			if spec.Host == nil || spec.Host.Address != "[::1]:"+strconv.Itoa(2200+index) || spec.Host.Fingerprint != "SHA256:test" {
 				t.Fatalf("host spec = %+v", spec.Host)
 			}
-			if spec.Shell != "/bin/sh" || len(spec.Args) != 2 || spec.Args[1] != "uname -a" || spec.Env["WMUX_SESSION_ID"] != spec.ID {
+			if spec.Shell != "/bin/sh" || len(spec.Args) != 2 || spec.Args[1] != "uname -a" {
 				t.Fatalf("session spec = %+v", spec)
+			}
+			if spec.Env["WMUX_SESSION_ID"] != spec.ID || spec.Env["COLORTERM"] != "truecolor" {
+				t.Fatalf("session spec environment = %+v", spec.Env)
 			}
 			test.assert(t, spec.Host.Credential)
 		})

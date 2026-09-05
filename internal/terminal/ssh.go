@@ -32,10 +32,13 @@ type sshBackend struct {
 	keepalive   chan struct{}
 	closeOnce   sync.Once
 	closeErr    error
-	inputMu     sync.Mutex
+	// input is a capacity-1 semaphore. Waiting for it honours the caller's
+	// context so a stuck write never blocks another client, and a caller that
+	// gives up never closes this shared connection.
+	input chan struct{}
 }
 
-func (l launcher) startSSH(ctx context.Context, spec SessionSpec, requested Persistence) (backend, Persistence, error) {
+func (l launcher) startSSH(ctx context.Context, spec SessionSpec, requested Persistence, create bool) (backend, Persistence, error) {
 	client, closers, err := dialSSH(ctx, *spec.Host)
 	if err != nil {
 		return nil, "", err
@@ -63,6 +66,12 @@ func (l launcher) startSSH(ctx context.Context, spec SessionSpec, requested Pers
 	if err := ctx.Err(); err != nil {
 		cleanup()
 		return nil, "", err
+	}
+	// A direct remote shell has nothing to reattach to, so an attach-only
+	// launch reports the missing backend instead of re-running the command.
+	if resolved == PersistenceNone && !create {
+		cleanup()
+		return nil, "", ErrBackendMissing
 	}
 	sess, err := client.NewSession()
 	if err != nil {
@@ -100,11 +109,11 @@ func (l launcher) startSSH(ctx context.Context, spec SessionSpec, requested Pers
 	sess.Stderr = writer
 
 	name := backendName(spec.ID)
-	command := l.remoteAttachCommand(spec, resolved, name)
+	command := l.remoteAttachCommand(spec, resolved, name, create)
 	if command == "" {
 		err = sess.Shell()
 	} else {
-		err = sess.Start(command)
+		err = sess.Start(posixScript(command))
 	}
 	if err != nil {
 		_ = reader.Close()
@@ -128,6 +137,7 @@ func (l launcher) startSSH(ctx context.Context, spec SessionSpec, requested Pers
 		name:        name,
 		authClosers: closers,
 		keepalive:   make(chan struct{}),
+		input:       make(chan struct{}, 1),
 	}
 	go func() {
 		waitErr := sess.Wait()
@@ -293,7 +303,7 @@ func resolveRemote(ctx context.Context, client *ssh.Client, requested Persistenc
 			return false, err
 		}
 		defer s.Close()
-		err = runSSHSession(ctx, s, "command -v "+command+" >/dev/null 2>&1")
+		err = runSSHSession(ctx, s, posixScript("command -v "+command+" >/dev/null 2>&1"))
 		if err == nil {
 			return true, nil
 		}
@@ -362,78 +372,113 @@ func runSSHSession(ctx context.Context, session *ssh.Session, command string) er
 
 var validEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-func (l launcher) remoteAttachCommand(spec SessionSpec, resolved Persistence, name string) string {
-	prefix := make([]string, 0, len(spec.Env)+1)
-	for _, entry := range sortedEnv(spec.Env) {
+// remoteAttachCommand builds the POSIX script that attaches to (and, when
+// create is set, first creates) the remote persistent session. The caller
+// wraps it with posixScript so a fish or csh login shell only has to parse
+// "exec /bin/sh -c '...'".
+func (l launcher) remoteAttachCommand(spec SessionSpec, resolved Persistence, name string, create bool) string {
+	env := spec.Env
+	if resolved == PersistenceTmux || resolved == PersistenceScreen {
+		env = remoteEnvironment(spec.Env)
+	}
+	exports := make([]string, 0, len(env))
+	for _, entry := range sortedEnv(env) {
 		key, value, _ := strings.Cut(entry, "=")
 		if validEnvName.MatchString(key) {
-			prefix = append(prefix, "export "+key+"="+shellQuote(value))
+			exports = append(exports, "export "+key+"="+shellQuote(value))
 		}
 	}
-	if spec.Cwd != "" {
-		prefix = append(prefix, "cd -- "+remotePath(spec.Cwd))
-	}
-
 	program := ""
 	if spec.Shell != "" {
 		program = "exec " + shellJoin(spec.Shell, spec.Args)
 	}
+	missing := "echo " + shellQuote("wmux: session "+name+" no longer exists on this host") +
+		" >&2; exit " + fmt.Sprint(remoteMissingExitStatus)
+
 	switch resolved {
 	case PersistenceTmux:
 		tmux := "tmux -L " + shellQuote(l.muxName) + " -f /dev/null"
-		create := tmux + " new-session -d -s " + shellQuote(name)
-		if spec.Cwd != "" {
-			create += " -c " + remotePath(spec.Cwd)
-		}
-		if len(spec.Env) != 0 || program != "" {
-			inside := append([]string(nil), prefix...)
-			if program == "" {
-				inside = append(inside, `exec "${SHELL:-/bin/sh}" -l`)
-			} else {
-				inside = append(inside, program)
-			}
-			create += " " + shellQuote(strings.Join(inside, "; "))
-		}
 		target := shellQuote("=" + name)
-		parts := []string{
-			"if ! " + tmux + " has-session -t " + target + " 2>/dev/null; then " + create + "; fi",
-			tmux + " set-option -g status off",
-			tmux + " set-option -g prefix None",
-			tmux + " set-option -g prefix2 None",
-			tmux + " set-option -g mouse on",
+		// One tmux invocation: update-environment first, then new-session, so
+		// the session inherits this client's exported variables. ";" is quoted
+		// because it is tmux's command separator, not the shell's.
+		spawn := tmux + " set-option -g update-environment " + shellQuote(tmuxEnvironmentList(env)) +
+			" ';' new-session -d -s " + shellQuote(name)
+		if spec.Cwd != "" {
+			spawn += " -c " + remotePath(spec.Cwd)
+		}
+		if spec.Shell != "" {
+			// tmux runs this through default-shell -c, so it is one quoted word.
+			spawn += " " + shellQuote(shellJoin(spec.Shell, spec.Args))
+		}
+		if !create {
+			spawn = missing
+		}
+		parts := append([]string(nil), exports...)
+		parts = append(parts,
+			"if ! "+tmux+" has-session -t "+target+" 2>/dev/null; then "+spawn+"; fi",
+			tmux+" set-option -g status off",
+			tmux+" set-option -g prefix None",
+			tmux+" set-option -g prefix2 None",
+			tmux+" set-option -g mouse on",
 			// OSC 8 is native in newer tmux. Unknown terminal features on an
 			// older remote are deliberately non-fatal; passthrough stays off.
-			"if ! " + tmux + " show-options -gqv terminal-features 2>/dev/null | grep -Fq -- " + shellQuote("xterm*:hyperlinks") + "; then " +
-				tmux + " set-option -as terminal-features " + shellQuote(tmuxHyperlinkFeatures) + " 2>/dev/null || :; fi",
-			"exec " + tmux + " attach-session -t " + target,
-		}
+			remoteTmuxAppend(tmux, "terminal-features", tmuxHyperlinkFeatures, "xterm*:hyperlinks"),
+			remoteTmuxAppend(tmux, "terminal-overrides", tmuxTrueColorOverride, "xterm*:Tc"),
+			"exec "+tmux+" attach-session -t "+target,
+		)
 		return strings.Join(parts, "; ")
 	case PersistenceScreen:
-		parts := remoteScreenSetup(l.muxName)
-		parts = append(parts, prefix...)
+		parts := append([]string(nil), exports...)
+		parts = append(parts, remoteScreenSetup(l.muxName)...)
+		if spec.Cwd != "" {
+			parts = append(parts, "cd -- "+remotePath(spec.Cwd))
+		}
 		screen := `screen -c "$wmux_screen_rc"`
 		marker := shellQuote("[.]" + name + "[[:space:]]")
-		create := screen + " -dmS " + shellQuote(name)
+		spawn := screen + " -dmS " + shellQuote(name)
 		if program != "" {
-			create += " sh -lc " + shellQuote(program)
+			spawn += " sh -lc " + shellQuote(program)
 		}
-		parts = append(parts, "if ! "+screen+" -ls | grep -q "+marker+"; then "+create+"; fi")
+		if !create {
+			spawn = missing
+		}
+		parts = append(parts, "if ! "+screen+" -ls | grep -q "+marker+"; then "+spawn+"; fi")
 		parts = append(parts, "exec "+screen+" -x "+shellQuote(name))
 		return strings.Join(parts, "; ")
 	case PersistenceNone:
-		if len(prefix) == 0 && program == "" {
+		parts := append([]string(nil), exports...)
+		if spec.Cwd != "" {
+			parts = append(parts, "cd -- "+remotePath(spec.Cwd))
+		}
+		if len(parts) == 0 && program == "" {
 			return ""
 		}
-		parts := prefix
 		if program == "" {
-			parts = append(parts, `exec "${SHELL:-/bin/sh}" -l`)
-		} else {
-			parts = append(parts, program)
+			program = `exec "${SHELL:-/bin/sh}" -l`
 		}
-		return strings.Join(parts, "; ")
+		return strings.Join(append(parts, program), "; ")
 	default:
 		return ""
 	}
+}
+
+// remoteEnvironment is the per-session environment exported before tmux or
+// screen starts. COLORTERM is what makes 24-bit colour reach the session.
+func remoteEnvironment(env map[string]string) map[string]string {
+	values := cloneMap(env)
+	if values == nil {
+		values = make(map[string]string, 1)
+	}
+	if _, explicitlySet := values["COLORTERM"]; !explicitlySet {
+		values["COLORTERM"] = "truecolor"
+	}
+	return values
+}
+
+func remoteTmuxAppend(tmux, option, value, marker string) string {
+	return "if ! " + tmux + " show-options -gqv " + option + " 2>/dev/null | grep -Fq -- " + shellQuote(marker) + "; then " +
+		tmux + " set-option -as " + option + " " + shellQuote(value) + " 2>/dev/null || :; fi"
 }
 
 func remotePath(path string) string {
@@ -492,8 +537,7 @@ func (l launcher) terminateSSH(ctx context.Context, spec SessionSpec, resolved P
 	}
 	defer sess.Close()
 	name := backendName(spec.ID)
-	command := l.remoteTerminateCommand(resolved, name)
-	output, err := runSSHOutput(ctx, sess, command)
+	output, err := runSSHOutput(ctx, sess, posixScript(l.remoteTerminateCommand(resolved, name)))
 	if err != nil && !sessionAbsent(resolved, output) {
 		return fmt.Errorf("terminal: terminate remote %s: %w", resolved, err)
 	}
@@ -528,23 +572,22 @@ func runSSHOutput(ctx context.Context, session *ssh.Session, command string) ([]
 }
 
 func (b *sshBackend) Read(p []byte) (int, error) { return b.output.Read(p) }
+
 func (b *sshBackend) Write(p []byte) (int, error) {
-	b.inputMu.Lock()
-	defer b.inputMu.Unlock()
-	return b.stdin.Write(p)
+	return b.WriteContext(context.Background(), p)
 }
 
+// WriteContext serializes input through a capacity-1 semaphore. A caller whose
+// context expires while queued gives up its turn; it never closes the shared
+// connection, because one stuck client must not end the session for everyone.
 func (b *sshBackend) WriteContext(ctx context.Context, p []byte) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
+	select {
+	case b.input <- struct{}{}:
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
-	stopCancellation := context.AfterFunc(ctx, func() { _ = b.client.Close() })
-	defer stopCancellation()
-	n, err := b.Write(p)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return n, ctxErr
-	}
-	return n, err
+	defer func() { <-b.input }()
+	return b.stdin.Write(p)
 }
 
 func (b *sshBackend) Resize(cols, rows uint16) error {
@@ -556,6 +599,12 @@ func (b *sshBackend) Wait(ctx context.Context) error {
 	case err, ok := <-b.done:
 		if !ok {
 			return nil
+		}
+		// The attach script reports a vanished tmux/screen session with a
+		// dedicated exit status; it must never be retried or re-created.
+		var exitErr *ssh.ExitError
+		if b.kind != PersistenceNone && errors.As(err, &exitErr) && exitErr.ExitStatus() == remoteMissingExitStatus {
+			return ErrBackendMissing
 		}
 		return err
 	case <-ctx.Done():
@@ -587,7 +636,7 @@ func (b *sshBackend) Terminate(ctx context.Context) error {
 }
 
 func (b *sshBackend) Reconnectable(err error) bool {
-	if b.kind == PersistenceNone || err == nil {
+	if b.kind == PersistenceNone || err == nil || errors.Is(err, ErrBackendMissing) {
 		return false
 	}
 	var exitErr *ssh.ExitError

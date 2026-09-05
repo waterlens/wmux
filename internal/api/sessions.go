@@ -83,16 +83,25 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	model.Name = input.Name
-	spec, err := s.sessionSpecs.SessionSpec(r.Context(), model)
+	// The row owns the session's identity and generation, so it exists before
+	// any runtime does. A launch failure removes it again.
+	created, err := s.store.CreateSession(r.Context(), model)
 	if err != nil {
+		s.handleStoreError(w, err, "终端会话不存在")
+		return
+	}
+	spec, err := s.sessionSpecs.SessionSpec(r.Context(), created)
+	if err != nil {
+		s.discardSessionRow(r.Context(), id)
 		s.internalError(w, "准备终端配置", err)
 		return
 	}
 	if _, err := s.terminals.Create(r.Context(), spec); err != nil {
+		s.discardSessionRow(r.Context(), id)
 		s.upstreamError(w, "启动终端会话", "terminal_start_failed", "无法启动会话，请检查工作目录、命令或连接设置", err)
 		return
 	}
-	created, err := s.store.GetSession(r.Context(), id)
+	created, err = s.store.GetSession(r.Context(), id)
 	if err != nil {
 		s.internalError(w, "读取新会话", err)
 		return
@@ -121,23 +130,6 @@ func (s *Server) updateSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	cols, rows := session.Cols, session.Rows
-	if patch.Cols != nil {
-		cols = *patch.Cols
-	}
-	if patch.Rows != nil {
-		rows = *patch.Rows
-	}
-	if !validSize(cols, rows) {
-		writeError(w, http.StatusBadRequest, "invalid_size", "终端尺寸超出允许范围")
-		return
-	}
-	if cols != session.Cols || rows != session.Rows {
-		if err := s.store.UpdateSessionSize(r.Context(), session.ID, cols, rows); err != nil {
-			s.handleStoreError(w, err, "终端会话不存在")
-			return
-		}
-	}
 	updated, err := s.store.GetSession(r.Context(), session.ID)
 	if err != nil {
 		s.handleStoreError(w, err, "终端会话不存在")
@@ -148,14 +140,23 @@ func (s *Server) updateSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	defer s.sessionOps.lock(id)()
 	if _, err := s.store.GetSession(r.Context(), id); err != nil {
 		s.handleStoreError(w, err, "终端会话不存在")
 		return
 	}
+	warning := ""
 	if s.terminals != nil {
-		if err := s.stopTerminalSession(r.Context(), id); err != nil {
-			s.upstreamError(w, "结束终端会话", "terminal_stop_failed", "暂时无法结束后台会话；会话仍已保留，请稍后重试", err)
-			return
+		// Terminate already succeeds without contacting the host for a runtime
+		// that has exited. When it does fail the host is genuinely unreachable,
+		// and deletion is still the operator's explicit intent: drop the
+		// runtime and say plainly that a persistent backend may survive.
+		if err := s.terminals.Terminate(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
+			s.logger.Warn("terminate session for deletion", "session", id, "error", err)
+			if err := s.terminals.Discard(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
+				s.logger.Warn("discard session runtime", "session", id, "error", err)
+			}
+			warning = "无法连接主机，远端后台会话可能仍在运行"
 		}
 	}
 	if err := s.store.DeleteSession(r.Context(), id); err != nil {
@@ -167,6 +168,10 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("remove terminal transcript", "session", id, "error", err)
 		}
 	}
+	if warning != "" {
+		writeJSON(w, http.StatusOK, map[string]string{"warning": warning})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -176,17 +181,22 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	defer s.sessionOps.lock(id)()
 	session, err := s.store.GetSession(r.Context(), id)
 	if err != nil {
 		s.handleStoreError(w, err, "终端会话不存在")
 		return
 	}
-	if err := s.stopTerminalSession(r.Context(), id); err != nil {
+	if err := s.terminals.StopForRestart(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
 		s.upstreamError(w, "结束待重启会话", "terminal_stop_failed", "暂时无法重启后台会话，请稍后重试", err)
 		return
 	}
-	if err := s.store.UpdateSessionStatus(r.Context(), id, store.SessionStatusConnecting, nil, nil); err != nil {
-		s.internalError(w, "重置会话状态", err)
+	// The row owns the execution number. Opening the next generation here means
+	// late callbacks from the execution just stopped can no longer overwrite
+	// the state of the one starting below.
+	generation, err := s.store.BeginSessionRestart(r.Context(), id)
+	if err != nil {
+		s.handleStoreError(w, err, "终端会话不存在")
 		return
 	}
 	spec, err := s.sessionSpecs.SessionSpec(r.Context(), session)
@@ -194,9 +204,10 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "准备重启配置", err)
 		return
 	}
+	spec.Generation = uint64(generation)
 	if _, err := s.terminals.Create(r.Context(), spec); err != nil {
 		message := "无法启动会话，请检查工作目录、命令或连接设置"
-		_ = s.store.UpdateSessionStatus(r.Context(), id, store.SessionStatusError, nil, &message)
+		_ = s.store.UpdateSessionRuntime(r.Context(), id, generation, store.SessionStatusError, "", "", &message)
 		s.upstreamError(w, "重启终端会话", "terminal_start_failed", message, err)
 		return
 	}
@@ -208,27 +219,35 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, publicSession(restarted))
 }
 
-// stopTerminalSession preserves the destructive semantics for an active
-// backend, while allowing terminal metadata that is already exited (or stuck
-// at a permanent launch error) to be removed without contacting an
-// unreachable host. DiscardContext rejects active sessions, so this decision
-// remains inside Manager rather than trusting a potentially stale DB status.
-func (s *Server) stopTerminalSession(ctx context.Context, id string) error {
+// reconnectSession retries one runtime's backend connection immediately instead
+// of waiting for its reconnect backoff or for a configuration fix to be noticed.
+func (s *Server) reconnectSession(w http.ResponseWriter, r *http.Request) {
 	if s.terminals == nil {
-		return nil
+		writeError(w, http.StatusServiceUnavailable, "terminal_unavailable", "终端服务不可用")
+		return
 	}
-	err := s.terminals.DiscardContext(ctx, id)
-	switch {
-	case err == nil, errors.Is(err, terminal.ErrSessionNotFound):
-		return nil
-	case errors.Is(err, terminal.ErrSessionActive):
-		err = s.terminals.Terminate(ctx, id)
-		if err == nil || errors.Is(err, terminal.ErrSessionNotFound) {
-			return nil
+	id := r.PathValue("id")
+	defer s.sessionOps.lock(id)()
+	if err := s.terminals.Reconnect(id); err != nil {
+		if errors.Is(err, terminal.ErrSessionNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "终端会话不存在")
+			return
 		}
-		return err
-	default:
-		return err
+		s.internalError(w, "重试后台连接", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// discardSessionRow removes a session that never reached a running runtime.
+func (s *Server) discardSessionRow(ctx context.Context, id string) {
+	if err := s.store.DeleteSession(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.logger.Warn("remove unstarted session", "session", id, "error", err)
+	}
+	if s.transcripts != nil {
+		if err := s.transcripts.Remove(id); err != nil {
+			s.logger.Warn("remove terminal transcript", "session", id, "error", err)
+		}
 	}
 }
 

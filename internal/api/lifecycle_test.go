@@ -286,15 +286,32 @@ func TestSessionPatchRestartAndDeleteLifecycle(t *testing.T) {
 	})
 
 	response := doJSONForTest(t, ctx, fixture, http.MethodPatch, "/api/sessions/"+id, map[string]any{
-		"name": "重命名后", "cols": 132, "rows": 41,
+		"name": "重命名后",
 	})
 	if response.StatusCode != http.StatusOK {
 		failResponse(t, response)
 	}
 	var patched store.Session
 	decodeResponse(t, response, &patched)
-	if patched.Name != "重命名后" || patched.Cols != 132 || patched.Rows != 41 {
+	if patched.Name != "重命名后" || patched.Generation != 1 {
 		t.Fatalf("unexpected patched session: %#v", patched)
+	}
+
+	// Terminal dimensions belong to the live attachment. A patch that still
+	// carries them is rejected outright and must never resize the session.
+	response = doJSONForTest(t, ctx, fixture, http.MethodPatch, "/api/sessions/"+id, map[string]any{
+		"name": "尺寸补丁", "cols": 132, "rows": 41,
+	})
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("size patch returned %d, want %d", response.StatusCode, http.StatusBadRequest)
+	}
+	stored, err := fixture.database.GetSession(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Cols != patched.Cols || stored.Rows != patched.Rows || stored.Name != patched.Name {
+		t.Fatalf("rejected patch changed the session: %#v", stored)
 	}
 
 	response = doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/sessions/"+id+"/restart", nil)
@@ -305,13 +322,16 @@ func TestSessionPatchRestartAndDeleteLifecycle(t *testing.T) {
 	if patched.Name != "重命名后" {
 		t.Fatalf("restart lost product metadata: %#v", patched)
 	}
+	if patched.Generation != 2 {
+		t.Fatalf("restart generation = %d, want 2", patched.Generation)
+	}
 
 	response = doJSONForTest(t, ctx, fixture, http.MethodDelete, "/api/sessions/"+id, nil)
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
 		failResponse(t, response)
 	}
-	if _, err := fixture.database.GetSession(ctx, id); err != store.ErrNotFound {
+	if _, err := fixture.database.GetSession(ctx, id); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("deleted session lookup error = %v, want ErrNotFound", err)
 	}
 }
@@ -340,22 +360,20 @@ func TestDeleteDormantPersistentSSHSessionsWithoutContactingUnreachableHost(t *t
 	}
 
 	hostID := host.ID
-	if err := fixture.database.SaveRuntimeSession(ctx, store.Session{
-		ID: "ses_dormant_exited", Name: "dormant exited", Kind: store.SessionKindSSH, HostID: &hostID,
-		Persistence: "tmux", Backend: "tmux", BackendName: terminal.BackendName("ses_dormant_exited"),
-		Status: store.SessionStatusExited, Cols: 120, Rows: 36,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.database.SaveRuntimeSession(ctx, store.Session{
-		ID: "ses_dormant_error", Name: "dormant error", Kind: store.SessionKindSSH, HostID: &hostID,
-		Persistence: "tmux", Backend: "tmux", BackendName: terminal.BackendName("ses_dormant_error"),
-		Status: store.SessionStatusConnecting, Cols: 120, Rows: 36,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.database.UpdateSessionRuntime(ctx, "ses_dormant_error", store.SessionStatusError, "tmux", terminal.BackendName("ses_dormant_error"), nil); err != nil {
-		t.Fatal(err)
+	for id, status := range map[string]string{
+		"ses_dormant_exited": store.SessionStatusExited,
+		"ses_dormant_error":  store.SessionStatusError,
+	} {
+		created, err := fixture.database.CreateSession(ctx, store.Session{
+			ID: id, Name: id, Kind: store.SessionKindSSH, HostID: &hostID,
+			Persistence: "tmux", Cols: 120, Rows: 36,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.database.UpdateSessionRuntime(ctx, id, created.Generation, status, "tmux", terminal.BackendName(id), nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := fixture.manager.Restore(ctx); err != nil {
 		t.Fatal(err)
@@ -613,5 +631,314 @@ func sendAndCollectOutput(t *testing.T, ctx context.Context, connection *websock
 		if bytes.Contains(output.Bytes(), []byte(marker)) {
 			return lastSequence, output.Bytes()
 		}
+	}
+}
+
+func TestDeleteRunningSessionOnUnreachableHostWarnsAndReleasesTheHost(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	fixture := newLiveAPIFixture(t, ctx)
+
+	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/hosts", map[string]any{
+		"name": "unreachable", "address": "127.0.0.1", "port": 1,
+		"username": "owner", "authType": "password", "password": "secret-value",
+	})
+	if response.StatusCode != http.StatusCreated {
+		failResponse(t, response)
+	}
+	var host hostResponse
+	decodeResponse(t, response, &host)
+	if err := fixture.database.UpdateHostFingerprint(ctx, host.ID, "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); err != nil {
+		t.Fatal(err)
+	}
+
+	hostID := host.ID
+	id := "ses_unreachable_running"
+	created, err := fixture.database.CreateSession(ctx, store.Session{
+		ID: id, Name: id, Kind: store.SessionKindSSH, HostID: &hostID,
+		Persistence: "tmux", Cols: 120, Rows: 36,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpdateSessionRuntime(ctx, id, created.Generation, store.SessionStatusRunning, "tmux", terminal.BackendName(id), nil); err != nil {
+		t.Fatal(err)
+	}
+	// Restoring a running session against a host that refuses every connection
+	// is exactly the state in which deletion used to be impossible.
+	if err := fixture.manager.Restore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitForAnyTerminalState(t, ctx, fixture.manager, id, terminal.StateDisconnected, terminal.StateError)
+
+	response = doJSONForTest(t, ctx, fixture, http.MethodDelete, "/api/sessions/"+id, nil)
+	if response.StatusCode != http.StatusOK {
+		failResponse(t, response)
+	}
+	var deleted struct {
+		Warning string `json:"warning"`
+	}
+	decodeResponse(t, response, &deleted)
+	if deleted.Warning == "" {
+		t.Fatal("deleting a session on an unreachable host did not warn about the surviving backend")
+	}
+	if _, err := fixture.database.GetSession(ctx, id); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("database retained the deleted session: %v", err)
+	}
+	if _, err := fixture.manager.Status(id); !errors.Is(err, terminal.ErrSessionNotFound) {
+		t.Fatalf("manager retained the deleted session: %v", err)
+	}
+
+	response = doJSONForTest(t, ctx, fixture, http.MethodDelete, "/api/hosts/"+host.ID, nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete formerly referenced host returned %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+}
+
+func TestReconnectSessionRetriesBackendOrReportsMissingSession(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fixture := newLiveAPIFixture(t, ctx)
+	id := createSessionForTest(t, ctx, fixture, map[string]any{
+		"name": "重试连接", "kind": "local", "command": "cat", "persistence": "none",
+	})
+
+	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/sessions/"+id+"/reconnect", nil)
+	if response.StatusCode != http.StatusNoContent {
+		failResponse(t, response)
+	}
+	response.Body.Close()
+
+	response = doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/sessions/ses_missing/reconnect", nil)
+	if response.StatusCode != http.StatusNotFound {
+		failResponse(t, response)
+	}
+	var failure errorBody
+	decodeResponse(t, response, &failure)
+	if failure.Error.Code != "not_found" {
+		t.Fatalf("reconnect of an unknown session = %#v", failure.Error)
+	}
+}
+
+func TestTerminalWebSocketClosesWhenTheLoginIsRevoked(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fixture := newLiveAPIFixture(t, ctx)
+	id := createSessionForTest(t, ctx, fixture, map[string]any{
+		"name": "登出", "kind": "local", "command": "cat", "persistence": "none",
+	})
+
+	connection := dialTerminalForTest(t, ctx, fixture, id, 0)
+	defer connection.CloseNow()
+	awaitSocketEvent(t, ctx, connection, "hello", nil)
+	awaitSocketEvent(t, ctx, connection, "replay_end", nil)
+
+	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/logout", nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout returned %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+
+	// The heartbeat re-reads the login every two seconds, so a revoked session
+	// must drop the stream within one more period.
+	deadline, cancelDeadline := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelDeadline()
+	unauthorized := false
+	for {
+		messageType, payload, err := connection.Read(deadline)
+		if err != nil {
+			if status := websocket.CloseStatus(err); status != websocket.StatusPolicyViolation {
+				t.Fatalf("close status = %v, want %v (error: %v)", status, websocket.StatusPolicyViolation, err)
+			}
+			break
+		}
+		if messageType != websocket.MessageText {
+			continue
+		}
+		var event socketEvent
+		if err := json.Unmarshal(payload, &event); err != nil {
+			continue
+		}
+		if event.Type == "disconnect" && event.Reason == "unauthorized" {
+			unauthorized = true
+		}
+	}
+	if !unauthorized {
+		t.Fatal("revoked login did not produce an unauthorized disconnect event")
+	}
+}
+
+func TestTerminalWebSocketDeliversBufferedOutputBeforeExit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fixture := newLiveAPIFixtureWithReplayLimit(t, ctx, 128)
+	// The session waits for one line, then writes a payload in many small
+	// chunks and exits: most of it is still buffered when the runtime closes
+	// the stream, which is exactly the output that used to be lost.
+	id := createSessionForTest(t, ctx, fixture, map[string]any{
+		"name": "尾部输出", "kind": "local", "persistence": "none",
+		"command": `read -r _; i=0; while [ $i -lt 120 ]; do printf 'WMUX_TAIL_%s\n' "$i"; i=$((i+1)); done`,
+	})
+
+	connection := dialTerminalForTest(t, ctx, fixture, id, 0)
+	defer connection.CloseNow()
+	awaitSocketEvent(t, ctx, connection, "hello", nil)
+	awaitSocketEvent(t, ctx, connection, "replay_end", nil)
+	waitForTerminalState(t, ctx, fixture.manager, id, terminal.StateRunning)
+
+	if err := connection.Write(ctx, websocket.MessageBinary, []byte{clientInputFrame, '\n'}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read to the end of the stream: every exited event must follow the output
+	// it describes, whether it arrives with the state change or with the close.
+	var output bytes.Buffer
+	lastSequence := uint64(0)
+	exits := 0
+	for {
+		messageType, payload, err := connection.Read(ctx)
+		if err != nil {
+			if status := websocket.CloseStatus(err); status != websocket.StatusNormalClosure {
+				t.Fatalf("close status = %v, want %v (error: %v)", status, websocket.StatusNormalClosure, err)
+			}
+			break
+		}
+		switch messageType {
+		case websocket.MessageBinary:
+			if len(payload) < 9 || payload[0] != serverOutputFrame {
+				t.Fatalf("invalid terminal output frame: %x", payload)
+			}
+			lastSequence = binary.BigEndian.Uint64(payload[1:9])
+			output.Write(payload[9:])
+		case websocket.MessageText:
+			var event socketEvent
+			if err := json.Unmarshal(payload, &event); err != nil {
+				t.Fatalf("decode terminal event: %v", err)
+			}
+			if event.Status != "exited" {
+				continue
+			}
+			exits++
+			for _, marker := range []string{"WMUX_TAIL_0", "WMUX_TAIL_60", "WMUX_TAIL_119"} {
+				if !bytes.Contains(output.Bytes(), []byte(marker)) {
+					t.Fatalf("exited event arrived before buffered output %q: %q", marker, output.Bytes())
+				}
+			}
+			if event.Sequence != lastSequence {
+				t.Fatalf("exited sequence = %d, want the last delivered frame %d", event.Sequence, lastSequence)
+			}
+		}
+	}
+	if exits == 0 {
+		t.Fatalf("session end was never reported: %q", output.Bytes())
+	}
+}
+
+func TestRestartClosesAttachedSocketForReconnect(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fixture := newLiveAPIFixture(t, ctx)
+	id := createSessionForTest(t, ctx, fixture, map[string]any{
+		"name": "重启", "kind": "local", "command": "cat", "persistence": "none",
+	})
+
+	connection := dialTerminalForTest(t, ctx, fixture, id, 0)
+	defer connection.CloseNow()
+	awaitSocketEvent(t, ctx, connection, "hello", nil)
+	awaitSocketEvent(t, ctx, connection, "replay_end", nil)
+	waitForTerminalState(t, ctx, fixture.manager, id, terminal.StateRunning)
+
+	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/sessions/"+id+"/restart", nil)
+	if response.StatusCode != http.StatusOK {
+		failResponse(t, response)
+	}
+	var restarted store.Session
+	decodeResponse(t, response, &restarted)
+	if restarted.Generation != 2 {
+		t.Fatalf("restart generation = %d, want 2", restarted.Generation)
+	}
+
+	announced := false
+	for {
+		messageType, payload, err := connection.Read(ctx)
+		if err != nil {
+			if status := websocket.CloseStatus(err); status != websocket.StatusTryAgainLater {
+				t.Fatalf("close status = %v, want %v (error: %v)", status, websocket.StatusTryAgainLater, err)
+			}
+			break
+		}
+		if messageType != websocket.MessageText {
+			continue
+		}
+		var event socketEvent
+		if err := json.Unmarshal(payload, &event); err != nil {
+			continue
+		}
+		if event.Type == "disconnect" && event.Reason == string(terminal.AttachmentRestarted) {
+			announced = true
+		}
+	}
+	if !announced {
+		t.Fatal("restart did not tell the attached browser to reconnect")
+	}
+}
+
+func waitForAnyTerminalState(t *testing.T, ctx context.Context, manager *terminal.Manager, sessionID string, wanted ...terminal.SessionState) {
+	t.Helper()
+	for {
+		status, err := manager.Status(sessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, state := range wanted {
+			if status.State == state {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("terminal state = %s, want one of %v: %v", status.State, wanted, ctx.Err())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func TestTerminalWebSocketAsksBrowserToRetryWhileRuntimeIsMissing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fixture := newLiveAPIFixture(t, ctx)
+	// A row without a runtime is what a browser finds in the window between
+	// stopping a session and creating its replacement. That is a retry, not the
+	// policy failure a lost login would be.
+	id := "ses_restart_window"
+	if _, err := fixture.database.CreateSession(ctx, store.Session{ID: id, Name: id, Kind: store.SessionKindLocal}); err != nil {
+		t.Fatal(err)
+	}
+
+	connection := dialTerminalForTest(t, ctx, fixture, id, 0)
+	defer connection.CloseNow()
+	reconnecting := false
+	for {
+		messageType, payload, err := connection.Read(ctx)
+		if err != nil {
+			if status := websocket.CloseStatus(err); status != websocket.StatusTryAgainLater {
+				t.Fatalf("close status = %v, want %v (error: %v)", status, websocket.StatusTryAgainLater, err)
+			}
+			break
+		}
+		if messageType != websocket.MessageText {
+			continue
+		}
+		var event socketEvent
+		if err := json.Unmarshal(payload, &event); err != nil {
+			continue
+		}
+		if event.Type == "disconnect" && event.Status == "reconnecting" {
+			reconnecting = true
+		}
+	}
+	if !reconnecting {
+		t.Fatal("a missing runtime did not tell the browser to reconnect")
 	}
 }

@@ -31,6 +31,7 @@ type Server struct {
 	mux           *http.ServeMux
 	sessionNameMu sync.Mutex
 	hostImportMu  sync.Mutex
+	sessionOps    keyedMutex
 	sessionSpecs  sessionSpecProvider
 	sshConfig     sshConfigDiscoverer
 	probeSSH      sshHostKeyProbe
@@ -97,6 +98,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/sessions/{id}", s.sameOrigin(s.requireAuth(s.updateSession)))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", s.sameOrigin(s.requireAuth(s.deleteSession)))
 	s.mux.HandleFunc("POST /api/sessions/{id}/restart", s.sameOrigin(s.requireAuth(s.restartSession)))
+	s.mux.HandleFunc("POST /api/sessions/{id}/reconnect", s.sameOrigin(s.requireAuth(s.reconnectSession)))
 	s.mux.HandleFunc("GET /ws/sessions/{id}", s.requireAuth(s.terminalSocket))
 
 	s.mux.Handle("/", webui.Handler())

@@ -78,6 +78,9 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
   const [renameTarget, setRenameTarget] = useState<Session | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [restartTarget, setRestartTarget] = useState<Session | null>(null);
+  const [restartingIds, setRestartingIds] = useState<string[]>([]);
+  const restartingRef = useRef<Set<string>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [preferences, setPreferences] = useState<TerminalPreferences>(loadPreferences);
   const [generations, setGenerations] = useState<Record<string, number>>({});
@@ -134,13 +137,14 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
 
   useEffect(() => {
     let stopped = false;
-    let inFlight = false;
+    let requestId = 0;
     const refresh = async () => {
-      if (stopped || inFlight || document.visibilityState === 'hidden') return;
-      inFlight = true;
+      if (stopped || document.visibilityState === 'hidden') return;
+      const request = ++requestId;
       try {
         const [nextSessions, nextHosts] = await Promise.all([api.sessions(), api.hosts()]);
-        if (stopped) return;
+        // A slow earlier poll must never overwrite a newer list.
+        if (stopped || request !== requestId) return;
         setSessions(nextSessions);
         setHosts(nextHosts);
         const existing = new Set(nextSessions.map((session) => session.id));
@@ -152,8 +156,6 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
         });
       } catch {
         // Global 401 handling redirects; transient polling failures keep the last known list.
-      } finally {
-        inFlight = false;
       }
     };
     const timer = window.setInterval(() => void refresh(), 5000);
@@ -216,8 +218,13 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
     [notify, openSession],
   );
 
+  // The ref (not the state) is the re-entrancy guard: repeated clicks in one
+  // React batch would all read the same stale state.
   const restartSession = useCallback(
     async (session: Session) => {
+      if (restartingRef.current.has(session.id)) return;
+      restartingRef.current.add(session.id);
+      setRestartingIds((current) => [...current, session.id]);
       try {
         const updated = await api.restartSession(session.id);
         updateSession(updated);
@@ -226,19 +233,42 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
         notify(`正在重启「${updated.name}」`, 'success');
       } catch (reason) {
         notify(errorMessage(reason), 'error');
+      } finally {
+        restartingRef.current.delete(session.id);
+        setRestartingIds((current) => current.filter((id) => id !== session.id));
       }
     },
     [notify, openSession, updateSession],
   );
 
+  const requestRestart = useCallback(
+    (session: Session) => {
+      if (restartingRef.current.has(session.id)) return;
+      // A live session loses its running processes, so ask first.
+      if (session.status === 'connecting' || session.status === 'running' || session.status === 'reconnecting') {
+        setRestartTarget(session);
+        return;
+      }
+      void restartSession(session);
+    },
+    [restartSession],
+  );
+
+  async function confirmRestart() {
+    if (!restartTarget) return;
+    await restartSession(restartTarget);
+    setRestartTarget(null);
+  }
+
   async function deleteSession() {
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      await api.deleteSession(deleteTarget.id);
+      const result = await api.deleteSession(deleteTarget.id);
       closeTab(deleteTarget.id);
       setSessions((current) => current.filter((session) => session.id !== deleteTarget.id));
-      notify(`已结束并删除「${deleteTarget.name}」`, 'success');
+      if (result?.warning) notify(result.warning, 'info');
+      else notify(`已结束并删除「${deleteTarget.name}」`, 'success');
       setDeleteTarget(null);
     } catch (reason) {
       notify(errorMessage(reason), 'error');
@@ -272,8 +302,9 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
           setMobileSidebar(false);
         }}
         onRename={setRenameTarget}
-        onRestart={(session) => void restartSession(session)}
+        onRestart={requestRestart}
         onDelete={setDeleteTarget}
+        restartingIds={restartingIds}
         onSettings={() => {
           setSettingsOpen(true);
           setMobileSidebar(false);
@@ -352,7 +383,8 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
                     session={session}
                     active={activeId === session.id && currentView === 'terminal'}
                     preferences={preferences}
-                    onRestart={(target) => void restartSession(target)}
+                    restarting={restartingIds.includes(session.id)}
+                    onRestart={requestRestart}
                     onTerminate={setDeleteTarget}
                     notify={notify}
                   />
@@ -388,6 +420,15 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
       {renameTarget && (
         <RenameSessionDialog session={renameTarget} onClose={() => setRenameTarget(null)} onSaved={updateSession} />
       )}
+      <ConfirmDialog
+        open={Boolean(restartTarget)}
+        title={`重启「${restartTarget?.name ?? '会话'}」？`}
+        description="当前进程会被结束，终端会重新启动。"
+        confirmLabel="重启会话"
+        busy={Boolean(restartTarget && restartingIds.includes(restartTarget.id))}
+        onCancel={() => setRestartTarget(null)}
+        onConfirm={() => void confirmRestart()}
+      />
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title={`结束「${deleteTarget?.name ?? '会话'}」？`}

@@ -3,14 +3,17 @@ package terminal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestSessionAbsentRecognizesMuxResponses(t *testing.T) {
@@ -119,6 +122,8 @@ func TestConfigureLocalTmuxEnablesMouseAndSafelyProbesHyperlinks(t *testing.T) {
 		"-L isolated -f /dev/null set-option -g mouse on",
 		"-L isolated -f /dev/null show-options -gqv terminal-features",
 		"-L isolated -f /dev/null set-option -as terminal-features " + tmuxHyperlinkFeatures,
+		"-L isolated -f /dev/null show-options -gqv terminal-overrides",
+		"-L isolated -f /dev/null set-option -as terminal-overrides " + tmuxTrueColorOverride,
 	} {
 		if !strings.Contains(commands, wanted) {
 			t.Fatalf("tmux configuration commands %q do not contain %q", commands, wanted)
@@ -199,5 +204,101 @@ func assertCapturedArgs(t *testing.T, path string, want []string) {
 	got := strings.Split(strings.TrimSuffix(string(contents), "\n"), "\n")
 	if !slices.Equal(got, want) {
 		t.Fatalf("captured args = %#v, want %#v", got, want)
+	}
+}
+
+// TestLocalTmuxGivesEachSessionItsOwnEnvironment exercises the real tmux
+// binary: update-environment and new-session run as one invocation, so each
+// session inherits the variables of the client that created it rather than the
+// values the tmux server happened to start with.
+func TestLocalTmuxGivesEachSessionItsOwnEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux is Unix-only")
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is not installed")
+	}
+	namespace := fmt.Sprintf("wmux-env-%d-%d", os.Getpid(), time.Now().UnixNano())
+	l := newLauncher(Config{TmuxPath: tmuxPath, MuxName: namespace})
+	t.Cleanup(func() {
+		_ = exec.Command(tmuxPath, l.tmuxArgs("kill-server")...).Run()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	ids := []string{namespace + "-one", namespace + "-two"}
+	files := make([]string, len(ids))
+	for index, id := range ids {
+		files[index] = filepath.Join(dir, fmt.Sprintf("session-%d", index))
+		spec := SessionSpec{
+			ID:    id,
+			Shell: "/bin/sh",
+			Args:  []string{"-lc", "printf '%s' \"$WMUX_SESSION_ID\" > " + shellQuote(files[index]) + "; sleep 30"},
+			Env:   map[string]string{"WMUX_SESSION_ID": id},
+			Cols:  100,
+			Rows:  30,
+		}
+		b, resolved, err := l.startLocal(ctx, spec, PersistenceTmux, true)
+		if err != nil {
+			t.Fatalf("start tmux session %s: %v", id, err)
+		}
+		t.Cleanup(func() { _ = b.Close() })
+		if resolved != PersistenceTmux {
+			t.Fatalf("resolved persistence = %q, want tmux", resolved)
+		}
+	}
+
+	for index, id := range ids {
+		waitForFileContent(t, ctx, files[index], id)
+	}
+
+	overrides, err := exec.CommandContext(ctx, tmuxPath, l.tmuxArgs("show-options", "-gqv", "terminal-overrides")...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("read terminal-overrides: %v: %s", err, overrides)
+	}
+	if !strings.Contains(string(overrides), "xterm*:Tc") {
+		t.Fatalf("isolated tmux terminal-overrides = %q, want truecolor support", overrides)
+	}
+}
+
+// TestLocalTmuxAttachOnlyReportsMissingSession covers the restore path: a
+// session whose tmux backend is gone must never be recreated.
+func TestLocalTmuxAttachOnlyReportsMissingSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux is Unix-only")
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is not installed")
+	}
+	namespace := fmt.Sprintf("wmux-missing-%d-%d", os.Getpid(), time.Now().UnixNano())
+	l := newLauncher(Config{TmuxPath: tmuxPath, MuxName: namespace})
+	t.Cleanup(func() {
+		_ = exec.Command(tmuxPath, l.tmuxArgs("kill-server")...).Run()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	spec := SessionSpec{ID: namespace + "-gone", Shell: "/bin/sh", Args: []string{"-i"}}
+	if _, _, err := l.startLocal(ctx, spec, PersistenceTmux, false); !errors.Is(err, ErrBackendMissing) {
+		t.Fatalf("attach-only launch of a missing session = %v, want ErrBackendMissing", err)
+	}
+}
+
+func waitForFileContent(t *testing.T, ctx context.Context, path, want string) {
+	t.Helper()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		contents, err := os.ReadFile(path)
+		if err == nil && string(contents) == want {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("file %s = %q, %v; want %q", path, contents, err, want)
+		case <-ticker.C:
+		}
 	}
 }

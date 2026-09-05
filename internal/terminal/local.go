@@ -25,10 +25,13 @@ type localBackend struct {
 
 	closeOnce sync.Once
 	closeErr  error
-	inputMu   sync.Mutex
+	// input is a capacity-1 semaphore. Waiting for it honours the caller's
+	// context so a stuck write never blocks another client, and a caller that
+	// gives up never closes this shared backend.
+	input chan struct{}
 }
 
-func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Persistence) (backend, Persistence, error) {
+func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Persistence, create bool) (backend, Persistence, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
@@ -46,7 +49,7 @@ func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Pe
 	var cmd *exec.Cmd
 	switch resolved {
 	case PersistenceTmux:
-		if err := l.ensureLocalTmux(ctx, tool, name, spec, cols, rows); err != nil {
+		if err := l.ensureLocalTmux(ctx, tool, name, spec, cols, rows, create); err != nil {
 			return nil, "", err
 		}
 		cmd = exec.CommandContext(ctx, tool, l.tmuxArgs("attach-session", "-t", "="+name)...)
@@ -55,12 +58,17 @@ func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Pe
 		if err != nil {
 			return nil, "", permanentStartError(err)
 		}
-		if err := l.ensureLocalScreen(ctx, tool, screenConfig, screenEnv, name, spec); err != nil {
+		if err := l.ensureLocalScreen(ctx, tool, screenConfig, screenEnv, name, spec, create); err != nil {
 			return nil, "", err
 		}
 		cmd = exec.CommandContext(ctx, tool, "-c", screenConfig, "-x", name)
 		cmd.Env = screenEnv
 	case PersistenceNone:
+		// A plain PTY has nothing to reattach to, so an attach-only launch
+		// must report the missing backend instead of re-running the command.
+		if !create {
+			return nil, "", ErrBackendMissing
+		}
 		shell := spec.Shell
 		if shell == "" {
 			shell = os.Getenv("SHELL")
@@ -93,6 +101,7 @@ func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Pe
 		kind:     resolved,
 		toolPath: tool,
 		name:     name,
+		input:    make(chan struct{}, 1),
 	}
 	go func() {
 		b.done <- cmd.Wait()
@@ -101,11 +110,20 @@ func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Pe
 	return b, resolved, nil
 }
 
-func (l launcher) ensureLocalTmux(ctx context.Context, path, name string, spec SessionSpec, cols, rows uint16) error {
+func (l launcher) ensureLocalTmux(ctx context.Context, path, name string, spec SessionSpec, cols, rows uint16, create bool) error {
 	if err := exec.CommandContext(ctx, path, l.tmuxArgs("has-session", "-t", "="+name)...).Run(); err == nil {
 		return l.configureLocalTmux(ctx, path)
 	}
-	args := l.tmuxArgs("new-session", "-d", "-s", name, "-x", fmt.Sprint(cols), "-y", fmt.Sprint(rows))
+	if !create {
+		return ErrBackendMissing
+	}
+	// update-environment and new-session must run in one tmux invocation so
+	// the new session inherits this client's per-session variables. ";" is a
+	// separate argv element, which is tmux's command separator.
+	args := l.tmuxArgs(
+		"set-option", "-g", "update-environment", tmuxEnvironmentList(spec.Env), ";",
+		"new-session", "-d", "-s", name, "-x", fmt.Sprint(cols), "-y", fmt.Sprint(rows),
+	)
 	if spec.Cwd != "" {
 		args = append(args, "-c", spec.Cwd)
 	}
@@ -141,14 +159,24 @@ func (l launcher) configureLocalTmux(ctx context.Context, path string) error {
 	// tmux gained native OSC 8 support after terminal-features already
 	// existed. Treat an unknown feature as an optional capability so older
 	// tmux releases keep working; never enable allow-passthrough as a fallback.
-	features, queryErr := exec.CommandContext(ctx, path, l.tmuxArgs("show-options", "-gqv", "terminal-features")...).CombinedOutput()
+	if err := l.appendTmuxOption(ctx, path, "terminal-features", tmuxHyperlinkFeatures, "xterm*:hyperlinks"); err != nil {
+		return err
+	}
+	return l.appendTmuxOption(ctx, path, "terminal-overrides", tmuxTrueColorOverride, "xterm*:Tc")
+}
+
+// appendTmuxOption appends value to a server option unless marker is already
+// present. An option an older tmux rejects stays optional rather than fatal.
+func (l launcher) appendTmuxOption(ctx context.Context, path, option, value, marker string) error {
+	current, queryErr := exec.CommandContext(ctx, path, l.tmuxArgs("show-options", "-gqv", option)...).CombinedOutput()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if queryErr == nil && !bytes.Contains(features, []byte("xterm*:hyperlinks")) {
-		if _, err := exec.CommandContext(ctx, path, l.tmuxArgs("set-option", "-as", "terminal-features", tmuxHyperlinkFeatures)...).CombinedOutput(); err != nil && ctx.Err() != nil {
-			return ctx.Err()
-		}
+	if queryErr != nil || bytes.Contains(current, []byte(marker)) {
+		return nil
+	}
+	if _, err := exec.CommandContext(ctx, path, l.tmuxArgs("set-option", "-as", option, value)...).CombinedOutput(); err != nil && ctx.Err() != nil {
+		return ctx.Err()
 	}
 	return nil
 }
@@ -158,9 +186,12 @@ func (l launcher) tmuxArgs(args ...string) []string {
 	return append(base, args...)
 }
 
-func (l launcher) ensureLocalScreen(ctx context.Context, path, config string, env []string, name string, spec SessionSpec) error {
+func (l launcher) ensureLocalScreen(ctx context.Context, path, config string, env []string, name string, spec SessionSpec, create bool) error {
 	if localScreenExists(ctx, path, config, env, name) {
 		return nil
+	}
+	if !create {
+		return ErrBackendMissing
 	}
 	args := []string{"-c", config, "-dmS", name}
 	if spec.Shell != "" {
@@ -368,6 +399,9 @@ func localEnvironment(extra map[string]string) []string {
 	if _, explicitlySet := extra["TERM"]; !explicitlySet {
 		values["TERM"] = "xterm-256color"
 	}
+	if _, explicitlySet := extra["COLORTERM"]; !explicitlySet {
+		values["COLORTERM"] = "truecolor"
+	}
 	for key, value := range extra {
 		values[key] = value
 	}
@@ -386,23 +420,22 @@ func terminalSize(spec SessionSpec) (cols, rows uint16) {
 }
 
 func (b *localBackend) Read(p []byte) (int, error) { return b.pty.Read(p) }
+
 func (b *localBackend) Write(p []byte) (int, error) {
-	b.inputMu.Lock()
-	defer b.inputMu.Unlock()
-	return b.pty.Write(p)
+	return b.WriteContext(context.Background(), p)
 }
 
+// WriteContext serializes input through a capacity-1 semaphore. A caller whose
+// context expires while queued gives up its turn; it never closes the backend,
+// because one stuck client must not end the session for everyone else.
 func (b *localBackend) WriteContext(ctx context.Context, p []byte) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
+	select {
+	case b.input <- struct{}{}:
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
-	stopCancellation := context.AfterFunc(ctx, func() { _ = b.Close() })
-	n, err := b.Write(p)
-	stopCancellation()
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return n, ctxErr
-	}
-	return n, err
+	defer func() { <-b.input }()
+	return b.pty.Write(p)
 }
 
 func (b *localBackend) Resize(cols, rows uint16) error {

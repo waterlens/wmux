@@ -351,6 +351,7 @@ type ConfirmProps = {
   confirmLabel?: string;
   busy?: boolean;
   danger?: boolean;
+  error?: string | undefined;
   onCancel: () => void;
   onConfirm: () => void;
 };
@@ -362,6 +363,7 @@ export function ConfirmDialog({
   confirmLabel = '确认',
   busy,
   danger,
+  error,
   onCancel,
   onConfirm,
 }: ConfirmProps) {
@@ -384,7 +386,13 @@ export function ConfirmDialog({
           </Button>
         </>
       }
-    />
+    >
+      {error && (
+        <div className="form-error" role="alert">
+          {error}
+        </div>
+      )}
+    </Modal>
   );
 }
 

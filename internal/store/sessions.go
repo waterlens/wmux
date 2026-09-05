@@ -12,7 +12,7 @@ import (
 const sessionSelect = `
 SELECT s.id, s.name, s.kind, s.host_id, h.name,
        s.cwd, s.command, s.persistence, s.backend, s.backend_name,
-       s.status, s.cols, s.rows, s.created_at, s.updated_at,
+       s.status, s.generation, s.cols, s.rows, s.created_at, s.updated_at,
        s.last_attached_at, s.exit_code, s.last_error
 FROM sessions s
 LEFT JOIN hosts h ON h.id = s.host_id`
@@ -35,9 +35,9 @@ func (s *Store) CreateSession(ctx context.Context, session Session) (Session, er
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO sessions(
     id, name, kind, host_id, cwd, command, persistence, backend,
-    backend_name, status, cols, rows, created_at, updated_at,
+    backend_name, status, generation, cols, rows, created_at, updated_at,
     last_attached_at, exit_code, last_error
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID,
 		session.Name,
 		session.Kind,
@@ -48,6 +48,7 @@ INSERT INTO sessions(
 		session.Backend,
 		session.BackendName,
 		session.Status,
+		session.Generation,
 		session.Cols,
 		session.Rows,
 		unixMillis(session.CreatedAt),
@@ -215,17 +216,6 @@ WHERE id = ? AND (cols IS NOT ? OR rows IS NOT ?)`,
 	return s.requireSession(ctx, id, result)
 }
 
-func (s *Store) UpdateSessionBackend(ctx context.Context, id, backend, backendName string) error {
-	result, err := s.db.ExecContext(ctx, `
-UPDATE sessions SET backend = ?, backend_name = ?
-WHERE id = ? AND (backend IS NOT ? OR backend_name IS NOT ?)`,
-		backend, backendName, id, backend, backendName)
-	if err != nil {
-		return fmt.Errorf("update session backend: %w", err)
-	}
-	return s.requireSession(ctx, id, result)
-}
-
 func (s *Store) TouchSession(ctx context.Context, id string, attachedAt time.Time) error {
 	if attachedAt.IsZero() {
 		attachedAt = s.utcNow()
@@ -245,9 +235,11 @@ WHERE id = ? AND last_attached_at IS NOT ?`,
 
 // UpdateSessionRuntime atomically applies a terminal callback. An empty
 // backend leaves the resolved backend untouched (connecting callbacks occur
-// before backend resolution). Repeated identical callbacks perform no write.
-// Runtime activity intentionally never changes UpdatedAt.
-func (s *Store) UpdateSessionRuntime(ctx context.Context, id, status, backend, backendName string, sessionError *string) error {
+// before backend resolution). A callback from a superseded generation is
+// silently ignored, so a stopped execution can never resurrect its state on
+// the row of the restart that replaced it. Repeated identical callbacks
+// perform no write, and runtime activity never changes UpdatedAt.
+func (s *Store) UpdateSessionRuntime(ctx context.Context, id string, generation int, status, backend, backendName string, sessionError *string) error {
 	if !validSessionStatus(status) {
 		return fmt.Errorf("%w: unsupported session status %q", ErrInvalidInput, status)
 	}
@@ -257,7 +249,7 @@ SET status = ?,
     backend = CASE WHEN ? = '' THEN backend ELSE ? END,
     backend_name = CASE WHEN ? = '' THEN backend_name ELSE ? END,
     last_error = ?
-WHERE id = ? AND (
+WHERE id = ? AND generation = ? AND (
     status IS NOT ?
     OR (? <> '' AND backend IS NOT ?)
     OR (? <> '' AND backend_name IS NOT ?)
@@ -268,6 +260,7 @@ WHERE id = ? AND (
 		backend, backendName,
 		nullableString(sessionError),
 		id,
+		generation,
 		status,
 		backend, backend,
 		backend, backendName,
@@ -279,54 +272,24 @@ WHERE id = ? AND (
 	return s.requireSession(ctx, id, result)
 }
 
-// SaveRuntimeSession atomically creates terminal-owned metadata or refreshes
-// only runtime-owned fields of an existing product session. This is the
-// persistence boundary used by terminal.Repository.SaveSession.
-func (s *Store) SaveRuntimeSession(ctx context.Context, session Session) error {
-	applySessionDefaults(&session)
-	if strings.TrimSpace(session.ID) == "" {
-		return fmt.Errorf("%w: session id is empty", ErrInvalidInput)
+// BeginSessionRestart opens a new execution of a session: it increments the
+// generation, clears the previous exit and moves the row back to connecting.
+// Callbacks still in flight from the previous execution carry the old
+// generation and are ignored from this point on.
+func (s *Store) BeginSessionRestart(ctx context.Context, id string) (int, error) {
+	var generation int
+	err := s.db.QueryRowContext(ctx, `
+UPDATE sessions
+SET generation = generation + 1, status = ?, exit_code = NULL, last_error = NULL
+WHERE id = ?
+RETURNING generation`, SessionStatusConnecting, id).Scan(&generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
 	}
-	if err := validateSession(session); err != nil {
-		return err
-	}
-	now := unixMillis(s.utcNow())
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO sessions(
-    id, name, kind, host_id, cwd, command, persistence, backend,
-    backend_name, status, cols, rows, created_at, updated_at,
-    last_attached_at, exit_code, last_error
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET
-    backend = excluded.backend,
-    backend_name = excluded.backend_name,
-    cols = excluded.cols,
-    rows = excluded.rows,
-    status = CASE
-        WHEN excluded.status = 'exited' THEN excluded.status
-        ELSE sessions.status END`,
-		session.ID,
-		session.Name,
-		session.Kind,
-		nullableString(session.HostID),
-		session.Cwd,
-		session.Command,
-		session.Persistence,
-		session.Backend,
-		session.BackendName,
-		session.Status,
-		session.Cols,
-		session.Rows,
-		now,
-		now,
-		nullableMillis(session.LastAttachedAt),
-		nullableInt(session.ExitCode),
-		nullableString(session.Error),
-	)
 	if err != nil {
-		return fmt.Errorf("save runtime session: %w", err)
+		return 0, fmt.Errorf("begin session restart: %w", err)
 	}
-	return nil
+	return generation, nil
 }
 
 func (s *Store) requireSession(ctx context.Context, id string, result sql.Result) error {
@@ -351,6 +314,9 @@ func (s *Store) requireSession(ctx context.Context, id string, result sql.Result
 func applySessionDefaults(session *Session) {
 	if session.Persistence == "" {
 		session.Persistence = SessionPersistenceAuto
+	}
+	if session.Generation <= 0 {
+		session.Generation = 1
 	}
 	if session.Status == "" {
 		session.Status = SessionStatusConnecting
@@ -424,6 +390,7 @@ func scanSession(row scanner) (Session, error) {
 		&session.Backend,
 		&session.BackendName,
 		&session.Status,
+		&session.Generation,
 		&session.Cols,
 		&session.Rows,
 		&createdAt,

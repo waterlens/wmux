@@ -33,6 +33,7 @@ type SidebarProps = {
   onHosts: () => void;
   onRename: (session: Session) => void;
   onRestart: (session: Session) => void;
+  restartingIds?: string[] | undefined;
   onDelete: (session: Session) => void;
   onSettings: () => void;
   onCollapse: () => void;
@@ -52,6 +53,7 @@ export function Sidebar({
   onHosts,
   onRename,
   onRestart,
+  restartingIds = [],
   onDelete,
   onSettings,
   onCollapse,
@@ -195,6 +197,7 @@ export function Sidebar({
                           </button>
                           <button
                             role="menuitem"
+                            disabled={restartingIds.includes(session.id)}
                             onClick={() => {
                               setOpenMenuId(null);
                               onRestart(session);

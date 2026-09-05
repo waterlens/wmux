@@ -103,6 +103,12 @@ OSC 52 剪贴板写入、Kitty/iTerm2 文件传输、桌面通知、SIXEL/inline
 
 远程 SSH session 在目标主机上运行独立的 `tmux`/`screen` session；SSH 网络中断后 wmux 会重新连接并 attach。因此持久化不依赖一条永久存活的 TCP 连接。
 
+重连、wmux 服务重启后的恢复都只会 attach 已有的 tmux/screen session，不会再次执行启动命令；后台 session 已不存在时会话显示为“已退出”，只有显式“重启”才会开始新的一次执行（会话的 `generation` 加一）。删除会话时 wmux 会先通过独立的控制连接结束后台 session；主机不可达时仍会删除本地记录和历史，并提示远端 session 可能仍在运行。登出、修改密码或登录过期后，已打开的终端连接会在数秒内被服务端关闭。
+
+每个 session 内都会设置 `WMUX_SESSION_ID`（当前会话 ID）和 `COLORTERM=truecolor`；隔离的 tmux server 同时开启 24 位色。远端主机上执行的所有脚本都通过 `/bin/sh -c` 运行，登录 shell 为 fish、csh 等非 POSIX shell 的主机同样可用。
+
+终端历史（`WMUX_DATA_DIR/recordings`）以明文 JSONL 保存，只受数据目录的 `0700` 权限保护；其中会包含终端里显示过的一切内容。请把数据目录当作敏感数据备份与清理。
+
 ## 开发
 
 ```bash

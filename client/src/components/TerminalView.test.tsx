@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError, AUTH_EXPIRED_EVENT } from '../api';
 import { MAX_INPUT_FRAME_BYTES } from '../terminalProtocol';
 import type { Session, TerminalPreferences } from '../types';
 import { TerminalView } from './TerminalView';
@@ -38,7 +39,7 @@ const xtermHarness = vi.hoisted(() => {
       FakeTerminal.instances.push(this);
     }
 
-    loadAddon(): void {}
+    loadAddon = vi.fn();
 
     onData(handler: DataHandler): { dispose(): void } {
       this.dataHandler = handler;
@@ -75,14 +76,42 @@ const xtermHarness = vi.hoisted(() => {
   class FakeUnicode11Addon {}
   class FakeWebLinksAddon {}
 
-  return { FakeFitAddon, FakeTerminal, FakeUnicode11Addon, FakeWebLinksAddon };
+  class FakeWebglAddon {
+    static available = true;
+    static instances: FakeWebglAddon[] = [];
+
+    contextLoss: (() => void) | null = null;
+    dispose = vi.fn();
+
+    constructor() {
+      if (!FakeWebglAddon.available) throw new Error('WebGL2 is unavailable');
+      FakeWebglAddon.instances.push(this);
+    }
+
+    onContextLoss(handler: () => void): void {
+      this.contextLoss = handler;
+    }
+  }
+
+  return { FakeFitAddon, FakeTerminal, FakeUnicode11Addon, FakeWebLinksAddon, FakeWebglAddon };
 });
+
+const apiHarness = vi.hoisted(() => ({
+  status: vi.fn(async () => ({ setupRequired: false, authenticated: true, version: 'test' })),
+  reconnectSession: vi.fn(async (): Promise<void> => undefined),
+}));
+
+vi.mock('../api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api')>()),
+  api: apiHarness,
+}));
 
 vi.mock('@xterm/addon-web-fonts', () => ({ loadFonts: fontHarness.loadFonts }));
 vi.mock('@xterm/xterm', () => ({ Terminal: xtermHarness.FakeTerminal }));
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: xtermHarness.FakeFitAddon }));
 vi.mock('@xterm/addon-unicode11', () => ({ Unicode11Addon: xtermHarness.FakeUnicode11Addon }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: xtermHarness.FakeWebLinksAddon }));
+vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: xtermHarness.FakeWebglAddon }));
 
 type SocketEvent = { data?: unknown; code?: number };
 type SocketListener = (event: SocketEvent) => void;
@@ -126,6 +155,11 @@ class FakeWebSocket {
 
   emitMessage(data: string | ArrayBuffer): void {
     this.emit('message', { data });
+  }
+
+  emitClose(code = 1006): void {
+    this.readyState = FakeWebSocket.CLOSED;
+    this.emit('close', { code });
   }
 
   private emit(type: string, event: SocketEvent): void {
@@ -189,6 +223,12 @@ let releaseFonts: (faces: FontFace[]) => void;
 
 beforeEach(() => {
   xtermHarness.FakeTerminal.instances.length = 0;
+  xtermHarness.FakeWebglAddon.instances.length = 0;
+  xtermHarness.FakeWebglAddon.available = true;
+  apiHarness.status.mockReset();
+  apiHarness.status.mockResolvedValue({ setupRequired: false, authenticated: true, version: 'test' });
+  apiHarness.reconnectSession.mockReset();
+  apiHarness.reconnectSession.mockResolvedValue(undefined);
   FakeWebSocket.instances.length = 0;
   vi.stubGlobal('WebSocket', FakeWebSocket);
   vi.stubGlobal('ResizeObserver', FakeResizeObserver);
@@ -252,6 +292,9 @@ describe('TerminalView transport boundaries', () => {
     if (!socket) throw new Error('terminal transport was not initialized');
 
     act(() => socket.emitOpen());
+    expect(status?.textContent).toBe('正在连接');
+
+    act(() => socket.emitMessage('{"type":"hello","status":"running","writer":true}'));
     expect(status?.textContent).toBe('已连接');
     expect(status?.querySelector('svg')).toBeNull();
 
@@ -380,5 +423,137 @@ describe('TerminalView transport boundaries', () => {
       '\x1bOA',
       '\x1b[1;3C',
     ]);
+  });
+  it('holds input closed until the backend reports running and stores the generation', async () => {
+    renderTerminal();
+    await finishFontLoading();
+    const terminal = xtermHarness.FakeTerminal.instances[0];
+    const socket = FakeWebSocket.instances[0];
+    if (!terminal || !socket) throw new Error('terminal transport was not initialized');
+
+    act(() => {
+      socket.emitOpen();
+      socket.emitMessage('{"type":"hello","status":"connecting","writer":true,"generation":7}');
+      socket.emitMessage('{"type":"replay_end","sequence":0}');
+    });
+    await waitFor(() =>
+      expect(screen.getByText('测试会话').closest('.terminal-view')?.getAttribute('data-replay-complete')).toBe('true'),
+    );
+
+    act(() => terminal.emitData('too-early'));
+    expect(socket.sent.filter((value) => value instanceof ArrayBuffer)).toHaveLength(0);
+
+    act(() => socket.emitMessage('{"type":"state","status":"running","generation":8}'));
+    act(() => terminal.emitData('ready'));
+
+    const frames = socket.sent.filter((value): value is ArrayBuffer => value instanceof ArrayBuffer);
+    expect(frames).toHaveLength(1);
+    expect(new TextDecoder().decode(new Uint8Array(frames[0]!).subarray(1))).toBe('ready');
+    expect(screen.getByText('测试会话').closest('.terminal-view')?.getAttribute('data-generation')).toBe('8');
+  });
+
+  it('asks the server to retry the backend before reattaching after a remote restart', async () => {
+    renderTerminal();
+    await finishFontLoading();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error('terminal transport was not initialized');
+
+    act(() => {
+      socket.emitOpen();
+      socket.emitMessage('{"type":"hello","status":"running","writer":true}');
+      socket.emitMessage('{"type":"disconnect","status":"reconnecting","reason":"restarted"}');
+    });
+    expect(screen.getByText('会话已在其他设备重启，正在重新连接')).toBeTruthy();
+
+    // The server closes with 1013 after announcing the restart.
+    await act(async () => {
+      socket.emitClose(1013);
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '重试后台连接' }));
+    await waitFor(() => expect(apiHarness.reconnectSession).toHaveBeenCalledWith('session-1'));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+  });
+
+  it('reports a failed backend retry without reattaching', async () => {
+    apiHarness.reconnectSession.mockRejectedValue(new ApiError('无法重试', 502, { code: 'terminal_stop_failed' }));
+    renderTerminal();
+    await finishFontLoading();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error('terminal transport was not initialized');
+
+    await act(async () => {
+      socket.emitOpen();
+      socket.emitMessage('{"type":"hello","status":"running","writer":true}');
+      socket.emitClose(1013);
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '重试后台连接' }));
+    await waitFor(() => expect(screen.getByText('无法结束会话，请稍后重试。')).toBeTruthy());
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('uses the WebGL renderer when available and drops it when the context is lost', async () => {
+    renderTerminal();
+    await finishFontLoading();
+    const terminal = xtermHarness.FakeTerminal.instances[0];
+    if (!terminal) throw new Error('terminal was not created');
+
+    await waitFor(() => expect(xtermHarness.FakeWebglAddon.instances).toHaveLength(1));
+    const addon = xtermHarness.FakeWebglAddon.instances[0];
+    if (!addon) throw new Error('WebGL addon was not created');
+    expect(terminal.loadAddon).toHaveBeenCalledWith(addon);
+
+    addon.contextLoss?.();
+    expect(addon.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('falls back to the DOM renderer when the WebGL addon cannot start', async () => {
+    xtermHarness.FakeWebglAddon.available = false;
+    renderTerminal();
+    await finishFontLoading();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const terminal = xtermHarness.FakeTerminal.instances[0];
+    const socket = FakeWebSocket.instances[0];
+    if (!terminal || !socket) throw new Error('terminal transport was not initialized');
+    expect(xtermHarness.FakeWebglAddon.instances).toHaveLength(0);
+
+    act(() => {
+      socket.emitOpen();
+      socket.emitMessage('{"type":"hello","status":"running","writer":true}');
+      socket.emitMessage('{"type":"replay_end","sequence":0}');
+    });
+    await waitFor(() =>
+      expect(screen.getByText('测试会话').closest('.terminal-view')?.getAttribute('data-replay-complete')).toBe('true'),
+    );
+    act(() => terminal.emitData('still works'));
+    expect(socket.sent.filter((value) => value instanceof ArrayBuffer)).toHaveLength(1);
+  });
+  it('still reports a revoked login when the session was closed as exited', async () => {
+    apiHarness.status.mockResolvedValue({ setupRequired: false, authenticated: false, version: 'test' });
+    const expired = vi.fn();
+    window.addEventListener(AUTH_EXPIRED_EVENT, expired);
+    renderTerminal();
+    await finishFontLoading();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error('terminal transport was not initialized');
+
+    await act(async () => {
+      socket.emitOpen();
+      socket.emitMessage('{"type":"hello","status":"running","writer":true}');
+      socket.emitMessage('{"type":"disconnect","status":"exited","reason":"unauthorized"}');
+      socket.emitClose(1008);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(expired).toHaveBeenCalledOnce());
+    window.removeEventListener(AUTH_EXPIRED_EVENT, expired);
+    expect(FakeWebSocket.instances).toHaveLength(1);
   });
 });

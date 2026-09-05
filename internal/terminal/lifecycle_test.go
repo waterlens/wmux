@@ -15,12 +15,18 @@ import (
 )
 
 type launcherStub struct {
-	startFunc     func(context.Context, SessionSpec, Persistence) (backend, Persistence, error)
+	startFunc     func(context.Context, SessionSpec, Persistence, bool) (backend, Persistence, error)
 	terminateFunc func(context.Context, SessionSpec, Persistence) error
+
+	mu      sync.Mutex
+	creates []bool
 }
 
-func (l *launcherStub) start(ctx context.Context, spec SessionSpec, persistence Persistence) (backend, Persistence, error) {
-	return l.startFunc(ctx, spec, persistence)
+func (l *launcherStub) start(ctx context.Context, spec SessionSpec, persistence Persistence, create bool) (backend, Persistence, error) {
+	l.mu.Lock()
+	l.creates = append(l.creates, create)
+	l.mu.Unlock()
+	return l.startFunc(ctx, spec, persistence, create)
 }
 
 func (l *launcherStub) terminate(ctx context.Context, spec SessionSpec, persistence Persistence) error {
@@ -28,6 +34,12 @@ func (l *launcherStub) terminate(ctx context.Context, spec SessionSpec, persiste
 		return nil
 	}
 	return l.terminateFunc(ctx, spec, persistence)
+}
+
+func (l *launcherStub) createFlags() []bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]bool(nil), l.creates...)
 }
 
 type backendStub struct {
@@ -91,6 +103,21 @@ func (b *backendStub) Close() error {
 func (b *backendStub) Terminate(context.Context) error { return b.Close() }
 func (b *backendStub) Reconnectable(err error) bool    { return b.reconnect && err != nil }
 
+func (b *backendStub) isClosed() bool {
+	select {
+	case <-b.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+func staticLauncher(b backend, persistence Persistence) *launcherStub {
+	return &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence, bool) (backend, Persistence, error) {
+		return b, persistence, nil
+	}}
+}
+
 func managerWithLauncher(t *testing.T, launcher backendLauncher, mutate ...func(*Config)) *Manager {
 	t.Helper()
 	directory, err := transcript.NewDirectory(transcript.DirectoryConfig{Root: t.TempDir()})
@@ -117,16 +144,12 @@ func managerWithLauncher(t *testing.T, launcher backendLauncher, mutate ...func(
 func TestTerminateFailureLeavesRunLoopAndAttachmentAlive(t *testing.T) {
 	b := newBackendStub()
 	var terminations atomic.Int32
-	launcher := &launcherStub{
-		startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-			return b, PersistenceTmux, nil
-		},
-		terminateFunc: func(context.Context, SessionSpec, Persistence) error {
-			if terminations.Add(1) == 1 {
-				return errors.New("control connection unavailable")
-			}
-			return nil
-		},
+	launcher := staticLauncher(b, PersistenceTmux)
+	launcher.terminateFunc = func(context.Context, SessionSpec, Persistence) error {
+		if terminations.Add(1) == 1 {
+			return errors.New("control connection unavailable")
+		}
+		return nil
 	}
 	manager := managerWithLauncher(t, launcher)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -165,16 +188,70 @@ func TestTerminateFailureLeavesRunLoopAndAttachmentAlive(t *testing.T) {
 	}
 }
 
+func TestTerminateExitedSessionNeverContactsTheBackend(t *testing.T) {
+	b := newBackendStub()
+	var terminations atomic.Int32
+	launcher := staticLauncher(b, PersistenceTmux)
+	launcher.terminateFunc = func(context.Context, SessionSpec, Persistence) error {
+		terminations.Add(1)
+		return errors.New("host is unreachable")
+	}
+	manager := managerWithLauncher(t, launcher)
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := manager.Create(ctx, SessionSpec{ID: "exited-terminate", Persistence: PersistenceTmux}); err != nil {
+		t.Fatal(err)
+	}
+	waitRunning(t, ctx, manager, "exited-terminate")
+	_ = b.Close()
+	waitState(t, ctx, manager, "exited-terminate", StateExited)
+
+	if err := manager.Terminate(ctx, "exited-terminate"); err != nil {
+		t.Fatalf("Terminate on an exited session = %v, want success without contacting the host", err)
+	}
+	if terminations.Load() != 0 {
+		t.Fatalf("exited session contacted the backend %d time(s)", terminations.Load())
+	}
+	if _, err := manager.Status("exited-terminate"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("Status after Terminate = %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestStopForRestartClosesClientsWithRestartedReason(t *testing.T) {
+	b := newBackendStub()
+	manager := managerWithLauncher(t, staticLauncher(b, PersistenceTmux))
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := manager.Create(ctx, SessionSpec{ID: "restart-stop", Persistence: PersistenceTmux}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := manager.Attach(ctx, "restart-stop", "browser", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitRunning(t, ctx, manager, "restart-stop")
+	if err := manager.StopForRestart(ctx, "restart-stop"); err != nil {
+		t.Fatal(err)
+	}
+	if reason := awaitCloseReason(t, ctx, a); reason != AttachmentRestarted {
+		t.Fatalf("close reason = %q, want restarted", reason)
+	}
+	if _, err := manager.Status("restart-stop"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("Status after StopForRestart = %v, want ErrSessionNotFound", err)
+	}
+	// The replacement execution registers under the same ID.
+	if _, err := manager.Create(ctx, SessionSpec{ID: "restart-stop", Persistence: PersistenceTmux, Generation: 2}); err != nil {
+		t.Fatalf("re-create after StopForRestart: %v", err)
+	}
+}
+
 func TestBlockedWriteDoesNotBlockTerminate(t *testing.T) {
 	b := newBackendStub()
 	b.blockWrite = true
 	b.writeStarted = make(chan struct{})
-	launcher := &launcherStub{
-		startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-			return b, PersistenceTmux, nil
-		},
-	}
-	manager := managerWithLauncher(t, launcher)
+	manager := managerWithLauncher(t, staticLauncher(b, PersistenceTmux))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if _, err := manager.Create(ctx, SessionSpec{ID: "blocked-write", Persistence: PersistenceTmux}); err != nil {
@@ -205,17 +282,17 @@ func TestBlockedWriteDoesNotBlockTerminate(t *testing.T) {
 	}
 }
 
-func TestWriteContextCancelsBlockedBackendWrite(t *testing.T) {
+func TestWriteTimeoutReturnsContextErrorAndKeepsBackendOpen(t *testing.T) {
 	b := newBackendStub()
 	b.blockWrite = true
 	b.writeStarted = make(chan struct{})
-	manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-		return b, PersistenceTmux, nil
-	}})
+	manager := managerWithLauncher(t, staticLauncher(b, PersistenceTmux))
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, _ = manager.Create(ctx, SessionSpec{ID: "write-context", Persistence: PersistenceTmux})
+	if _, err := manager.Create(ctx, SessionSpec{ID: "write-context", Persistence: PersistenceTmux}); err != nil {
+		t.Fatal(err)
+	}
 	a, err := manager.Attach(ctx, "write-context", "browser", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +307,98 @@ func TestWriteContextCancelsBlockedBackendWrite(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
 		t.Fatalf("WriteContext cancellation took %s", elapsed)
+	}
+	// One stuck client must never end the shared session.
+	if b.isClosed() {
+		t.Fatal("input timeout closed the shared backend")
+	}
+	status, err := manager.Status("write-context")
+	if err != nil || status.State != StateRunning {
+		t.Fatalf("status after input timeout = %+v, %v", status, err)
+	}
+}
+
+// blockingResizeBackend blocks the first Resize until released and records
+// every size it is asked to apply.
+type blockingResizeBackend struct {
+	*backendStub
+	release chan struct{}
+	entered chan struct{}
+	once    sync.Once
+
+	mu    sync.Mutex
+	sizes [][2]uint16
+}
+
+func (b *blockingResizeBackend) Resize(cols, rows uint16) error {
+	b.mu.Lock()
+	b.sizes = append(b.sizes, [2]uint16{cols, rows})
+	first := len(b.sizes) == 1
+	b.mu.Unlock()
+	if first {
+		b.once.Do(func() { close(b.entered) })
+		<-b.release
+	}
+	return nil
+}
+
+func (b *blockingResizeBackend) applied() [][2]uint16 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([][2]uint16(nil), b.sizes...)
+}
+
+func TestNewerSizeIsNeverOverwrittenByAnOlderOne(t *testing.T) {
+	b := &blockingResizeBackend{
+		backendStub: newBackendStub(),
+		release:     make(chan struct{}),
+		entered:     make(chan struct{}),
+	}
+	manager := managerWithLauncher(t, staticLauncher(b, PersistenceTmux))
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := manager.Create(ctx, SessionSpec{ID: "resize-order", Persistence: PersistenceTmux, Cols: 120, Rows: 36}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := manager.Attach(ctx, "resize-order", "browser", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The activation resize is the blocked one; the older 200x50 request then
+	// queues behind it while a newer 220x60 arrives.
+	select {
+	case <-b.entered:
+	case <-ctx.Done():
+		t.Fatal("backend activation never applied the launch size")
+	}
+	older := make(chan error, 1)
+	go func() { older <- a.Resize(200, 50) }()
+	time.Sleep(20 * time.Millisecond)
+	newer := make(chan error, 1)
+	go func() { newer <- a.Resize(220, 60) }()
+	time.Sleep(20 * time.Millisecond)
+	close(b.release)
+	if err := <-older; err != nil {
+		t.Fatalf("older resize: %v", err)
+	}
+	if err := <-newer; err != nil {
+		t.Fatalf("newer resize: %v", err)
+	}
+	applied := b.applied()
+	last := applied[len(applied)-1]
+	if last != [2]uint16{220, 60} {
+		t.Fatalf("applied sizes %v end with %v, want [220 60]", applied, last)
+	}
+	for index, size := range applied {
+		if size == [2]uint16{220, 60} {
+			for _, later := range applied[index+1:] {
+				if later != ([2]uint16{220, 60}) {
+					t.Fatalf("older size %v was applied after the newer one: %v", later, applied)
+				}
+			}
+			break
+		}
 	}
 }
 
@@ -264,7 +433,7 @@ func (b *sizeRecordingBackend) Resize(cols, rows uint16) error {
 	return nil
 }
 
-func TestResizeDuringConnectingIsAcceptedReconciledAndRetained(t *testing.T) {
+func TestResizeDuringConnectingIsAcceptedAndReconciled(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	recorder := &sizeRecordingBackend{
@@ -272,7 +441,7 @@ func TestResizeDuringConnectingIsAcceptedReconciledAndRetained(t *testing.T) {
 		resized:     make(chan [2]uint16, 1),
 	}
 	var launchedCols, launchedRows atomic.Int32
-	launcher := &launcherStub{startFunc: func(_ context.Context, spec SessionSpec, _ Persistence) (backend, Persistence, error) {
+	launcher := &launcherStub{startFunc: func(_ context.Context, spec SessionSpec, _ Persistence, _ bool) (backend, Persistence, error) {
 		launchedCols.Store(int32(spec.Cols))
 		launchedRows.Store(int32(spec.Rows))
 		close(entered)
@@ -294,14 +463,6 @@ func TestResizeDuringConnectingIsAcceptedReconciledAndRetained(t *testing.T) {
 	if err := a.Resize(200, 50); err != nil {
 		t.Fatalf("Resize while connecting: %v", err)
 	}
-	s, err := manager.session("connecting-resize")
-	if err != nil {
-		t.Fatal(err)
-	}
-	record := s.record(true)
-	if record.Cols != 200 || record.Rows != 50 {
-		t.Fatalf("runtime persistence snapshot size = %dx%d, want 200x50", record.Cols, record.Rows)
-	}
 	close(release)
 	waitRunning(t, ctx, manager, "connecting-resize")
 	select {
@@ -321,7 +482,7 @@ func TestTerminateUnblocksConcurrentActivationAndResize(t *testing.T) {
 	launchEntered := make(chan struct{})
 	launchRelease := make(chan struct{})
 	b := &closeBlockedResizeBackend{backendStub: newBackendStub(), entered: make(chan struct{})}
-	manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
+	manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence, bool) (backend, Persistence, error) {
 		close(launchEntered)
 		<-launchRelease
 		return b, PersistenceTmux, nil
@@ -368,48 +529,6 @@ func TestTerminateUnblocksConcurrentActivationAndResize(t *testing.T) {
 	}
 }
 
-func TestResizeWaitsOutOlderRepositorySnapshot(t *testing.T) {
-	repository := &orderedSaveRepository{secondStart: make(chan struct{}), release: make(chan struct{})}
-	b := newBackendStub()
-	manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-		return b, PersistenceTmux, nil
-	}}, func(cfg *Config) { cfg.Repository = repository })
-	defer manager.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "resize-save-order", Persistence: PersistenceAuto, Cols: 120, Rows: 36}); err != nil {
-		t.Fatal(err)
-	}
-	a, err := manager.Attach(ctx, "resize-save-order", "browser", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-repository.secondStart:
-	case <-ctx.Done():
-		t.Fatal("resolved-backend save did not start")
-	}
-	resized := make(chan error, 1)
-	go func() { resized <- a.Resize(200, 50) }()
-	select {
-	case err := <-resized:
-		t.Fatalf("Resize returned before the older repository snapshot completed: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(repository.release)
-	if err := <-resized; err != nil {
-		t.Fatal(err)
-	}
-	s, err := manager.session("resize-save-order")
-	if err != nil {
-		t.Fatal(err)
-	}
-	record := s.record(true)
-	if record.Cols != 200 || record.Rows != 50 {
-		t.Fatalf("runtime size after save barrier = %dx%d, want 200x50", record.Cols, record.Rows)
-	}
-}
-
 type finiteReadBackend struct {
 	*backendStub
 	reader *bytes.Reader
@@ -421,9 +540,7 @@ func (*finiteReadBackend) Wait(context.Context) error   { return nil }
 func TestConsumeBoundsLargeOutputFrames(t *testing.T) {
 	data := bytes.Repeat([]byte("wmux-output-"), 10<<10)
 	b := &finiteReadBackend{backendStub: newBackendStub(), reader: bytes.NewReader(data)}
-	manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-		return b, PersistenceNone, nil
-	}})
+	manager := managerWithLauncher(t, staticLauncher(b, PersistenceNone))
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -450,117 +567,121 @@ func TestConsumeBoundsLargeOutputFrames(t *testing.T) {
 	}
 }
 
-type orderedSaveRepository struct {
-	mu          sync.Mutex
-	calls       int
-	records     []SessionRecord
-	secondStart chan struct{}
-	release     chan struct{}
-}
-
-func (r *orderedSaveRepository) SaveSession(_ context.Context, record SessionRecord) error {
-	r.mu.Lock()
-	r.calls++
-	call := r.calls
-	r.mu.Unlock()
-	if call == 2 {
-		close(r.secondStart)
-		<-r.release
-	}
-	r.mu.Lock()
-	r.records = append(r.records, record)
-	r.mu.Unlock()
-	return nil
-}
-
-func (*orderedSaveRepository) ListSessions(context.Context) ([]SessionRecord, error) {
-	return nil, nil
-}
-
-func (*orderedSaveRepository) LoadHost(context.Context, string) (HostSpec, error) {
-	return HostSpec{}, errors.New("unexpected host load")
-}
-
-func TestTerminationCannotBeOverwrittenByOlderActiveSave(t *testing.T) {
-	repository := &orderedSaveRepository{secondStart: make(chan struct{}), release: make(chan struct{})}
-	b := newBackendStub()
-	killStarted := make(chan struct{})
-	manager := managerWithLauncher(t, &launcherStub{
-		startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-			return b, PersistenceTmux, nil
-		},
-		terminateFunc: func(context.Context, SessionSpec, Persistence) error {
-			close(killStarted)
-			return nil
-		},
-	}, func(cfg *Config) { cfg.Repository = repository })
-	defer manager.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "save-order", Persistence: PersistenceAuto}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-repository.secondStart:
-	case <-ctx.Done():
-		t.Fatal("resolved-backend active save did not start")
-	}
-	terminated := make(chan error, 1)
-	go func() { terminated <- manager.Terminate(ctx, "save-order") }()
-	select {
-	case <-killStarted:
-	case <-ctx.Done():
-		t.Fatal("Terminate did not reach the exact backend kill")
-	}
-	close(repository.release)
-	if err := <-terminated; err != nil {
-		t.Fatal(err)
-	}
-	repository.mu.Lock()
-	records := append([]SessionRecord(nil), repository.records...)
-	repository.mu.Unlock()
-	if len(records) < 3 || records[len(records)-1].Active {
-		t.Fatalf("save order ended with an active record: %+v", records)
-	}
-}
-
 type repositoryStub struct {
-	mu    sync.Mutex
-	host  HostSpec
-	loads int
+	mu      sync.Mutex
+	host    HostSpec
+	loads   int
+	records []SessionRecord
 }
 
-func (r *repositoryStub) SaveSession(context.Context, SessionRecord) error { return nil }
 func (r *repositoryStub) ListSessions(context.Context) ([]SessionRecord, error) {
-	return nil, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]SessionRecord(nil), r.records...), nil
 }
+
 func (r *repositoryStub) LoadHost(context.Context, string) (HostSpec, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.loads++
-	return cloneHost(r.host), nil
+	return r.host, nil
 }
+
 func (r *repositoryStub) setHost(host HostSpec) {
 	r.mu.Lock()
 	r.host = host
 	r.mu.Unlock()
 }
+
 func (r *repositoryStub) loadCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.loads
 }
 
-func cloneHost(host HostSpec) HostSpec {
-	copy := host
-	return copy
+func TestRestoreOnlyAttachesAndExitsWhenTheBackendIsGone(t *testing.T) {
+	repository := &repositoryStub{records: []SessionRecord{{
+		ID:                  "restored",
+		Name:                "Restored",
+		Persistence:         PersistenceTmux,
+		ResolvedPersistence: PersistenceTmux,
+		Shell:               "/bin/sh",
+		Args:                []string{"-lc", "make release"},
+		Active:              true,
+		Generation:          4,
+	}}}
+	launcher := &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence, bool) (backend, Persistence, error) {
+		return nil, "", ErrBackendMissing
+	}}
+	manager := managerWithLauncher(t, launcher, func(cfg *Config) { cfg.Repository = repository })
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.Restore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, ctx, manager, "restored", StateExited)
+	// A missing backend must never re-run the session command, and it must not
+	// be retried in the background either.
+	time.Sleep(40 * time.Millisecond)
+	flags := launcher.createFlags()
+	if len(flags) != 1 || flags[0] {
+		t.Fatalf("restore launch flags = %v, want exactly one attach-only launch", flags)
+	}
+	status, err := manager.Status("restored")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Generation != 4 {
+		t.Fatalf("restored status generation = %d, want 4", status.Generation)
+	}
+	if status.LastError == "" {
+		t.Fatalf("restored status hides the missing backend: %+v", status)
+	}
 }
 
-func TestPermanentHostErrorWaitsForRefreshAndReloadsHost(t *testing.T) {
+func TestFirstLaunchCreatesAndEveryReconnectOnlyAttaches(t *testing.T) {
+	first := newBackendStub()
+	first.reconnect = true
+	first.waitErr = errors.New("connection reset")
+	second := newBackendStub()
+	var starts atomic.Int32
+	launcher := &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence, bool) (backend, Persistence, error) {
+		if starts.Add(1) == 1 {
+			return first, PersistenceTmux, nil
+		}
+		return second, PersistenceTmux, nil
+	}}
+	manager := managerWithLauncher(t, launcher)
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := manager.Create(ctx, SessionSpec{ID: "reconnect-attach", Persistence: PersistenceTmux}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Attach(ctx, "reconnect-attach", "browser", 0); err != nil {
+		t.Fatal(err)
+	}
+	waitRunning(t, ctx, manager, "reconnect-attach")
+	_ = first.Close()
+	waitCondition(t, ctx, func() bool { return starts.Load() >= 2 })
+	waitRunning(t, ctx, manager, "reconnect-attach")
+	flags := launcher.createFlags()
+	if len(flags) < 2 || !flags[0] {
+		t.Fatalf("first launch must create: %v", flags)
+	}
+	for index, create := range flags[1:] {
+		if create {
+			t.Fatalf("reconnect %d created a new backend: %v", index+1, flags)
+		}
+	}
+}
+
+func TestPermanentHostErrorWaitsForReconnectAndReloadsHost(t *testing.T) {
 	repository := &repositoryStub{host: HostSpec{ID: "host", Address: "old", User: "user", Fingerprint: "SHA256:test", Credential: PasswordCredential{Password: "old"}}}
 	var starts atomic.Int32
 	launcher := &launcherStub{
-		startFunc: func(_ context.Context, spec SessionSpec, _ Persistence) (backend, Persistence, error) {
+		startFunc: func(_ context.Context, spec SessionSpec, _ Persistence, _ bool) (backend, Persistence, error) {
 			starts.Add(1)
 			if spec.Host.Address == "old" {
 				return nil, "", permanentStartError(errors.New("bad credentials"))
@@ -600,27 +721,93 @@ func TestPermanentHostErrorWaitsForRefreshAndReloadsHost(t *testing.T) {
 	_ = attachment.Close()
 }
 
-func TestDiscardRemovesOnlyInactiveRuntimeWithoutBackendTermination(t *testing.T) {
+func TestReconnectWakesPermanentErrorAndTimedBackoff(t *testing.T) {
+	t.Run("permanent error", func(t *testing.T) {
+		var reachable atomic.Bool
+		launcher := &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence, bool) (backend, Persistence, error) {
+			if !reachable.Load() {
+				return nil, "", permanentStartError(errors.New("host key mismatch"))
+			}
+			return newBackendStub(), PersistenceTmux, nil
+		}}
+		manager := managerWithLauncher(t, launcher)
+		defer manager.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := manager.Create(ctx, SessionSpec{ID: "reconnect-permanent", Persistence: PersistenceTmux}); err != nil {
+			t.Fatal(err)
+		}
+		waitState(t, ctx, manager, "reconnect-permanent", StateError)
+		reachable.Store(true)
+		if err := manager.Reconnect("reconnect-permanent"); err != nil {
+			t.Fatal(err)
+		}
+		waitRunning(t, ctx, manager, "reconnect-permanent")
+	})
+
+	t.Run("timed backoff", func(t *testing.T) {
+		var reachable atomic.Bool
+		launcher := &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence, bool) (backend, Persistence, error) {
+			if !reachable.Load() {
+				return nil, "", errors.New("dial tcp: connection refused")
+			}
+			return newBackendStub(), PersistenceTmux, nil
+		}}
+		// An hour of backoff: only Reconnect can make this session run.
+		manager := managerWithLauncher(t, launcher, func(cfg *Config) {
+			cfg.ReconnectMin = time.Hour
+			cfg.ReconnectMax = time.Hour
+		})
+		defer manager.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := manager.Create(ctx, SessionSpec{ID: "reconnect-backoff", Persistence: PersistenceTmux}); err != nil {
+			t.Fatal(err)
+		}
+		waitState(t, ctx, manager, "reconnect-backoff", StateDisconnected)
+		if _, err := manager.Attach(ctx, "reconnect-backoff", "browser", 0); err != nil {
+			t.Fatal(err)
+		}
+		reachable.Store(true)
+		if err := manager.Reconnect("reconnect-backoff"); err != nil {
+			t.Fatal(err)
+		}
+		waitRunning(t, ctx, manager, "reconnect-backoff")
+	})
+
+	t.Run("unknown session", func(t *testing.T) {
+		manager := managerWithLauncher(t, staticLauncher(newBackendStub(), PersistenceTmux))
+		defer manager.Close()
+		if err := manager.Reconnect("missing"); !errors.Is(err, ErrSessionNotFound) {
+			t.Fatalf("Reconnect on a missing session = %v, want ErrSessionNotFound", err)
+		}
+	})
+}
+
+func TestDiscardWorksInAnyStateAndNeverKillsTheBackend(t *testing.T) {
 	var terminations atomic.Int32
-	manager := managerWithLauncher(t, &launcherStub{
-		startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
+	launcher := &launcherStub{
+		startFunc: func(context.Context, SessionSpec, Persistence, bool) (backend, Persistence, error) {
 			return nil, "", permanentStartError(errors.New("host unavailable"))
 		},
 		terminateFunc: func(context.Context, SessionSpec, Persistence) error {
 			terminations.Add(1)
 			return nil
 		},
-	})
+	}
+	manager := managerWithLauncher(t, launcher)
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, _ = manager.Create(ctx, SessionSpec{ID: "discard-error", Persistence: PersistenceTmux})
+	if _, err := manager.Create(ctx, SessionSpec{ID: "discard-error", Persistence: PersistenceTmux}); err != nil {
+		t.Fatal(err)
+	}
 	waitState(t, ctx, manager, "discard-error", StateError)
 	a, err := manager.Attach(ctx, "discard-error", "browser", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.DiscardContext(ctx, "discard-error"); err != nil {
+	if err := manager.Discard(ctx, "discard-error"); err != nil {
 		t.Fatal(err)
 	}
 	if terminations.Load() != 0 {
@@ -634,22 +821,58 @@ func TestDiscardRemovesOnlyInactiveRuntimeWithoutBackendTermination(t *testing.T
 	}
 
 	runningBackend := newBackendStub()
-	manager.launcher = &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-		return runningBackend, PersistenceTmux, nil
-	}}
-	_, _ = manager.Create(ctx, SessionSpec{ID: "discard-running", Persistence: PersistenceTmux})
+	manager.launcher = staticLauncher(runningBackend, PersistenceTmux)
+	if _, err := manager.Create(ctx, SessionSpec{ID: "discard-running", Persistence: PersistenceTmux}); err != nil {
+		t.Fatal(err)
+	}
 	waitRunning(t, ctx, manager, "discard-running")
-	if err := manager.DiscardContext(ctx, "discard-running"); !errors.Is(err, ErrSessionActive) {
-		t.Fatalf("Discard running session error = %v, want ErrSessionActive", err)
+	if err := manager.Discard(ctx, "discard-running"); err != nil {
+		t.Fatalf("Discard on a running session = %v, want success", err)
+	}
+	if terminations.Load() != 0 {
+		t.Fatal("Discard killed a running persistent backend")
+	}
+	if !runningBackend.isClosed() {
+		t.Fatal("Discard left the data connection attached")
+	}
+	if _, err := manager.Status("discard-running"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("Status after Discard = %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestAttachmentStatesDeliverTheNewestStatus(t *testing.T) {
+	b := newBackendStub()
+	manager := managerWithLauncher(t, staticLauncher(b, PersistenceTmux))
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := manager.Create(ctx, SessionSpec{ID: "states", Persistence: PersistenceTmux, Generation: 7}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := manager.Attach(ctx, "states", "first", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := awaitState(t, ctx, a, func(status SessionStatus) bool { return status.State == StateRunning })
+	if status.Generation != 7 || status.Clients != 1 {
+		t.Fatalf("state event = %+v, want generation 7 and one client", status)
+	}
+	if _, err := manager.Attach(ctx, "states", "second", 0); err != nil {
+		t.Fatal(err)
+	}
+	if status := awaitState(t, ctx, a, func(status SessionStatus) bool { return status.Clients == 2 }); status.State != StateRunning {
+		t.Fatalf("client-count event = %+v", status)
+	}
+	_ = b.Close()
+	if status := awaitState(t, ctx, a, func(status SessionStatus) bool { return status.State == StateExited }); status.State != StateExited {
+		t.Fatalf("exit event = %+v", status)
 	}
 }
 
 func TestAttachmentCloseReasonsAndWriterNotifications(t *testing.T) {
 	t.Run("server shutdown", func(t *testing.T) {
 		b := newBackendStub()
-		manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-			return b, PersistenceTmux, nil
-		}})
+		manager := managerWithLauncher(t, staticLauncher(b, PersistenceTmux))
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_, _ = manager.Create(ctx, SessionSpec{ID: "shutdown-reason", Persistence: PersistenceTmux})
@@ -667,9 +890,7 @@ func TestAttachmentCloseReasonsAndWriterNotifications(t *testing.T) {
 
 	t.Run("natural exit", func(t *testing.T) {
 		b := newBackendStub()
-		manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-			return b, PersistenceNone, nil
-		}})
+		manager := managerWithLauncher(t, staticLauncher(b, PersistenceNone))
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_, _ = manager.Create(ctx, SessionSpec{ID: "exit-reason", Persistence: PersistenceNone})
@@ -687,9 +908,7 @@ func TestAttachmentCloseReasonsAndWriterNotifications(t *testing.T) {
 
 	t.Run("writer takeover", func(t *testing.T) {
 		b := newBackendStub()
-		manager := managerWithLauncher(t, &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-			return b, PersistenceTmux, nil
-		}})
+		manager := managerWithLauncher(t, staticLauncher(b, PersistenceTmux))
 		defer manager.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -718,7 +937,7 @@ func TestLinuxPTYEIOIsTreatedAsCleanExit(t *testing.T) {
 	var starts atomic.Int32
 	b := newBackendStub()
 	b.readErr = syscall.EIO
-	launcher := &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
+	launcher := &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence, bool) (backend, Persistence, error) {
 		starts.Add(1)
 		return b, PersistenceTmux, nil
 	}}
@@ -738,7 +957,7 @@ func TestLinuxPTYEIOIsTreatedAsCleanExit(t *testing.T) {
 func TestCloseContextReturnsAtDeadlineWhenLauncherIgnoresCancellation(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	launcher := &launcherStub{startFunc: func(ctx context.Context, _ SessionSpec, _ Persistence) (backend, Persistence, error) {
+	launcher := &launcherStub{startFunc: func(ctx context.Context, _ SessionSpec, _ Persistence, _ bool) (backend, Persistence, error) {
 		close(entered)
 		<-release
 		return nil, "", ctx.Err()
@@ -766,9 +985,7 @@ func TestAttachmentExposesReplayBoundsAndSinceZeroTruncation(t *testing.T) {
 	log := &fixedLog{oldest: 5, newest: 7}
 	manager, err := NewManager(Config{
 		Transcripts: fixedFactory{log: log},
-		launcher: &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-			return newBackendStub(), PersistenceTmux, nil
-		}},
+		launcher:    staticLauncher(newBackendStub(), PersistenceTmux),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -790,9 +1007,7 @@ func TestTranscriptAppendFailureDoesNotPublishOrAdvanceSequence(t *testing.T) {
 	log := &toggleLog{newest: 3, fail: true}
 	manager, err := NewManager(Config{
 		Transcripts: fixedFactory{log: log},
-		launcher: &launcherStub{startFunc: func(context.Context, SessionSpec, Persistence) (backend, Persistence, error) {
-			return newBackendStub(), PersistenceTmux, nil
-		}},
+		launcher:    staticLauncher(newBackendStub(), PersistenceTmux),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -922,6 +1137,19 @@ func waitState(t *testing.T, ctx context.Context, manager *Manager, id string, w
 	}
 }
 
+func waitCondition(t *testing.T, ctx context.Context, satisfied func() bool) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for !satisfied() {
+		select {
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for condition")
+		case <-ticker.C:
+		}
+	}
+}
+
 func awaitCloseReason(t *testing.T, ctx context.Context, attachment *Attachment) AttachmentCloseReason {
 	t.Helper()
 	select {
@@ -941,5 +1169,23 @@ func awaitWriter(t *testing.T, ctx context.Context, attachment *Attachment) bool
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for writer change")
 		return false
+	}
+}
+
+func awaitState(t *testing.T, ctx context.Context, attachment *Attachment, accept func(SessionStatus) bool) SessionStatus {
+	t.Helper()
+	for {
+		select {
+		case status, ok := <-attachment.States:
+			if !ok {
+				t.Fatal("state channel closed before the expected status")
+			}
+			if accept(status) {
+				return status
+			}
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for a session status")
+			return SessionStatus{}
+		}
 	}
 }

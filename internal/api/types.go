@@ -81,10 +81,10 @@ type sessionInput struct {
 	Persistence string `json:"persistence"`
 }
 
+// sessionPatch carries product metadata only. Terminal dimensions are part of
+// the live attachment and are negotiated over the WebSocket.
 type sessionPatch struct {
 	Name *string `json:"name,omitempty"`
-	Cols *int    `json:"cols,omitempty"`
-	Rows *int    `json:"rows,omitempty"`
 }
 
 func (v *setupInput) normalize() error {

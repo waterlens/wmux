@@ -120,6 +120,18 @@ describe('terminal control protocol', () => {
     expect(parseControlMessage('not json')).toBeNull();
   });
 
+  it('keeps the execution generation and restart reason from lifecycle events', () => {
+    expect(parseControlMessage('{"type":"hello","status":"running","generation":4,"writer":true}')).toMatchObject({
+      type: 'hello',
+      generation: 4,
+      writer: true,
+    });
+    expect(parseControlMessage('{"type":"disconnect","status":"reconnecting","reason":"restarted"}')).toMatchObject({
+      reason: 'restarted',
+    });
+    expect(parseControlMessage('{"type":"state","generation":"4"}')).toEqual({ type: 'state' });
+  });
+
   it('builds an encoded WebSocket replay URL', () => {
     expect(websocketAddress('ssh/a b', 19, { protocol: 'https:', host: 'wmux.example' })).toBe(
       'wss://wmux.example/ws/sessions/ssh%2Fa%20b?since=19',

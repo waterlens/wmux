@@ -7,6 +7,7 @@ export type ControlMessage = {
   writer?: boolean;
   message?: string;
   sequence?: number;
+  generation?: number;
   truncated?: boolean;
 };
 
@@ -205,6 +206,7 @@ export function parseControlMessage(value: string): ControlMessage | null {
       ...(typeof writer === 'boolean' ? { writer } : {}),
       ...(typeof record.message === 'string' ? { message: record.message } : {}),
       ...(typeof record.sequence === 'number' ? { sequence: record.sequence } : {}),
+      ...(typeof record.generation === 'number' ? { generation: record.generation } : {}),
       ...(typeof record.truncated === 'boolean' ? { truncated: record.truncated } : {}),
     };
   } catch {

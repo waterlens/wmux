@@ -89,8 +89,17 @@ func TestRemoteAttachCommandQuotesValues(t *testing.T) {
 		Shell: "/bin/zsh",
 		Args:  []string{"-l", "argument with spaces"},
 		Env:   map[string]string{"SAFE_NAME": "a'b"},
-	}, PersistenceTmux, "wmux-safe")
-	for _, wanted := range []string{"tmux -L 'wmux' -f /dev/null new-session -d", "SAFE_NAME", "/tmp/a", "/bin/zsh", "argument with spaces", "status off", "prefix None", "mouse on", "terminal-features", "xterm*:hyperlinks"} {
+	}, PersistenceTmux, "wmux-safe", true)
+	for _, wanted := range []string{
+		"export SAFE_NAME='a'\"'\"'b'",
+		"export COLORTERM='truecolor'",
+		"tmux -L 'wmux' -f /dev/null set-option -g update-environment",
+		"';' new-session -d",
+		"/tmp/a", "/bin/zsh", "argument with spaces",
+		"status off", "prefix None", "mouse on",
+		"terminal-features", "xterm*:hyperlinks",
+		"terminal-overrides", "xterm*:Tc",
+	} {
 		if !strings.Contains(command, wanted) {
 			t.Fatalf("remote command %q does not contain %q", command, wanted)
 		}
@@ -99,7 +108,7 @@ func TestRemoteAttachCommandQuotesValues(t *testing.T) {
 
 func TestRemoteAttachCommandsUseIsolatedMuxAndExpandHome(t *testing.T) {
 	l := newLauncher(Config{MuxName: "private wmux"})
-	tmux := l.remoteAttachCommand(SessionSpec{Cwd: "~/projects/demo"}, PersistenceTmux, "wmux-demo")
+	tmux := l.remoteAttachCommand(SessionSpec{Cwd: "~/projects/demo"}, PersistenceTmux, "wmux-demo", true)
 	for _, wanted := range []string{
 		"tmux -L 'private-wmux' -f /dev/null",
 		"has-session -t '=wmux-demo'",
@@ -121,7 +130,22 @@ func TestRemoteAttachCommandsUseIsolatedMuxAndExpandHome(t *testing.T) {
 		t.Fatalf("tmux command enables unsafe passthrough: %q", tmux)
 	}
 
-	screen := l.remoteAttachCommand(SessionSpec{Cwd: "~"}, PersistenceScreen, "wmux-demo")
+	// Attach-only launches must never create or re-run anything.
+	attachOnly := l.remoteAttachCommand(SessionSpec{Shell: "/bin/sh", Args: []string{"-lc", "make"}}, PersistenceTmux, "wmux-demo", false)
+	if strings.Contains(attachOnly, "new-session") || strings.Contains(attachOnly, "make") {
+		t.Fatalf("attach-only tmux command can still create a session: %q", attachOnly)
+	}
+	for _, wanted := range []string{"wmux: session wmux-demo no longer exists on this host", ">&2; exit 3", "attach-session -t '=wmux-demo'"} {
+		if !strings.Contains(attachOnly, wanted) {
+			t.Fatalf("attach-only tmux command %q does not contain %q", attachOnly, wanted)
+		}
+	}
+	attachOnlyScreen := l.remoteAttachCommand(SessionSpec{Shell: "/bin/sh", Args: []string{"-lc", "make"}}, PersistenceScreen, "wmux-demo", false)
+	if strings.Contains(attachOnlyScreen, "-dmS") {
+		t.Fatalf("attach-only screen command can still create a session: %q", attachOnlyScreen)
+	}
+
+	screen := l.remoteAttachCommand(SessionSpec{Cwd: "~"}, PersistenceScreen, "wmux-demo", true)
 	for _, wanted := range []string{
 		`screen-private-wmux`,
 		`wmux_screen_rc="$wmux_screen_root/screenrc"`,

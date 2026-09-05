@@ -74,6 +74,7 @@ type Session struct {
 	Backend        string     `json:"backend,omitempty"`
 	BackendName    string     `json:"backendName,omitempty"`
 	Status         string     `json:"status"`
+	Generation     int        `json:"generation"`
 	Cols           int        `json:"cols"`
 	Rows           int        `json:"rows"`
 	CreatedAt      time.Time  `json:"createdAt"`

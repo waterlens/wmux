@@ -16,7 +16,11 @@ type Attachment struct {
 	LatestSequence uint64
 	Frames         <-chan OutputFrame
 	WriterChanges  <-chan bool
-	Closed         <-chan AttachmentCloseReason
+	// States carries every runtime status change - state, client count and
+	// write lease - so adapters can forward it without polling. It has room
+	// for one status: a newer one replaces an unread older one.
+	States <-chan SessionStatus
+	Closed <-chan AttachmentCloseReason
 
 	session  *runtimeSession
 	clientID string
@@ -62,6 +66,7 @@ func (s *runtimeSession) attach(clientID string, after uint64) (*Attachment, err
 		joined:  s.joinCounter,
 		ch:      make(chan OutputFrame, s.manager.cfg.ClientBuffer),
 		writers: make(chan bool, 1),
+		states:  make(chan SessionStatus, 1),
 		closed:  make(chan AttachmentCloseReason, 1),
 	}
 	s.clients[clientID] = client
@@ -72,7 +77,7 @@ func (s *runtimeSession) attach(clientID string, after uint64) (*Attachment, err
 	}
 	s.notifyWritersLocked()
 	writer := s.writerID
-	status := s.statusLocked()
+	status := s.notifyLocked()
 	s.mu.Unlock()
 	s.signal()
 	if writerChanged {
@@ -86,6 +91,7 @@ func (s *runtimeSession) attach(clientID string, after uint64) (*Attachment, err
 		LatestSequence: newest,
 		Frames:         client.ch,
 		WriterChanges:  client.writers,
+		States:         client.states,
 		Closed:         client.closed,
 		session:        s,
 		clientID:       clientID,
@@ -131,44 +137,24 @@ func (a *Attachment) Resize(cols, rows uint16) error {
 		return ErrAttachmentClosed
 	}
 	s := a.session
-	s.resizeMu.Lock()
-	// Wait for any older whole-record repository save to finish before
-	// publishing a newer desired size to the runtime. The HTTP adapter owns
-	// the dedicated size update, but this barrier prevents a stale terminal
-	// SaveSession snapshot from completing after that update and overwriting it.
-	s.saveMu.Lock()
 	s.mu.Lock()
 	if s.clients[a.clientID] != a.client {
 		s.mu.Unlock()
-		s.saveMu.Unlock()
-		s.resizeMu.Unlock()
 		return ErrAttachmentClosed
 	}
 	if s.writerID != a.clientID {
 		s.mu.Unlock()
-		s.saveMu.Unlock()
-		s.resizeMu.Unlock()
 		return ErrNotWriter
 	}
 	if s.closed || s.terminating {
 		s.mu.Unlock()
-		s.saveMu.Unlock()
-		s.resizeMu.Unlock()
 		return ErrUnavailable
 	}
+	// Record the desired size first; applySize then pushes whatever the newest
+	// size is, so a slow older resize can never win over a newer one.
 	s.cols, s.rows = cols, rows
-	b := s.backend
 	s.mu.Unlock()
-	s.saveMu.Unlock()
-	var resizeErr error
-	if b != nil {
-		resizeErr = b.Resize(cols, rows)
-	}
-	s.resizeMu.Unlock()
-	if b == nil {
-		return nil
-	}
-	return resizeErr
+	return s.applySize()
 }
 
 func (a *Attachment) TakeControl() error {
@@ -186,7 +172,7 @@ func (a *Attachment) TakeControl() error {
 	if changed {
 		s.notifyWritersLocked()
 	}
-	status := s.statusLocked()
+	status := s.notifyLocked()
 	s.mu.Unlock()
 	if changed {
 		s.manager.callbacks.OnWriterChanged(s.spec.ID, a.clientID)
@@ -230,7 +216,7 @@ func (s *runtimeSession) detach(clientID string, expected *subscriber, reason At
 		writerChanged = true
 	}
 	writer := s.writerID
-	status := s.statusLocked()
+	status := s.notifyLocked()
 	s.mu.Unlock()
 	s.signal()
 	if writerChanged {

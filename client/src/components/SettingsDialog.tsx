@@ -1,6 +1,6 @@
 import { Info, LogOut, Monitor, RotateCcw, ShieldCheck, TerminalSquare } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
-import { api, errorMessage } from '../api';
+import { api, ApiError, errorMessage } from '../api';
 import { DEFAULT_PREFERENCES } from '../preferences';
 import type { Host, Session, TerminalPreferences, User } from '../types';
 import { Button, ConfirmDialog, Field, Input, Modal, Select } from './UI';
@@ -33,6 +33,7 @@ export function SettingsDialog({
   const [section, setSection] = useState<'terminal' | 'security' | 'about'>('terminal');
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [passwordConfirm, setPasswordConfirm] = useState('');
@@ -40,13 +41,18 @@ export function SettingsDialog({
   const [passwordError, setPasswordError] = useState('');
   const [passwordSaved, setPasswordSaved] = useState(false);
 
+  // A failed logout keeps the confirmation open: the session is still active,
+  // so silently closing the dialog would claim an exit that never happened.
   async function logout() {
     setLoggingOut(true);
+    setLogoutError('');
     try {
       await onLogout();
+      setLogoutOpen(false);
+    } catch (reason) {
+      setLogoutError(errorMessage(reason));
     } finally {
       setLoggingOut(false);
-      setLogoutOpen(false);
     }
   }
 
@@ -79,7 +85,8 @@ export function SettingsDialog({
       setPasswordConfirm('');
       setPasswordSaved(true);
     } catch (reason) {
-      setPasswordError(errorMessage(reason));
+      // 401 here rejects the supplied current password; the session is intact.
+      setPasswordError(reason instanceof ApiError && reason.status === 401 ? '当前密码不正确' : errorMessage(reason));
     } finally {
       setPasswordBusy(false);
     }
@@ -232,7 +239,14 @@ export function SettingsDialog({
                     </span>
                     <strong>{user.username}</strong>
                   </div>
-                  <Button size="sm" disabled={passwordBusy} onClick={() => setLogoutOpen(true)}>
+                  <Button
+                    size="sm"
+                    disabled={passwordBusy}
+                    onClick={() => {
+                      setLogoutError('');
+                      setLogoutOpen(true);
+                    }}
+                  >
                     <LogOut size={15} /> 退出登录
                   </Button>
                 </div>
@@ -339,7 +353,11 @@ export function SettingsDialog({
         description="当前浏览器会断开终端，但所有持久化会话仍会在后台继续运行。"
         confirmLabel="退出登录"
         busy={loggingOut}
-        onCancel={() => setLogoutOpen(false)}
+        error={logoutError}
+        onCancel={() => {
+          setLogoutError('');
+          setLogoutOpen(false);
+        }}
         onConfirm={() => void logout()}
       />
     </>

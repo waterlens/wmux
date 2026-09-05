@@ -286,6 +286,9 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	}
 }
 
+// memorySessionRepository stands in for the application's session table: the
+// test seeds a row, and terminal keeps its Active flag current through the
+// state callback rather than by writing the repository itself.
 type memorySessionRepository struct {
 	mu      sync.Mutex
 	records map[string]SessionRecord
@@ -295,13 +298,12 @@ func newMemorySessionRepository() *memorySessionRepository {
 	return &memorySessionRepository{records: make(map[string]SessionRecord)}
 }
 
-func (r *memorySessionRepository) SaveSession(_ context.Context, record SessionRecord) error {
+func (r *memorySessionRepository) put(record SessionRecord) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record.Args = append([]string(nil), record.Args...)
 	record.Env = cloneMap(record.Env)
 	r.records[record.ID] = record
-	return nil
 }
 
 func (r *memorySessionRepository) ListSessions(context.Context) ([]SessionRecord, error) {
@@ -319,6 +321,21 @@ func (r *memorySessionRepository) ListSessions(context.Context) ([]SessionRecord
 func (*memorySessionRepository) LoadHost(context.Context, string) (HostSpec, error) {
 	return HostSpec{}, errors.New("unexpected host load for local test session")
 }
+
+func (r *memorySessionRepository) OnSessionState(status SessionStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, exists := r.records[status.ID]
+	if !exists {
+		return
+	}
+	record.ResolvedPersistence = status.Persistence
+	record.Active = status.State != StateExited && status.State != StateTerminated
+	r.records[status.ID] = record
+}
+
+func (*memorySessionRepository) OnWriterChanged(string, string)         {}
+func (*memorySessionRepository) OnClientDropped(string, string, string) {}
 
 func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	if os.Getenv("WMUX_TMUX_INTEGRATION") != "1" {
@@ -349,6 +366,7 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	newManager := func() *Manager {
 		manager, err := NewManager(Config{
 			Repository:  repository,
+			Callbacks:   repository,
 			Transcripts: directory,
 			TmuxPath:    tmuxPath,
 			ScreenPath:  filepath.Join(t.TempDir(), "missing-screen"),
@@ -363,9 +381,14 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	firstManager := newManager()
-	if _, err := firstManager.Create(ctx, SessionSpec{
+	spec := SessionSpec{
 		ID: id, Persistence: PersistenceAuto, Shell: "/bin/sh", Args: []string{"-i"}, Cols: 100, Rows: 30,
-	}); err != nil {
+	}
+	repository.put(SessionRecord{
+		ID: id, Persistence: spec.Persistence, Shell: spec.Shell, Args: spec.Args,
+		Cols: spec.Cols, Rows: spec.Rows, Active: true, Generation: 1,
+	})
+	if _, err := firstManager.Create(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	firstAttachment, err := firstManager.Attach(ctx, id, "first-browser", 0)
@@ -433,6 +456,10 @@ func assertIsolatedTmuxInteractionOptions(t *testing.T, path string, l launcher)
 	features, err := global("terminal-features")
 	if err != nil {
 		t.Fatalf("query isolated tmux terminal-features: %v", err)
+	}
+	overrides, err := global("terminal-overrides")
+	if err != nil || !strings.Contains(overrides, "xterm*:Tc") {
+		t.Fatalf("isolated tmux terminal-overrides = %q, %v; want truecolor support", overrides, err)
 	}
 	if count := strings.Count(features, "xterm*:hyperlinks"); count != 1 {
 		// Distinguish an old tmux that safely rejects the feature from a

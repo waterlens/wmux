@@ -106,7 +106,10 @@ Host ${longFixtureName}
     throw new Error(`status endpoint has no build commit: ${JSON.stringify(buildStatus)}`);
   }
 
-  browser = await chromium.launch({ executablePath, headless: true });
+  // This script reads terminal text from the DOM renderer's rows. The WebGL
+  // renderer paints to a canvas instead, so disable WebGL and exercise the
+  // documented DOM fallback path.
+  browser = await chromium.launch({ executablePath, headless: true, args: ['--disable-webgl'] });
   const context = await browser.newContext({ viewport: desktopViewport });
   if (ownedServer) {
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(baseURL).origin });

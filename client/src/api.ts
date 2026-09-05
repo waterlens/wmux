@@ -56,6 +56,7 @@ const sessionSchema = z.object({
   backend: z.string().optional(),
   backendName: z.string().optional(),
   status: z.enum(['connecting', 'running', 'reconnecting', 'detached', 'exited', 'error']),
+  generation: z.number().int().optional(),
   cols: z.number().int(),
   rows: z.number().int(),
   createdAt: z.string(),
@@ -64,6 +65,9 @@ const sessionSchema = z.object({
   exitCode: z.number().int().optional(),
   error: z.string().optional(),
 });
+
+/** DELETE answers 204, or 200 with a warning when the backend could not be confirmed stopped. */
+const deleteSessionSchema = z.object({ warning: z.string().optional() }).optional();
 
 const probeSchema = z.object({
   fingerprint: z.string(),
@@ -151,8 +155,9 @@ export const api = {
     request('/api/login', userSchema, { method: 'POST', body: body({ username, password }) }, false),
   logout: () => request('/api/logout', z.undefined(), { method: 'POST' }),
   me: () => request('/api/me', userSchema),
+  // A rejected current password must not look like an expired session.
   changePassword: (currentPassword: string, newPassword: string) =>
-    request('/api/me/password', z.undefined(), { method: 'POST', body: body({ currentPassword, newPassword }) }),
+    request('/api/me/password', z.undefined(), { method: 'POST', body: body({ currentPassword, newPassword }) }, false),
 
   hosts: () => request('/api/hosts', z.array(hostSchema)),
   sshConfigHosts: () => request('/api/hosts/ssh-config', sshConfigDiscoverySchema),
@@ -173,16 +178,19 @@ export const api = {
   sessions: () => request('/api/sessions', z.array(sessionSchema)),
   createSession: (input: SessionInput) =>
     request('/api/sessions', sessionSchema, { method: 'POST', body: body(input) }),
-  updateSession: (id: string, input: { name?: string; cols?: number; rows?: number }) =>
+  updateSession: (id: string, input: { name: string }) =>
     request(`/api/sessions/${encodeURIComponent(id)}`, sessionSchema, { method: 'PATCH', body: body(input) }),
   deleteSession: (id: string) =>
-    request(`/api/sessions/${encodeURIComponent(id)}`, z.undefined(), { method: 'DELETE' }),
+    request(`/api/sessions/${encodeURIComponent(id)}`, deleteSessionSchema, { method: 'DELETE' }),
   restartSession: (id: string) =>
     request(`/api/sessions/${encodeURIComponent(id)}/restart`, sessionSchema, { method: 'POST' }),
+  reconnectSession: (id: string) =>
+    request(`/api/sessions/${encodeURIComponent(id)}/reconnect`, z.undefined(), { method: 'POST' }),
 };
 
 const publicMessages: Partial<Record<string, string>> = {
   unauthorized: '登录已失效，请重新登录。',
+  not_found: '目标已不存在，请刷新后重试。',
   host_untrusted: '请先验证并信任 SSH 主机指纹。',
   host_in_use: '仍有会话使用这台主机，暂时无法删除。',
   fingerprint_changed: '主机指纹在确认期间发生变化，请重新验证。',

@@ -36,6 +36,7 @@ type AttachmentCloseReason string
 
 const (
 	AttachmentExited         AttachmentCloseReason = "exited"
+	AttachmentRestarted      AttachmentCloseReason = "restarted"
 	AttachmentServerShutdown AttachmentCloseReason = "server_shutdown"
 	AttachmentEvicted        AttachmentCloseReason = "evicted"
 	AttachmentClientClosed   AttachmentCloseReason = "client_closed"
@@ -49,7 +50,11 @@ var (
 	ErrNotWriter        = errors.New("terminal: client does not hold the write lease")
 	ErrAttachmentClosed = errors.New("terminal: attachment is closed")
 	ErrUnavailable      = errors.New("terminal: backend is unavailable")
-	ErrSessionActive    = errors.New("terminal: session is still active")
+
+	// ErrBackendMissing reports that the named tmux/screen session this
+	// runtime attaches to is gone. It is never reconnectable and never
+	// re-runs the session command.
+	ErrBackendMissing = errors.New("terminal: backend session no longer exists")
 )
 
 // Credential deliberately exposes no secret serialization contract. Session
@@ -96,6 +101,11 @@ type SessionSpec struct {
 	Host        *HostSpec // nil means a PTY on the wmux host.
 	Persistence Persistence
 
+	// Generation is the execution number owned by the application's session
+	// row. Runtime state callbacks carry it back so a callback from a stopped
+	// execution cannot overwrite the state of a newer one.
+	Generation uint64
+
 	Shell string
 	Args  []string
 	Cwd   string
@@ -120,20 +130,20 @@ type SessionRecord struct {
 	Cols                uint16
 	Rows                uint16
 	Active              bool
-	CreatedAt           time.Time
+	Generation          uint64
 }
 
 // Repository is implemented by the application's storage layer. LoadHost is
 // intentionally separate from ListSessions so credential handling stays in the
 // host repository instead of being serialized into SessionRecord.
 type Repository interface {
-	SaveSession(ctx context.Context, record SessionRecord) error
 	ListSessions(ctx context.Context) ([]SessionRecord, error)
 	LoadHost(ctx context.Context, hostID string) (HostSpec, error)
 }
 
 type SessionStatus struct {
 	ID           string
+	Generation   uint64
 	State        SessionState
 	Persistence  Persistence
 	WriterID     string
@@ -143,7 +153,8 @@ type SessionStatus struct {
 }
 
 // Callbacks run after runtime locks are released. Implementations should return
-// promptly; durable state belongs in Repository.
+// promptly. OnSessionState is the only persistence point for runtime state:
+// the runtime itself never writes Repository.
 type Callbacks interface {
 	OnSessionState(status SessionStatus)
 	OnWriterChanged(sessionID, clientID string)

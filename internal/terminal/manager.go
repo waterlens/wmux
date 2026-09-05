@@ -56,8 +56,11 @@ func NewManager(cfg Config) (*Manager, error) {
 	}, nil
 }
 
-// Create persists metadata, starts one backend connection, and makes it
-// available for any number of browser attachments.
+// Create registers a runtime for a session row the application already
+// persisted, and makes it available for any number of browser attachments.
+// Only this first launch may create the tmux/screen session; every later
+// connection attempt attaches to it. Create never writes Repository: all
+// durable state flows through Callbacks.OnSessionState.
 func (m *Manager) Create(ctx context.Context, spec SessionSpec) (SessionStatus, error) {
 	spec = cloneSpec(spec)
 	if err := validateSpec(spec); err != nil {
@@ -82,13 +85,7 @@ func (m *Manager) Create(ctx context.Context, spec SessionSpec) (SessionStatus, 
 	if spec.Persistence != PersistenceAuto {
 		resolved = spec.Persistence
 	}
-	s := newRuntimeSession(m, spec, resolved, log, true, time.Now().UTC())
-	if m.cfg.Repository != nil {
-		if err := m.cfg.Repository.SaveSession(ctx, s.record(true)); err != nil {
-			_ = log.Close()
-			return SessionStatus{}, fmt.Errorf("terminal: save session: %w", err)
-		}
-	}
+	s := newRuntimeSession(m, spec, resolved, log, true)
 
 	m.mu.Lock()
 	if m.closed {
@@ -107,8 +104,9 @@ func (m *Manager) Create(ctx context.Context, spec SessionSpec) (SessionStatus, 
 	return s.status(), nil
 }
 
-// Restore loads all repository records. Active persistent sessions reconnect;
-// inactive/exited sessions remain attachable for transcript replay.
+// Restore reconnects to the backends of active repository records. It only
+// ever attaches: a session whose tmux/screen backend is gone becomes exited
+// instead of running its command a second time.
 func (m *Manager) Restore(ctx context.Context) error {
 	if m.cfg.Repository == nil {
 		return nil
@@ -131,6 +129,7 @@ func (m *Manager) restoreOne(ctx context.Context, record SessionRecord) error {
 		ID:          record.ID,
 		Name:        record.Name,
 		Persistence: record.Persistence,
+		Generation:  record.Generation,
 		Shell:       record.Shell,
 		Args:        append([]string(nil), record.Args...),
 		Cwd:         record.Cwd,
@@ -156,7 +155,7 @@ func (m *Manager) restoreOne(ctx context.Context, record SessionRecord) error {
 	if spec.Persistence == PersistenceNone || record.ResolvedPersistence == PersistenceNone {
 		active = false
 	}
-	s := newRuntimeSession(m, spec, record.ResolvedPersistence, log, active, record.CreatedAt)
+	s := newRuntimeSession(m, spec, record.ResolvedPersistence, log, false)
 
 	m.mu.Lock()
 	if m.closed {
@@ -175,9 +174,6 @@ func (m *Manager) restoreOne(ctx context.Context, record SessionRecord) error {
 		s.start()
 	} else {
 		s.markDormant()
-		if record.Active {
-			s.save(false)
-		}
 	}
 	return nil
 }
@@ -201,9 +197,9 @@ func (m *Manager) Status(sessionID string) (SessionStatus, error) {
 	return s.status(), nil
 }
 
-// RefreshHost wakes sessions waiting on a permanent host configuration error.
-// The next SSH connection attempt reloads the HostSpec and credentials from
-// Repository. Running connections are left undisturbed.
+// RefreshHost retries every session of one host immediately, whether it is
+// waiting on a permanent configuration error or on a reconnect backoff. The
+// next attempt reloads the HostSpec and credentials from Repository.
 func (m *Manager) RefreshHost(hostID string) int {
 	m.mu.RLock()
 	sessions := make([]*runtimeSession, 0, len(m.sessions))
@@ -214,54 +210,54 @@ func (m *Manager) RefreshHost(hostID string) int {
 	woken := 0
 	for _, session := range sessions {
 		if session.hostID() == hostID {
-			session.requestRefresh()
+			session.requestRetry()
 			woken++
 		}
 	}
 	return woken
 }
 
-// Refresh retries one session after a permanent local or remote launch error.
-func (m *Manager) Refresh(sessionID string) error {
+// Reconnect retries one session's backend connection immediately.
+func (m *Manager) Reconnect(sessionID string) error {
 	s, err := m.session(sessionID)
 	if err != nil {
 		return err
 	}
-	s.requestRefresh()
+	s.requestRetry()
 	return nil
 }
 
-// Terminate is the only Manager operation that kills the named tmux/screen or
-// direct shell. It removes the runtime instance but intentionally does not
-// delete application metadata or transcript files; the caller controls that
-// transaction after this method succeeds.
+// Terminate kills the named tmux/screen or direct shell and removes the
+// runtime. A runtime that already exited is terminated without contacting the
+// host at all, so an unreachable host cannot block deletion. A failed kill
+// keeps the runtime attachable and returns the error. Application metadata and
+// transcript files are the caller's transaction.
 func (m *Manager) Terminate(ctx context.Context, sessionID string) error {
+	return m.stop(ctx, sessionID, AttachmentExited)
+}
+
+// StopForRestart is Terminate with a close reason that tells browsers to
+// reconnect to the replacement session instead of reporting an exit.
+func (m *Manager) StopForRestart(ctx context.Context, sessionID string) error {
+	return m.stop(ctx, sessionID, AttachmentRestarted)
+}
+
+func (m *Manager) stop(ctx context.Context, sessionID string, reason AttachmentCloseReason) error {
 	s, err := m.session(sessionID)
 	if err != nil {
 		return err
 	}
-	err = s.terminate(ctx)
-	if err == nil {
-		m.mu.Lock()
-		if m.sessions[sessionID] == s {
-			delete(m.sessions, sessionID)
-		}
-		m.mu.Unlock()
+	if err := s.stop(ctx, reason); err != nil {
+		return err
 	}
-	return err
+	m.forget(sessionID, s)
+	return nil
 }
 
-// Discard forgets an exited session, or one stopped at a permanent launch
-// error, without contacting or killing its configured backend. It is intended
-// for deleting inactive metadata when the remote host is no longer reachable.
-func (m *Manager) Discard(sessionID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.ShutdownTimeout)
-	defer cancel()
-	return m.DiscardContext(ctx, sessionID)
-}
-
-// DiscardContext is Discard with a caller-provided cleanup deadline.
-func (m *Manager) DiscardContext(ctx context.Context, sessionID string) error {
+// Discard forgets a runtime in any state without contacting or killing its
+// backend. It is how metadata is removed when the remote host is unreachable;
+// a persistent tmux/screen session deliberately keeps running.
+func (m *Manager) Discard(ctx context.Context, sessionID string) error {
 	s, err := m.session(sessionID)
 	if err != nil {
 		return err
@@ -269,11 +265,7 @@ func (m *Manager) DiscardContext(ctx context.Context, sessionID string) error {
 	if err := s.discard(ctx); err != nil {
 		return err
 	}
-	m.mu.Lock()
-	if m.sessions[sessionID] == s {
-		delete(m.sessions, sessionID)
-	}
-	m.mu.Unlock()
+	m.forget(sessionID, s)
 	return nil
 }
 
@@ -336,11 +328,20 @@ func (m *Manager) session(id string) (*runtimeSession, error) {
 	return s, nil
 }
 
+func (m *Manager) forget(id string, s *runtimeSession) {
+	m.mu.Lock()
+	if m.sessions[id] == s {
+		delete(m.sessions, id)
+	}
+	m.mu.Unlock()
+}
+
 type subscriber struct {
 	id      string
 	joined  uint64
 	ch      chan OutputFrame
 	writers chan bool
+	states  chan SessionStatus
 	closed  chan AttachmentCloseReason
 }
 
@@ -349,16 +350,15 @@ type runtimeSession struct {
 	spec    SessionSpec
 	log     transcript.Log
 
-	ctx     context.Context
-	cancel  context.CancelFunc
-	done    chan struct{}
-	wake    chan struct{}
-	refresh chan struct{}
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	wake   chan struct{}
+	retry  chan struct{}
 
 	mu          sync.Mutex
 	operationMu sync.Mutex
-	resizeMu    sync.Mutex
-	saveMu      sync.Mutex
+	sizeMu      sync.Mutex
 	state       SessionState
 	lastErr     string
 	resolved    Persistence
@@ -369,39 +369,32 @@ type runtimeSession struct {
 	lastSeq     uint64
 	cols        uint16
 	rows        uint16
+	created     bool
 	started     bool
 	terminating bool
 	closed      bool
-	createdAt   time.Time
 }
 
-func newRuntimeSession(manager *Manager, spec SessionSpec, resolved Persistence, log transcript.Log, active bool, createdAt time.Time) *runtimeSession {
+func newRuntimeSession(manager *Manager, spec SessionSpec, resolved Persistence, log transcript.Log, created bool) *runtimeSession {
 	ctx, cancel := context.WithCancel(context.Background())
 	_, newest := log.Bounds()
 	cols, rows := terminalSize(spec)
-	state := StateConnecting
-	if !active {
-		state = StateExited
-	}
-	if createdAt.IsZero() {
-		createdAt = time.Now().UTC()
-	}
 	return &runtimeSession{
-		manager:   manager,
-		spec:      spec,
-		log:       log,
-		ctx:       ctx,
-		cancel:    cancel,
-		done:      make(chan struct{}),
-		wake:      make(chan struct{}, 1),
-		refresh:   make(chan struct{}, 1),
-		state:     state,
-		resolved:  resolved,
-		clients:   make(map[string]*subscriber),
-		lastSeq:   newest,
-		cols:      cols,
-		rows:      rows,
-		createdAt: createdAt,
+		manager:  manager,
+		spec:     spec,
+		log:      log,
+		ctx:      ctx,
+		cancel:   cancel,
+		done:     make(chan struct{}),
+		wake:     make(chan struct{}, 1),
+		retry:    make(chan struct{}, 1),
+		state:    StateConnecting,
+		resolved: resolved,
+		clients:  make(map[string]*subscriber),
+		lastSeq:  newest,
+		cols:     cols,
+		rows:     rows,
+		created:  created,
 	}
 }
 
@@ -416,19 +409,26 @@ func (s *runtimeSession) start() {
 	go s.run()
 }
 
+// markDormant registers an already finished session. It stays attachable for
+// transcript replay but never contacts a backend.
 func (s *runtimeSession) markDormant() {
 	s.mu.Lock()
 	if !s.started {
 		s.started = true
 		close(s.done)
 	}
+	s.state = StateExited
+	status := s.notifyLocked()
 	s.mu.Unlock()
-	s.manager.callbacks.OnSessionState(s.status())
+	s.manager.callbacks.OnSessionState(status)
 }
 
 func (s *runtimeSession) run() {
 	defer close(s.done)
-	everRan := false
+	// Only a freshly created session may create its backend, and only until
+	// one launch succeeds. Everything after that - reconnects and restores -
+	// attaches, so a command that already finished is never run again.
+	create := s.created
 	attempt := 0
 	for {
 		if !s.waitIfTerminating() {
@@ -437,7 +437,7 @@ func (s *runtimeSession) run() {
 		s.setState(StateConnecting, nil)
 		spec, err := s.launchSpec(s.ctx)
 		if err != nil {
-			if !s.handleStartError(err, everRan, &attempt) {
+			if !s.handleStartError(err, &attempt) {
 				return
 			}
 			continue
@@ -448,9 +448,9 @@ func (s *runtimeSession) run() {
 			requested = spec.Persistence
 		}
 		s.mu.Unlock()
-		b, resolved, err := s.manager.launcher.start(s.ctx, spec, requested)
+		b, resolved, err := s.manager.launcher.start(s.ctx, spec, requested, create)
 		if err != nil {
-			if !s.handleStartError(err, everRan, &attempt) {
+			if !s.handleStartError(err, &attempt) {
 				return
 			}
 			continue
@@ -459,13 +459,9 @@ func (s *runtimeSession) run() {
 			_ = b.Close()
 			return
 		}
-		everRan = true
+		create = false
 		attempt = 0
-		resolvedChanged, resizeErr := s.activateBackend(b, resolved, spec.Cols, spec.Rows)
-		if resolvedChanged {
-			s.save(true)
-		}
-		if resizeErr != nil {
+		if resizeErr := s.activateBackend(b, resolved); resizeErr != nil {
 			_ = b.Close()
 			if !s.waitIfTerminating() {
 				return
@@ -501,7 +497,7 @@ func (s *runtimeSession) run() {
 		if backendErr == nil && readErr != nil && !isTerminalEOF(readErr) {
 			backendErr = readErr
 		}
-		if b.Reconnectable(backendErr) {
+		if !errors.Is(backendErr, ErrBackendMissing) && b.Reconnectable(backendErr) {
 			s.setState(StateDisconnected, backendErr)
 			if s.waitForRetry(attempt) {
 				attempt++
@@ -514,62 +510,81 @@ func (s *runtimeSession) run() {
 	}
 }
 
-// activateBackend closes the gap between the immutable launch snapshot and
-// resize requests received while launcher.start is in progress. resizeMu
-// orders this reconciliation with Attachment.Resize, so an older size can
-// never be applied after a newer one.
-func (s *runtimeSession) activateBackend(b backend, resolved Persistence, launchCols, launchRows uint16) (bool, error) {
-	s.resizeMu.Lock()
-	defer s.resizeMu.Unlock()
+// activateBackend publishes a freshly launched backend and reconciles the size
+// requested while launcher.start was still running.
+func (s *runtimeSession) activateBackend(b backend, resolved Persistence) error {
 	s.mu.Lock()
 	if err := s.ctx.Err(); err != nil {
 		s.mu.Unlock()
-		return false, err
+		return err
 	}
 	if s.closed {
 		s.mu.Unlock()
-		return false, ErrClosed
+		return ErrClosed
 	}
-	resolvedChanged := s.resolved != resolved
 	s.resolved = resolved
 	s.backend = b
 	s.lastErr = ""
-	cols, rows := s.cols, s.rows
 	s.mu.Unlock()
-	if cols == launchCols && rows == launchRows {
-		return resolvedChanged, nil
-	}
-	if err := b.Resize(cols, rows); err != nil {
+	if err := s.applySize(); err != nil {
 		s.mu.Lock()
 		if s.backend == b {
 			s.backend = nil
 		}
 		s.mu.Unlock()
-		return resolvedChanged, fmt.Errorf("terminal: apply current size %dx%d: %w", cols, rows, err)
+		return err
 	}
-	return resolvedChanged, nil
+	return nil
 }
 
-func (s *runtimeSession) handleStartError(err error, everRan bool, attempt *int) bool {
+// applySize pushes the newest requested size to the live backend. sizeMu
+// serializes concurrent callers and the size is always re-read inside it, so
+// an older size can never land after a newer one.
+func (s *runtimeSession) applySize() error {
+	s.sizeMu.Lock()
+	defer s.sizeMu.Unlock()
+	s.mu.Lock()
+	unavailable := s.closed || s.terminating
+	b := s.backend
+	cols, rows := s.cols, s.rows
+	s.mu.Unlock()
+	if unavailable {
+		return ErrUnavailable
+	}
+	if b == nil {
+		return nil
+	}
+	if err := b.Resize(cols, rows); err != nil {
+		return fmt.Errorf("terminal: apply current size %dx%d: %w", cols, rows, err)
+	}
+	return nil
+}
+
+// handleStartError reports whether the run loop should try again.
+func (s *runtimeSession) handleStartError(err error, attempt *int) bool {
 	if s.ctx.Err() != nil {
 		return false
 	}
 	if !s.waitIfTerminating() {
 		return false
 	}
+	if errors.Is(err, ErrBackendMissing) {
+		s.finishExited(err)
+		return false
+	}
 	if isPermanentStartError(err) {
+		// A bad credential or missing tool repeats forever. Wait for an
+		// explicit Reconnect or RefreshHost instead of burning the host.
 		s.setState(StateError, err)
-		if !s.waitForRefresh() {
+		select {
+		case <-s.ctx.Done():
 			return false
+		case <-s.retry:
 		}
 		*attempt = 0
 		return true
 	}
 	s.setState(StateDisconnected, err)
-	if everRan && !s.persistent() {
-		s.finishExited(err)
-		return false
-	}
 	if !s.waitForRetry(*attempt) {
 		return false
 	}
@@ -627,15 +642,6 @@ func (s *runtimeSession) waitIfTerminating() bool {
 	}
 }
 
-func (s *runtimeSession) waitForRefresh() bool {
-	select {
-	case <-s.ctx.Done():
-		return false
-	case <-s.refresh:
-		return true
-	}
-}
-
 func (s *runtimeSession) consume(b backend) error {
 	buffer := make([]byte, 32<<10)
 	for {
@@ -658,8 +664,9 @@ func (s *runtimeSession) publish(data []byte) {
 	sequence, err := s.log.Append(copyOfData)
 	if err != nil {
 		s.lastErr = err.Error()
+		status := s.notifyLocked()
 		s.mu.Unlock()
-		s.manager.callbacks.OnSessionState(s.status())
+		s.manager.callbacks.OnSessionState(status)
 		s.signal()
 		return
 	}
@@ -685,6 +692,10 @@ func (s *runtimeSession) publish(data []byte) {
 		s.notifyWritersLocked()
 	}
 	writer := s.writerID
+	var status SessionStatus
+	if len(dropped) != 0 {
+		status = s.notifyLocked()
+	}
 	s.mu.Unlock()
 	for _, id := range dropped {
 		s.manager.callbacks.OnClientDropped(s.spec.ID, id, "output buffer is full")
@@ -693,11 +704,14 @@ func (s *runtimeSession) publish(data []byte) {
 		s.manager.callbacks.OnWriterChanged(s.spec.ID, writer)
 	}
 	if len(dropped) != 0 {
-		s.manager.callbacks.OnSessionState(s.status())
+		s.manager.callbacks.OnSessionState(status)
 	}
 	s.signal()
 }
 
+// waitForRetry blocks until the next connection attempt should run: an
+// explicit Reconnect at any time, a timed backoff while browsers are watching,
+// or the first attachment when nobody is.
 func (s *runtimeSession) waitForRetry(attempt int) bool {
 	for {
 		if s.ctx.Err() != nil {
@@ -710,6 +724,8 @@ func (s *runtimeSession) waitForRetry(attempt int) bool {
 			select {
 			case <-s.ctx.Done():
 				return false
+			case <-s.retry:
+				return true
 			case <-s.wake:
 				continue
 			}
@@ -717,14 +733,13 @@ func (s *runtimeSession) waitForRetry(attempt int) bool {
 		timer := time.NewTimer(reconnectDelay(s.manager.cfg.ReconnectMin, s.manager.cfg.ReconnectMax, attempt))
 		select {
 		case <-s.ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
+			stopTimer(timer)
 			return false
+		case <-s.retry:
+			stopTimer(timer)
+			return true
 		case <-s.wake:
-			if !timer.Stop() {
-				<-timer.C
-			}
+			stopTimer(timer)
 			continue
 		case <-timer.C:
 			return true
@@ -732,10 +747,15 @@ func (s *runtimeSession) waitForRetry(attempt int) bool {
 	}
 }
 
+func stopTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		<-timer.C
+	}
+}
+
 func (s *runtimeSession) finishExited(err error) {
 	s.setState(StateExited, err)
 	s.closeClients(AttachmentExited)
-	s.save(false)
 }
 
 func (s *runtimeSession) setState(state SessionState, err error) {
@@ -750,7 +770,7 @@ func (s *runtimeSession) setState(state SessionState, err error) {
 	} else if err == nil {
 		s.lastErr = ""
 	}
-	status := s.statusLocked()
+	status := s.notifyLocked()
 	s.mu.Unlock()
 	s.manager.callbacks.OnSessionState(status)
 }
@@ -768,6 +788,7 @@ func (s *runtimeSession) statusLocked() SessionStatus {
 	}
 	return SessionStatus{
 		ID:           s.spec.ID,
+		Generation:   s.spec.Generation,
 		State:        s.state,
 		Persistence:  persistence,
 		WriterID:     s.writerID,
@@ -777,51 +798,26 @@ func (s *runtimeSession) statusLocked() SessionStatus {
 	}
 }
 
-func (s *runtimeSession) record(active bool) SessionRecord {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || s.state == StateExited || s.state == StateTerminated {
-		active = false
+// notifyLocked snapshots the runtime state and hands it to every attached
+// client. Each subscriber keeps only the newest status, so a slow reader sees
+// current state instead of a queue of stale ones.
+func (s *runtimeSession) notifyLocked() SessionStatus {
+	status := s.statusLocked()
+	for _, client := range s.clients {
+		select {
+		case client.states <- status:
+		default:
+			select {
+			case <-client.states:
+			default:
+			}
+			select {
+			case client.states <- status:
+			default:
+			}
+		}
 	}
-	hostID := ""
-	if s.spec.Host != nil {
-		hostID = s.spec.Host.ID
-	}
-	return SessionRecord{
-		ID:                  s.spec.ID,
-		Name:                s.spec.Name,
-		HostID:              hostID,
-		Persistence:         s.spec.Persistence,
-		ResolvedPersistence: s.resolved,
-		Shell:               s.spec.Shell,
-		Args:                append([]string(nil), s.spec.Args...),
-		Cwd:                 s.spec.Cwd,
-		Env:                 cloneMap(s.spec.Env),
-		Cols:                s.cols,
-		Rows:                s.rows,
-		Active:              active,
-		CreatedAt:           s.createdAt,
-	}
-}
-
-func (s *runtimeSession) save(active bool) {
-	if s.manager.cfg.Repository == nil {
-		return
-	}
-	// Preserve write order for this session. In particular, an older
-	// SaveSession(active=true) may not complete after termination's inactive
-	// record and resurrect the session on the next process start.
-	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := s.manager.cfg.Repository.SaveSession(ctx, s.record(active)); err != nil {
-		s.mu.Lock()
-		s.lastErr = err.Error()
-		status := s.statusLocked()
-		s.mu.Unlock()
-		s.manager.callbacks.OnSessionState(status)
-	}
+	return status
 }
 
 func (s *runtimeSession) signal() {
@@ -831,9 +827,9 @@ func (s *runtimeSession) signal() {
 	}
 }
 
-func (s *runtimeSession) requestRefresh() {
+func (s *runtimeSession) requestRetry() {
 	select {
-	case s.refresh <- struct{}{}:
+	case s.retry <- struct{}{}:
 	default:
 	}
 }
@@ -845,15 +841,6 @@ func (s *runtimeSession) hostID() string {
 		return ""
 	}
 	return s.spec.Host.ID
-}
-
-func (s *runtimeSession) persistent() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.resolved == "" {
-		return s.spec.Persistence != PersistenceNone
-	}
-	return s.resolved != PersistenceNone
 }
 
 func (s *runtimeSession) assignWriterLocked() {
@@ -893,6 +880,7 @@ func (s *runtimeSession) closeSubscriberLocked(client *subscriber, reason Attach
 	}
 	close(client.closed)
 	close(client.writers)
+	close(client.states)
 	close(client.ch)
 }
 
@@ -916,99 +904,120 @@ func (s *runtimeSession) closeClients(reason AttachmentCloseReason) {
 	}
 }
 
-func (s *runtimeSession) terminate(ctx context.Context) error {
+// stop kills the backend, removes the runtime and closes every client with
+// reason. Terminate and StopForRestart differ only in that reason.
+func (s *runtimeSession) stop(ctx context.Context, reason AttachmentCloseReason) error {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return ErrClosed
+		return nil
 	}
-	previousState := s.state
-	s.terminating = true
-	s.state = StateTerminating
-	b := s.backend
-	resolved := s.resolved
-	status := s.statusLocked()
+	previous := s.state
+	// An exited or terminated runtime has no backend left to contact, so an
+	// unreachable host can never block deleting or restarting it.
+	kill := previous != StateExited && previous != StateTerminated
+	var b backend
+	var resolved Persistence
+	var status SessionStatus
+	if kill {
+		s.terminating = true
+		s.state = StateTerminating
+		b, resolved = s.backend, s.resolved
+		status = s.notifyLocked()
+	}
 	s.mu.Unlock()
-	s.manager.callbacks.OnSessionState(status)
-
-	spec, specErr := s.launchSpec(ctx)
-	var killErr error
-	if specErr != nil {
-		killErr = specErr
-	} else if resolved != "" && resolved != PersistenceNone && resolved != PersistenceAuto {
-		// Use a separate control connection/process. The live data backend stays
-		// intact if this fails, so its run loop can continue or reconnect.
-		killErr = s.manager.launcher.terminate(ctx, spec, resolved)
-	} else if b != nil {
-		killErr = b.Terminate(ctx)
-	}
-	if killErr != nil {
-		s.mu.Lock()
-		s.terminating = false
-		if s.backend != nil {
-			s.state = StateRunning
-		} else if previousState == StateError {
-			s.state = StateError
-		} else if previousState == StateExited {
-			s.state = StateExited
-		} else {
-			s.state = StateDisconnected
-		}
-		s.lastErr = killErr.Error()
-		status = s.statusLocked()
-		s.mu.Unlock()
-		s.signal()
+	if kill {
 		s.manager.callbacks.OnSessionState(status)
-		return killErr
+		if err := s.killBackend(ctx, b, resolved); err != nil {
+			s.abortStop(previous, err)
+			return err
+		}
 	}
+	s.finishStop(reason)
+	return nil
+}
 
-	// The destructive control operation succeeded. Only now stop the run loop
-	// and detach its data connection.
+func (s *runtimeSession) killBackend(ctx context.Context, b backend, resolved Persistence) error {
+	spec, err := s.launchSpec(ctx)
+	if err != nil {
+		return err
+	}
+	if resolved != "" && resolved != PersistenceNone && resolved != PersistenceAuto {
+		// Use a separate control connection/process. The live data backend
+		// stays intact if this fails, so its run loop can continue.
+		return s.manager.launcher.terminate(ctx, spec, resolved)
+	}
+	if b != nil {
+		return b.Terminate(ctx)
+	}
+	return nil
+}
+
+// abortStop restores an attachable runtime after a failed kill. Nothing was
+// destroyed, so nothing may be torn down.
+func (s *runtimeSession) abortStop(previous SessionState, err error) {
+	s.mu.Lock()
+	s.terminating = false
+	switch {
+	case s.backend != nil:
+		s.state = StateRunning
+	case previous == StateError, previous == StateExited:
+		s.state = previous
+	default:
+		s.state = StateDisconnected
+	}
+	s.lastErr = err.Error()
+	status := s.notifyLocked()
+	s.mu.Unlock()
+	s.signal()
+	s.manager.callbacks.OnSessionState(status)
+}
+
+// finishStop ends the run loop, detaches the data connection, closes clients
+// and releases the transcript after a successful destructive operation.
+func (s *runtimeSession) finishStop(reason AttachmentCloseReason) {
+	s.mu.Lock()
+	b := s.backend
+	started := s.started
 	s.cancel()
+	s.mu.Unlock()
 	if b != nil {
 		_ = b.Close()
 	}
-	s.closeClients(AttachmentExited)
+	s.closeClients(reason)
 	s.signal()
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), s.manager.cfg.ShutdownTimeout)
-	defer cleanupCancel()
-	s.mu.Lock()
-	started := s.started
-	s.mu.Unlock()
 	if started {
+		ctx, cancel := context.WithTimeout(context.Background(), s.manager.cfg.ShutdownTimeout)
+		defer cancel()
 		select {
 		case <-s.done:
-		case <-cleanupCtx.Done():
+		case <-ctx.Done():
 			// The destructive operation already succeeded, so a tardy cleanup
 			// must not turn this into an undeletable runtime. Real backends are
-			// cancellable; this bound also protects against faulty implementations.
+			// cancellable; this bound also protects against faulty ones.
 		}
 	}
 	s.mu.Lock()
 	s.state = StateTerminated
 	s.closed = true
 	s.backend = nil
-	status = s.statusLocked()
+	status := s.statusLocked()
 	s.mu.Unlock()
 	s.manager.callbacks.OnSessionState(status)
-	s.save(false)
 	_ = s.log.Close()
-	return nil
 }
 
+// discard forgets a runtime in any state without killing its backend: the run
+// loop stops, the data connection detaches and the transcript is released.
 func (s *runtimeSession) discard(ctx context.Context) error {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return ErrClosed
-	}
-	if s.state != StateExited && s.state != StateError {
-		s.mu.Unlock()
-		return ErrSessionActive
+		return nil
 	}
 	s.closed = true
 	b := s.backend
@@ -1048,7 +1057,6 @@ func (s *runtimeSession) shutdown(ctx context.Context) error {
 	s.signal()
 	s.mu.Lock()
 	started := s.started
-	resolved := s.resolved
 	s.mu.Unlock()
 	if started {
 		select {
@@ -1060,9 +1068,6 @@ func (s *runtimeSession) shutdown(ctx context.Context) error {
 			}()
 			return errors.Join(err, ctx.Err())
 		}
-	}
-	if resolved == PersistenceNone {
-		s.save(false)
 	}
 	return errors.Join(err, s.log.Close())
 }

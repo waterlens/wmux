@@ -125,6 +125,25 @@ WHERE id = ?`,
 	return s.GetHost(ctx, host.ID)
 }
 
+// UpdateHostFingerprint records a confirmed SSH host key. It touches only the
+// fingerprint so a concurrent edit of the rest of the host is never lost.
+func (s *Store) UpdateHostFingerprint(ctx context.Context, id, fingerprint string) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE hosts SET fingerprint = ?, updated_at = ? WHERE id = ?`,
+		fingerprint, unixMillis(s.utcNow()), id)
+	if err != nil {
+		return fmt.Errorf("update host fingerprint: %w", err)
+	}
+	updated, err := rowsChanged(result)
+	if err != nil {
+		return fmt.Errorf("check host fingerprint update: %w", err)
+	}
+	if !updated {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) DeleteHost(ctx context.Context, id string) error {
 	result, err := s.db.ExecContext(ctx, "DELETE FROM hosts WHERE id = ?", id)
 	if err != nil {

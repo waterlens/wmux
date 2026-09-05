@@ -21,7 +21,7 @@ import {
   TerminalSquare,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiError, signalAuthExpired } from '../api';
+import { api, ApiError, errorMessage, signalAuthExpired } from '../api';
 import {
   applyTerminalModifiers,
   decodeTerminalOutput,
@@ -44,10 +44,34 @@ type TerminalViewProps = {
   session: Session;
   active: boolean;
   preferences: TerminalPreferences;
+  restarting?: boolean | undefined;
   onRestart: (session: Session) => void;
   onTerminate: (session: Session) => void;
   notify: (message: string, tone?: 'success' | 'error' | 'info') => void;
 };
+
+/**
+ * Hardware rendering is best-effort: a missing WebGL2 context, a chunk that
+ * fails to load, or a lost context all fall back to the DOM renderer.
+ */
+async function attachWebglRenderer(terminal: Terminal, isCancelled: () => boolean): Promise<void> {
+  try {
+    const { WebglAddon } = await import('@xterm/addon-webgl');
+    if (isCancelled()) return;
+    const addon = new WebglAddon();
+    addon.onContextLoss(() => addon.dispose());
+    terminal.loadAddon(addon);
+  } catch {
+    // The DOM renderer stays in place.
+  }
+}
+
+function disconnectMessage(reason: string | undefined): string {
+  if (reason === 'evicted') return '输出传输暂时落后，正在恢复连接。';
+  // The server closes with 1013 after a restart, so the usual retry path runs.
+  if (reason === 'restarted') return '会话已在其他设备重启，正在重新连接';
+  return 'wmux 服务正在重启，正在恢复连接。';
+}
 
 const statusText: Record<LiveStatus, string> = {
   connecting: '正在连接',
@@ -59,7 +83,15 @@ const statusText: Record<LiveStatus, string> = {
   offline: '已断开',
 };
 
-export function TerminalView({ session, active, preferences, onRestart, onTerminate, notify }: TerminalViewProps) {
+export function TerminalView({
+  session,
+  active,
+  preferences,
+  restarting,
+  onRestart,
+  onTerminate,
+  notify,
+}: TerminalViewProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -86,6 +118,8 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
   const [lastError, setLastError] = useState('');
   const [terminalReady, setTerminalReady] = useState(false);
   const [replayComplete, setReplayComplete] = useState(false);
+  const [generation, setGeneration] = useState<number | null>(null);
+  const [retryingBackend, setRetryingBackend] = useState(false);
 
   useEffect(() => {
     activeRef.current = active;
@@ -174,6 +208,7 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
         terminal.open(mount);
         terminalRef.current = terminal;
         fitRef.current = fitAddon;
+        void attachWebglRenderer(terminal, () => disposed);
         inputDisposable = terminal.onData((data) => sendInputRef.current(data));
         binaryDisposable = terminal.onBinary((data) => sendBinaryRef.current(data));
         resizeObserver = new ResizeObserver(() => fit());
@@ -244,8 +279,13 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
 
     function canSendInput(): boolean {
       const socket = socketRef.current;
+      // The backend is only ready once the server reports it running; an open
+      // socket alone means the attachment exists, not that it can accept input.
       return (
-        replayBarrier.isOpen() && writerRef.current !== false && Boolean(socket && socket.readyState === WebSocket.OPEN)
+        replayBarrier.isOpen() &&
+        writerRef.current !== false &&
+        liveStatusRef.current === 'running' &&
+        Boolean(socket && socket.readyState === WebSocket.OPEN)
       );
     }
 
@@ -282,8 +322,9 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
 
       socket.addEventListener('open', () => {
         if (socketRef.current !== socket) return;
+        // The real backend state arrives with hello/state; an open socket only
+        // proves the attachment was accepted.
         reconnectAttemptsRef.current = 0;
-        updateStatus('running');
         fit();
       });
 
@@ -340,18 +381,22 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
             }
           }
           if (message.type === 'replay_end' && replayBarrier.endReplay()) finishReplay();
+          if ((message.type === 'hello' || message.type === 'state') && typeof message.generation === 'number') {
+            setGeneration(message.generation);
+          }
           if (message.type === 'hello' && message.truncated) {
             notify('较早的终端输出已被清理，当前显示最近记录', 'info');
           }
           if (message.type === 'disconnect') {
-            setLastError(
-              message.reason === 'evicted' ? '输出传输暂时落后，正在恢复连接。' : 'wmux 服务正在重启，正在恢复连接。',
-            );
+            setLastError(disconnectMessage(message.reason));
           }
           if (status === 'error') setLastError('终端暂时不可用，请检查会话配置或主机连接。');
           if (message.type === 'error') {
-            setLastError('终端连接发生错误。');
-            updateStatus('error');
+            // The server keeps the connection open for these; a toast reports
+            // them without pushing the view into a terminal error state.
+            const text = message.message || '终端连接发生错误。';
+            setLastError(text);
+            notify(text, 'error');
           }
         }
       });
@@ -360,14 +405,15 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
         if (socketRef.current !== socket) return;
         socketRef.current = null;
         resetReplay();
-        if (!shouldReconnectRef.current || liveStatusRef.current === 'exited') {
-          return;
-        }
+        // 1008 is checked before the exited shortcut: a revoked login arrives as
+        // an exited disconnect first, and it still has to reach the auth check.
         if (isPermanentSocketClose(event.code)) {
           shouldReconnectRef.current = false;
           setWriterState(false);
-          updateStatus('error');
-          setLastError('此会话当前不可连接，请刷新会话列表或检查会话配置。');
+          if (liveStatusRef.current !== 'exited') {
+            updateStatus('error');
+            setLastError('此会话当前不可连接，请刷新会话列表或检查会话配置。');
+          }
           void api
             .status()
             .then((status) => {
@@ -376,6 +422,9 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
             .catch((reason: unknown) => {
               if (reason instanceof ApiError && reason.status === 401) signalAuthExpired();
             });
+          return;
+        }
+        if (!shouldReconnectRef.current || liveStatusRef.current === 'exited') {
           return;
         }
         void api
@@ -450,6 +499,24 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
     const socket = socketRef.current;
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(4000, 'manual reconnect');
     else connectRef.current();
+  }
+
+  /** Wake the server-side backoff first, then re-attach this browser. */
+  async function retryBackendConnection() {
+    setRetryingBackend(true);
+    try {
+      await api.reconnectSession(session.id);
+    } catch (reason) {
+      // 404 only means the runtime is gone; reconnecting the socket still
+      // reports the authoritative state.
+      if (!(reason instanceof ApiError && reason.status === 404)) {
+        setLastError(errorMessage(reason));
+        return;
+      }
+    } finally {
+      setRetryingBackend(false);
+    }
+    manualReconnect();
   }
 
   function takeControl() {
@@ -556,6 +623,7 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
       aria-hidden={!active}
       data-terminal-ready={terminalReady}
       data-replay-complete={replayComplete}
+      data-generation={generation ?? undefined}
     >
       <header className="terminal-toolbar">
         <div className="terminal-identity">
@@ -632,6 +700,16 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
           </div>
         )}
 
+        {liveStatus === 'reconnecting' && (
+          <div className="read-only-banner" role="status">
+            <LoaderCircle className="spin" size={14} />
+            <span>{lastError || '正在重新连接…'}</span>
+            <button disabled={retryingBackend} onClick={() => void retryBackendConnection()}>
+              重试后台连接
+            </button>
+          </div>
+        )}
+
         {replayComplete && writer === false && liveStatus === 'running' && (
           <div className="read-only-banner">
             <Lock size={14} />
@@ -651,12 +729,12 @@ export function TerminalView({ session, active, preferences, onRestart, onTermin
             </p>
             <div>
               {liveStatus === 'exited' ? (
-                <Button tone="primary" size="sm" onClick={() => onRestart(session)}>
+                <Button tone="primary" size="sm" busy={restarting} onClick={() => onRestart(session)}>
                   <RefreshCw size={15} /> 重启会话
                 </Button>
               ) : (
-                <Button tone="primary" size="sm" onClick={manualReconnect}>
-                  <RefreshCw size={15} /> 立即重连
+                <Button tone="primary" size="sm" busy={retryingBackend} onClick={() => void retryBackendConnection()}>
+                  <RefreshCw size={15} /> 重试后台连接
                 </Button>
               )}
             </div>

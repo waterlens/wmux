@@ -196,9 +196,10 @@ func (s *Server) trustHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "fingerprint_changed", "SSH 主机密钥在确认期间发生变化")
 		return
 	}
-	host.Fingerprint = actual
-	if _, err := s.store.UpdateHost(r.Context(), host); err != nil {
-		s.internalError(w, "保存 SSH 主机密钥", err)
+	// Only the fingerprint is written: a concurrent edit of the rest of the
+	// host must not be reverted by confirming its key.
+	if err := s.store.UpdateHostFingerprint(r.Context(), host.ID, actual); err != nil {
+		s.handleStoreError(w, err, "SSH 主机不存在")
 		return
 	}
 	if s.terminals != nil {
