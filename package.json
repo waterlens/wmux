@@ -15,6 +15,7 @@
     "build": "pnpm build:web && pnpm build:server",
     "build:web": "vite build",
     "build:server": "sh scripts/build-server.sh",
+    "release": "sh scripts/release.sh",
     "start": "./bin/wmux",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",

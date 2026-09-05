@@ -3,7 +3,17 @@ package main
 import (
 	"regexp"
 	"testing"
+
+	"github.com/waterlens/wmux/internal/version"
 )
+
+func TestVersionLineNamesTheBinaryAndBuildMetadata(t *testing.T) {
+	t.Parallel()
+	want := "wmux " + version.Version + " (" + version.Commit + ")"
+	if got := versionLine(); got != want {
+		t.Fatalf("versionLine() = %q, want %q", got, want)
+	}
+}
 
 func TestDataMuxNameIsStableAndScoped(t *testing.T) {
 	t.Parallel()

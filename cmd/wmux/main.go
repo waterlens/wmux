@@ -24,6 +24,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version" || os.Args[1] == "version") {
+		fmt.Println(versionLine())
+		return
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		slog.New(slog.NewTextHandler(os.Stderr, nil)).Error("invalid configuration", "error", err)
@@ -34,6 +38,11 @@ func main() {
 		logger.Error("wmux stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+// versionLine is what `wmux --version` prints; scripts/install.sh echoes it after installing.
+func versionLine() string {
+	return fmt.Sprintf("wmux %s (%s)", version.Version, version.Commit)
 }
 
 func run(cfg config.Config, logger *slog.Logger) error {

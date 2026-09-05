@@ -20,7 +20,9 @@ if [ -z "$version" ] && command -v node >/dev/null 2>&1; then
   version=$(node -p "require('./package.json').version" 2>/dev/null || printf '')
 fi
 
-mkdir -p bin
+# release.sh redirects the output per platform; GOOS/GOARCH pass through from the environment.
+output=${WMUX_OUTPUT:-bin/wmux}
+mkdir -p "$(dirname -- "$output")"
 CGO_ENABLED=0 go build -trimpath \
   -ldflags "-s -w -X github.com/waterlens/wmux/internal/version.Version=${version:-dev} -X github.com/waterlens/wmux/internal/version.Commit=${commit:-unknown}" \
-  -o bin/wmux ./cmd/wmux
+  -o "$output" ./cmd/wmux

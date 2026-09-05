@@ -6,3 +6,4 @@ internal/webui/dist
 playwright-report
 test-results
 *.log
+release
