@@ -184,7 +184,7 @@ func TestTerminateFailureLeavesRunLoopAndAttachmentAlive(t *testing.T) {
 	manager := managerWithLauncher(t, backends)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "terminate-recovery", Persistence: PersistenceTmux}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "terminate-recovery", Persistence: PersistenceTmux}); err != nil {
 		t.Fatal(err)
 	}
 	attachment, err := manager.Attach(ctx, "terminate-recovery", "browser", 0)
@@ -230,7 +230,7 @@ func TestTerminateExitedSessionNeverContactsTheBackend(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "exited-terminate", Persistence: PersistenceTmux}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "exited-terminate", Persistence: PersistenceTmux}); err != nil {
 		t.Fatal(err)
 	}
 	waitState(ctx, t, manager, "exited-terminate", StateRunning)
@@ -254,7 +254,7 @@ func TestStopForRestartClosesClientsWithRestartedReason(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "restart-stop", Persistence: PersistenceTmux}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "restart-stop", Persistence: PersistenceTmux}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := manager.Attach(ctx, "restart-stop", "browser", 0)
@@ -272,7 +272,7 @@ func TestStopForRestartClosesClientsWithRestartedReason(t *testing.T) {
 		t.Fatalf("Status after StopForRestart = %v, want ErrSessionNotFound", err)
 	}
 	// The replacement execution registers under the same ID.
-	if _, err := manager.Create(ctx, SessionSpec{ID: "restart-stop", Persistence: PersistenceTmux, Generation: 2}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "restart-stop", Persistence: PersistenceTmux, Generation: 2}); err != nil {
 		t.Fatalf("re-create after StopForRestart: %v", err)
 	}
 }
@@ -284,7 +284,7 @@ func TestBlockedWriteDoesNotBlockTerminate(t *testing.T) {
 	manager := managerWithLauncher(t, staticLauncher(b, PersistenceTmux))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "blocked-write", Persistence: PersistenceTmux}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "blocked-write", Persistence: PersistenceTmux}); err != nil {
 		t.Fatal(err)
 	}
 	attachment, err := manager.Attach(ctx, "blocked-write", "browser", 0)
@@ -320,7 +320,7 @@ func TestWriteTimeoutReturnsContextErrorAndKeepsBackendOpen(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "write-context", Persistence: PersistenceTmux}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "write-context", Persistence: PersistenceTmux}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := manager.Attach(ctx, "write-context", "browser", 0)
@@ -375,7 +375,7 @@ func TestNewerSizeIsNeverOverwrittenByAnOlderOne(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "resize-order", Persistence: PersistenceTmux, Cols: 120, Rows: 36}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "resize-order", Persistence: PersistenceTmux, Cols: 120, Rows: 36}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := manager.Attach(ctx, "resize-order", "browser", 0)
@@ -446,7 +446,7 @@ func TestResizeDuringConnectingIsAcceptedAndReconciled(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "connecting-resize", Persistence: PersistenceTmux, Cols: 120, Rows: 36}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "connecting-resize", Persistence: PersistenceTmux, Cols: 120, Rows: 36}); err != nil {
 		t.Fatal(err)
 	}
 	<-entered
@@ -492,7 +492,7 @@ func TestTerminateUnblocksConcurrentActivationAndResize(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "resize-terminate", Persistence: PersistenceTmux, Cols: 120, Rows: 36}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "resize-terminate", Persistence: PersistenceTmux, Cols: 120, Rows: 36}); err != nil {
 		t.Fatal(err)
 	}
 	<-launchEntered
@@ -538,7 +538,7 @@ func TestConsumeBoundsLargeOutputFrames(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "bounded-output", Persistence: PersistenceNone}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "bounded-output", Persistence: PersistenceNone}); err != nil {
 		t.Fatal(err)
 	}
 	waitState(ctx, t, manager, "bounded-output", StateExited)
@@ -619,7 +619,7 @@ func TestFirstLaunchCreatesAndEveryReconnectOnlyAttaches(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "reconnect-attach", Persistence: PersistenceTmux}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "reconnect-attach", Persistence: PersistenceTmux}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := manager.Attach(ctx, "reconnect-attach", "browser", 0); err != nil {
@@ -656,7 +656,7 @@ func TestPermanentHostErrorWaitsForReconnectAndReloadsHost(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err := manager.Create(ctx, SessionSpec{
+	err := manager.Create(SessionSpec{
 		ID:          "host-refresh",
 		Persistence: PersistenceAuto,
 		Host:        &HostSpec{ID: "host", Address: "captured", User: "user", Fingerprint: "SHA256:test", Credential: PasswordCredential{Password: "captured"}},
@@ -699,7 +699,7 @@ func TestReconnectWakesPermanentErrorAndTimedBackoff(t *testing.T) {
 		defer manager.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if _, err := manager.Create(ctx, SessionSpec{ID: "reconnect-permanent", Persistence: PersistenceTmux}); err != nil {
+		if err := manager.Create(SessionSpec{ID: "reconnect-permanent", Persistence: PersistenceTmux}); err != nil {
 			t.Fatal(err)
 		}
 		waitState(ctx, t, manager, "reconnect-permanent", StateError)
@@ -726,7 +726,7 @@ func TestReconnectWakesPermanentErrorAndTimedBackoff(t *testing.T) {
 		defer manager.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if _, err := manager.Create(ctx, SessionSpec{ID: "reconnect-backoff", Persistence: PersistenceTmux}); err != nil {
+		if err := manager.Create(SessionSpec{ID: "reconnect-backoff", Persistence: PersistenceTmux}); err != nil {
 			t.Fatal(err)
 		}
 		waitState(ctx, t, manager, "reconnect-backoff", StateDisconnected)
@@ -768,7 +768,7 @@ func TestDiscardWorksInAnyStateAndNeverKillsTheBackend(t *testing.T) {
 		defer manager.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if _, err := manager.Create(ctx, SessionSpec{ID: "discard-error", Persistence: PersistenceTmux}); err != nil {
+		if err := manager.Create(SessionSpec{ID: "discard-error", Persistence: PersistenceTmux}); err != nil {
 			t.Fatal(err)
 		}
 		waitState(ctx, t, manager, "discard-error", StateError)
@@ -799,7 +799,7 @@ func TestDiscardWorksInAnyStateAndNeverKillsTheBackend(t *testing.T) {
 		defer manager.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if _, err := manager.Create(ctx, SessionSpec{ID: "discard-running", Persistence: PersistenceTmux}); err != nil {
+		if err := manager.Create(SessionSpec{ID: "discard-running", Persistence: PersistenceTmux}); err != nil {
 			t.Fatal(err)
 		}
 		waitState(ctx, t, manager, "discard-running", StateRunning)
@@ -824,7 +824,7 @@ func TestAttachmentStatesDeliverTheNewestStatus(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "states", Persistence: PersistenceTmux, Generation: 7}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "states", Persistence: PersistenceTmux, Generation: 7}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := manager.Attach(ctx, "states", "first", 0)
@@ -853,7 +853,7 @@ func TestAttachmentCloseReasonsAndWriterNotifications(t *testing.T) {
 		manager := managerWithLauncher(t, staticLauncher(b, PersistenceTmux))
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if _, err := manager.Create(ctx, SessionSpec{ID: "shutdown-reason", Persistence: PersistenceTmux}); err != nil {
+		if err := manager.Create(SessionSpec{ID: "shutdown-reason", Persistence: PersistenceTmux}); err != nil {
 			t.Fatal(err)
 		}
 		a, err := manager.Attach(ctx, "shutdown-reason", "browser", 0)
@@ -873,7 +873,7 @@ func TestAttachmentCloseReasonsAndWriterNotifications(t *testing.T) {
 		manager := managerWithLauncher(t, staticLauncher(b, PersistenceNone))
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if _, err := manager.Create(ctx, SessionSpec{ID: "exit-reason", Persistence: PersistenceNone}); err != nil {
+		if err := manager.Create(SessionSpec{ID: "exit-reason", Persistence: PersistenceNone}); err != nil {
 			t.Fatal(err)
 		}
 		a, err := manager.Attach(ctx, "exit-reason", "browser", 0)
@@ -894,7 +894,7 @@ func TestAttachmentCloseReasonsAndWriterNotifications(t *testing.T) {
 		defer manager.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if _, err := manager.Create(ctx, SessionSpec{ID: "writer-events", Persistence: PersistenceTmux}); err != nil {
+		if err := manager.Create(SessionSpec{ID: "writer-events", Persistence: PersistenceTmux}); err != nil {
 			t.Fatal(err)
 		}
 		first, err := manager.Attach(ctx, "writer-events", "first", 0)
@@ -935,7 +935,7 @@ func TestLinuxPTYEIOIsTreatedAsCleanExit(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "pty-eio", Persistence: PersistenceTmux}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "pty-eio", Persistence: PersistenceTmux}); err != nil {
 		t.Fatal(err)
 	}
 	waitState(ctx, t, manager, "pty-eio", StateRunning)
@@ -955,7 +955,7 @@ func TestCloseContextReturnsAtDeadlineWhenLauncherIgnoresCancellation(t *testing
 		return nil, "", ctx.Err()
 	}}
 	manager := managerWithLauncher(t, backends)
-	_, err := manager.Create(context.Background(), SessionSpec{ID: "close-deadline", Persistence: PersistenceTmux})
+	err := manager.Create(SessionSpec{ID: "close-deadline", Persistence: PersistenceTmux})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,7 +985,7 @@ func TestAttachmentExposesReplayBoundsAndSinceZeroTruncation(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "replay-bounds", Persistence: PersistenceTmux}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "replay-bounds", Persistence: PersistenceTmux}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := manager.Attach(ctx, "replay-bounds", "browser", 0)
@@ -1009,7 +1009,7 @@ func TestTranscriptAppendFailureDoesNotPublishOrAdvanceSequence(t *testing.T) {
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "append-failure", Persistence: PersistenceTmux}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "append-failure", Persistence: PersistenceTmux}); err != nil {
 		t.Fatal(err)
 	}
 	waitState(ctx, t, manager, "append-failure", StateRunning)

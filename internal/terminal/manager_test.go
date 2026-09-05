@@ -66,7 +66,7 @@ func TestDirectLocalPTYAndTranscriptReplay(t *testing.T) {
 	manager := testManager(t, 32)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := manager.Create(ctx, SessionSpec{
+	err := manager.Create(SessionSpec{
 		ID:          "direct-pty",
 		Persistence: PersistenceNone,
 		Shell:       "/bin/sh",
@@ -125,7 +125,7 @@ func TestWriterLeaseAndTakeControl(t *testing.T) {
 	manager := testManager(t, 8)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "lease", Persistence: PersistenceNone, Shell: "/bin/sh"}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "lease", Persistence: PersistenceNone, Shell: "/bin/sh"}); err != nil {
 		t.Fatal(err)
 	}
 	first, err := manager.Attach(ctx, "lease", "first", 0)
@@ -166,7 +166,7 @@ func TestSlowClientIsDroppedWithoutBlockingPublisher(t *testing.T) {
 	manager := testManager(t, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := manager.Create(ctx, SessionSpec{ID: "slow", Persistence: PersistenceNone, Shell: "/bin/sh"}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "slow", Persistence: PersistenceNone, Shell: "/bin/sh"}); err != nil {
 		t.Fatal(err)
 	}
 	attachment, err := manager.Attach(ctx, "slow", "slow-browser", 0)
@@ -240,7 +240,7 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	defer cancel()
 
 	firstManager := newManager()
-	if _, err := firstManager.Create(ctx, SessionSpec{ID: id, Persistence: PersistenceAuto, Shell: "/bin/sh", Args: []string{"-i"}}); err != nil {
+	if err := firstManager.Create(SessionSpec{ID: id, Persistence: PersistenceAuto, Shell: "/bin/sh", Args: []string{"-i"}}); err != nil {
 		t.Fatal(err)
 	}
 	firstAttachment, err := firstManager.Attach(ctx, id, "first-browser", 0)
@@ -268,7 +268,7 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	defer secondManager.Close()
 	secondCtx, secondCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer secondCancel()
-	if _, err := secondManager.Create(secondCtx, SessionSpec{ID: id, Persistence: PersistenceAuto, Shell: "/bin/sh", Args: []string{"-i"}}); err != nil {
+	if err := secondManager.Create(SessionSpec{ID: id, Persistence: PersistenceAuto, Shell: "/bin/sh", Args: []string{"-i"}}); err != nil {
 		t.Fatal(err)
 	}
 	secondAttachment, err := secondManager.Attach(secondCtx, id, "second-browser", 0)
@@ -334,7 +334,7 @@ func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 		ID: id, Persistence: PersistenceAuto, Shell: "/bin/sh", Args: []string{"-i"}, Cols: 100, Rows: 30, Generation: 1,
 	}
 	repository.put(SessionRecord{Spec: spec, Active: true})
-	if _, err := firstManager.Create(ctx, spec); err != nil {
+	if err := firstManager.Create(spec); err != nil {
 		t.Fatal(err)
 	}
 	firstAttachment, err := firstManager.Attach(ctx, id, "first-browser", 0)

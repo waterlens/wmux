@@ -52,26 +52,28 @@ func NewManager(cfg Config) (*Manager, error) {
 }
 
 // Create starts the runtime for a persisted session row; only this first launch
-// may create the tmux/screen session.
-func (m *Manager) Create(ctx context.Context, spec SessionSpec) (SessionStatus, error) {
+// may create the tmux/screen session. It takes no context because the runtime
+// outlives the request that asked for it and owns its own cancellation; callers
+// observe the session afterwards through Status.
+func (m *Manager) Create(spec SessionSpec) error {
 	spec = cloneSpec(spec)
 	if err := validateSpec(spec); err != nil {
-		return SessionStatus{}, err
+		return err
 	}
 	m.mu.RLock()
 	closed := m.closed
 	_, exists := m.sessions[spec.ID]
 	m.mu.RUnlock()
 	if closed {
-		return SessionStatus{}, ErrClosed
+		return ErrClosed
 	}
 	if exists {
-		return SessionStatus{}, ErrSessionExists
+		return ErrSessionExists
 	}
 
 	log, err := m.cfg.Transcripts.Open(spec.ID)
 	if err != nil {
-		return SessionStatus{}, fmt.Errorf("terminal: open transcript: %w", err)
+		return fmt.Errorf("terminal: open transcript: %w", err)
 	}
 	var resolved Persistence
 	if spec.Persistence != PersistenceAuto {
@@ -83,17 +85,17 @@ func (m *Manager) Create(ctx context.Context, spec SessionSpec) (SessionStatus, 
 	if m.closed {
 		m.mu.Unlock()
 		_ = log.Close()
-		return SessionStatus{}, ErrClosed
+		return ErrClosed
 	}
 	if _, ok := m.sessions[spec.ID]; ok {
 		m.mu.Unlock()
 		_ = log.Close()
-		return SessionStatus{}, ErrSessionExists
+		return ErrSessionExists
 	}
 	m.sessions[spec.ID] = s
 	m.mu.Unlock()
 	s.start()
-	return s.status(), nil
+	return nil
 }
 
 // Restore attaches to the backends of active repository records; a session whose

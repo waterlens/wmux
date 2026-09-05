@@ -135,7 +135,7 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.terminals != nil {
-		s.terminals.RefreshHost(host.ID)
+		s.logger.Debug("retried host sessions after an edit", "host", host.ID, "sessions", s.terminals.RefreshHost(host.ID))
 	}
 	writeJSON(w, http.StatusOK, publicHost(host))
 }
@@ -202,7 +202,7 @@ func (s *Server) trustHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.terminals != nil {
-		s.terminals.RefreshHost(host.ID)
+		s.logger.Debug("retried host sessions after trusting a new key", "host", host.ID, "sessions", s.terminals.RefreshHost(host.ID))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

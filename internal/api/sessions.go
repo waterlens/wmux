@@ -94,7 +94,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "准备终端配置", err)
 		return
 	}
-	if _, err := s.terminals.Create(r.Context(), spec); err != nil {
+	if err := s.terminals.Create(spec); err != nil {
 		s.discardSessionRow(r.Context(), id)
 		s.upstreamError(w, "启动终端会话", "terminal_start_failed", "无法启动会话，请检查工作目录、命令或连接设置", err)
 		return
@@ -198,7 +198,7 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec.Generation = generation
-	if _, err := s.terminals.Create(r.Context(), spec); err != nil {
+	if err := s.terminals.Create(spec); err != nil {
 		message := "无法启动会话，请检查工作目录、命令或连接设置"
 		_ = s.store.UpdateSessionRuntime(r.Context(), id, generation, store.SessionStatusError, "", "", &message)
 		s.upstreamError(w, "重启终端会话", "terminal_start_failed", message, err)
