@@ -20,12 +20,12 @@ wmux 是一个面向个人自托管场景的 Web 终端：在浏览器中管理�
 
 ## 快速开始
 
-需要 Go 1.26+、Node.js 22+、pnpm，以及 `tmux` 或 `screen`。前端只在构建时需要 Node.js。
+需要 Go 1.26+、Node.js 24+、pnpm，以及 `tmux` 或 `screen`。前端只在构建时需要 Node.js。
 
 ```bash
 pnpm install
 pnpm build
-WMUX_DATA_DIR="$PWD/.wmux" ./dist/wmux
+WMUX_DATA_DIR="$PWD/.wmux" ./bin/wmux
 ```
 
 默认监听 `127.0.0.1:8787`。打开 <http://127.0.0.1:8787>，首次访问时创建管理员账户。
@@ -65,17 +65,17 @@ WMUX_TRUST_PROXY=true
 
 ## 配置
 
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `WMUX_HOST` | `127.0.0.1` | 监听地址 |
-| `WMUX_PORT` | `8787` | 监听端口 |
-| `WMUX_DATA_DIR` | `.wmux` | SQLite、主密钥和历史目录 |
-| `WMUX_PUBLIC_URL` | 空 | 浏览器访问的规范 origin，用于 CSRF/WebSocket 校验 |
-| `WMUX_COOKIE_SECURE` | 随 Public URL | 是否只通过 HTTPS 发送登录 Cookie |
-| `WMUX_TRUST_PROXY` | `false` | 是否信任反向代理提供的协议及客户端地址 |
-| `WMUX_SESSION_TTL` | `168h` | 登录有效期 |
-| `WMUX_LOG_LEVEL` | `info` | 日志级别：`debug`、`info`、`warn` 或 `error` |
-| `WMUX_SSH_CONFIG` | 空（`~/.ssh/config`） | 用于只读发现候选主机的 OpenSSH config 路径 |
+| 环境变量             | 默认值                | 说明                                              |
+| -------------------- | --------------------- | ------------------------------------------------- |
+| `WMUX_HOST`          | `127.0.0.1`           | 监听地址                                          |
+| `WMUX_PORT`          | `8787`                | 监听端口                                          |
+| `WMUX_DATA_DIR`      | `.wmux`               | SQLite、主密钥和历史目录                          |
+| `WMUX_PUBLIC_URL`    | 空                    | 浏览器访问的规范 origin，用于 CSRF/WebSocket 校验 |
+| `WMUX_COOKIE_SECURE` | 随 Public URL         | 是否只通过 HTTPS 发送登录 Cookie                  |
+| `WMUX_TRUST_PROXY`   | `false`               | 是否信任反向代理提供的协议及客户端地址            |
+| `WMUX_SESSION_TTL`   | `168h`                | 登录有效期                                        |
+| `WMUX_LOG_LEVEL`     | `info`                | 日志级别：`debug`、`info`、`warn` 或 `error`      |
+| `WMUX_SSH_CONFIG`    | 空（`~/.ssh/config`） | 用于只读发现候选主机的 OpenSSH config 路径        |
 
 数据目录权限会被收紧到 `0700`，其中 `master.key` 为 `0600`。SSH 密码、私钥和 passphrase 使用该主密钥通过 AES-256-GCM 加密。备份时必须同时保存数据库和主密钥；丢失主密钥后加密凭据无法恢复。
 
@@ -97,9 +97,9 @@ wmux 支持普通 UTF-8/ANSI 终端流、OSC 8 链接以及分片传输。历史
 
 OSC 52 剪贴板写入、Kitty/iTerm2 文件传输、桌面通知、SIXEL/inline image、Kitty graphics/keyboard 和任意 tmux passthrough 当前有意保持关闭。这些协议能从远端程序触发浏览器或系统副作用，必须先定义用户授权、活动标签页、多客户端选择、限流及文件大小/名称校验，不能仅靠打开 passthrough 安全实现。
 
-内嵌 Symbols Nerd Font Mono 的来源、版本、哈希和许可见 [`client/THIRD_PARTY_NOTICES.md`](client/THIRD_PARTY_NOTICES.md)，运行中的 wmux 也可从“设置 → 关于”打开同一许可说明。
+内嵌 Symbols Nerd Font Mono 的来源、版本、哈希和许可见 [`client/public/third-party-notices.txt`](client/public/third-party-notices.txt)，运行中的 wmux 也可从“设置 → 关于”打开同一份文件。
 
-仓库中的 [`deploy/wmux.service.example`](deploy/wmux.service.example) 是 systemd 用户服务示例。它使用 `KillMode=process`，让 systemd 重启 wmux 时不清理同一 cgroup 中已经分离的 tmux/screen 进程。安装后执行 `systemctl --user enable --now wmux`；若希望退出登录后服务仍运行，再执行 `loginctl enable-linger "$USER"`。
+仓库中的 [`deploy/wmux.service.example`](deploy/wmux.service.example) 是 systemd 用户服务示例。它使用 `KillMode=process`，让 systemd 重启 wmux 时不清理同一 cgroup 中已经分离的 tmux/screen 进程。需要额外环境变量时，把 [`deploy/wmux.env.example`](deploy/wmux.env.example) 复制到 unit 引用的 `~/.config/wmux/wmux.env`。安装后执行 `systemctl --user enable --now wmux`；若希望退出登录后服务仍运行，再执行 `loginctl enable-linger "$USER"`。
 
 远程 SSH session 在目标主机上运行独立的 `tmux`/`screen` session；SSH 网络中断后 wmux 会重新连接并 attach。因此持久化不依赖一条永久存活的 TCP 连接。
 
@@ -115,13 +115,14 @@ OSC 52 剪贴板写入、Kitty/iTerm2 文件传输、桌面通知、SIXEL/inline
 pnpm dev       # Go API :8787 + Vite :5173
 pnpm typecheck
 pnpm lint
-pnpm test      # 前端单测 + Go 单测
+pnpm test      # CI 跑的同一条流水线：format:check、lint、typecheck、vitest、go test -race + go vet
 pnpm build
+pnpm exec playwright install chromium # 首次运行浏览器验收前执行一次
 pnpm test:browser # 自建临时实例，走真实浏览器流程并自动清理测试数据
 WMUX_TMUX_INTEGRATION=1 go test ./internal/terminal -run TestTmuxSessionSurvivesManagerRestore
 WMUX_SCREEN_INTEGRATION=1 go test ./internal/terminal -run TestScreenSessionSurvivesManagerClose
 ```
 
-浏览器验收还需要 `python3` 和 `tmux`；它会覆盖冷缓存字体加载、超过 128 KiB 的 Unicode bracketed paste、历史查询回放隔离、移动布局及会话终止。
+浏览器验收（`playwright.config.ts` + `tests/browser/`）只做 jsdom 覆盖不到的部分：真实 xterm 与 tmux PTY 往返、冷缓存字体时序、超过 128 KiB 的 Unicode bracketed paste、reload 后的历史查询回放隔离，以及对话框在真实布局下是否塌掉。纯 DOM 与文案断言留给 `pnpm test:unit`。它需要先 `pnpm build`（使用 `bin/wmux`），并依赖 `python3` 和 `tmux`。
 
 详细的数据流、实时协议和安全模型见 [`docs/architecture.md`](docs/architecture.md)。
