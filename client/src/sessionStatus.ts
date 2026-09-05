@@ -30,17 +30,18 @@ export function sessionStatusTone(status: SessionStatus): 'online' | 'pending' |
   return 'idle';
 }
 
-export function persistenceLabel(value: PersistenceMode | string | undefined): string {
+/** Exhaustive over `PersistenceMode`, so a new mode fails to compile here. */
+export function persistenceLabel(value: PersistenceMode | undefined): string {
   switch (value) {
+    case 'auto':
+      return '自动持久化';
     case 'tmux':
       return 'tmux 持久化';
     case 'screen':
       return 'screen 持久化';
     case 'none':
       return '直接连接';
-    case 'auto':
-      return '自动持久化';
-    default:
+    case undefined:
       return '';
   }
 }
