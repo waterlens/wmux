@@ -32,13 +32,9 @@ type Server struct {
 	sessionNameMu sync.Mutex
 	hostImportMu  sync.Mutex
 	sessionOps    keyedMutex
-	sessionSpecs  sessionSpecProvider
+	runtime       *app.RuntimeRepository
 	sshConfig     sshConfigDiscoverer
 	probeSSH      sshHostKeyProbe
-}
-
-type sessionSpecProvider interface {
-	SessionSpec(context.Context, store.Session) (terminal.SessionSpec, error)
 }
 
 type sshConfigDiscoverer interface {
@@ -48,27 +44,25 @@ type sshConfigDiscoverer interface {
 
 type sshHostKeyProbe func(context.Context, string, string) (string, string, error)
 
-// New constructs the complete HTTP application.
-func New(cfg config.Config, database *store.Store, masterKey []byte, terminals *terminal.Manager, transcripts *transcript.Directory, logger *slog.Logger, providers ...sessionSpecProvider) *Server {
+// New constructs the complete HTTP application. The terminal manager, the
+// transcript directory and the runtime repository are invariants, not options:
+// every session route needs all three, so the handlers never test them for nil.
+func New(cfg config.Config, database *store.Store, masterKey []byte, terminals *terminal.Manager, transcripts *transcript.Directory, runtime *app.RuntimeRepository, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	provider := sessionSpecProvider(&app.RuntimeRepository{Store: database, MasterKey: masterKey, Logger: logger})
-	if len(providers) != 0 && providers[0] != nil {
-		provider = providers[0]
-	}
 	s := &Server{
-		config:       cfg,
-		store:        database,
-		masterKey:    append([]byte(nil), masterKey...),
-		terminals:    terminals,
-		transcripts:  transcripts,
-		logger:       logger,
-		loginRate:    newFailureWindow(6, 5*time.Minute),
-		mux:          http.NewServeMux(),
-		sessionSpecs: provider,
-		sshConfig:    sshconfig.New(cfg.SSHConfigPath),
-		probeSSH:     sshx.Probe,
+		config:      cfg,
+		store:       database,
+		masterKey:   append([]byte(nil), masterKey...),
+		terminals:   terminals,
+		transcripts: transcripts,
+		logger:      logger,
+		loginRate:   newFailureWindow(6, 5*time.Minute),
+		mux:         http.NewServeMux(),
+		runtime:     runtime,
+		sshConfig:   sshconfig.New(cfg.SSHConfigPath),
+		probeSSH:    sshx.Probe,
 	}
 	s.routes()
 	return s

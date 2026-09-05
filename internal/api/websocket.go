@@ -54,10 +54,6 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
 		return
 	}
-	if s.terminals == nil {
-		writeError(w, http.StatusServiceUnavailable, "terminal_unavailable", "终端服务不可用")
-		return
-	}
 	if !originAllowed(r, s.config.PublicURL, s.config.TrustProxy) {
 		writeError(w, http.StatusForbidden, "invalid_origin", "WebSocket 来源不受信任")
 		return

@@ -25,10 +25,6 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
-	if s.terminals == nil {
-		writeError(w, http.StatusServiceUnavailable, "terminal_unavailable", "终端服务不可用")
-		return
-	}
 	var input sessionInput
 	if !decodeJSON(w, r, &input) {
 		return
@@ -88,7 +84,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreError(w, err, "终端会话不存在")
 		return
 	}
-	spec, err := s.sessionSpecs.SessionSpec(r.Context(), created)
+	spec, err := s.runtime.SessionSpec(r.Context(), created)
 	if err != nil {
 		s.discardSessionRow(r.Context(), id)
 		s.internalError(w, "准备终端配置", err)
@@ -144,24 +140,20 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	warning := ""
-	if s.terminals != nil {
-		// An unreachable host still drops the runtime, with a warning.
-		if err := s.terminals.Terminate(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
-			s.logger.Warn("terminate session for deletion", "session", id, "error", err)
-			if err := s.terminals.Discard(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
-				s.logger.Warn("discard session runtime", "session", id, "error", err)
-			}
-			warning = "无法连接主机，远端后台会话可能仍在运行"
+	// An unreachable host still drops the runtime, with a warning.
+	if err := s.terminals.Terminate(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
+		s.logger.Warn("terminate session for deletion", "session", id, "error", err)
+		if err := s.terminals.Discard(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
+			s.logger.Warn("discard session runtime", "session", id, "error", err)
 		}
+		warning = "无法连接主机，远端后台会话可能仍在运行"
 	}
 	if err := s.store.DeleteSession(r.Context(), id); err != nil {
 		s.handleStoreError(w, err, "终端会话不存在")
 		return
 	}
-	if s.transcripts != nil {
-		if err := s.transcripts.Remove(id); err != nil {
-			s.logger.Warn("remove terminal transcript", "session", id, "error", err)
-		}
+	if err := s.transcripts.Remove(id); err != nil {
+		s.logger.Warn("remove terminal transcript", "session", id, "error", err)
 	}
 	if warning != "" {
 		writeJSON(w, http.StatusOK, map[string]string{"warning": warning})
@@ -171,10 +163,6 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
-	if s.terminals == nil {
-		writeError(w, http.StatusServiceUnavailable, "terminal_unavailable", "终端服务不可用")
-		return
-	}
 	id := r.PathValue("id")
 	defer s.sessionOps.lock(id)()
 	session, err := s.store.GetSession(r.Context(), id)
@@ -192,7 +180,7 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreError(w, err, "终端会话不存在")
 		return
 	}
-	spec, err := s.sessionSpecs.SessionSpec(r.Context(), session)
+	spec, err := s.runtime.SessionSpec(r.Context(), session)
 	if err != nil {
 		s.internalError(w, "准备重启配置", err)
 		return
@@ -214,10 +202,6 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 
 // reconnectSession retries one runtime's backend connection immediately.
 func (s *Server) reconnectSession(w http.ResponseWriter, r *http.Request) {
-	if s.terminals == nil {
-		writeError(w, http.StatusServiceUnavailable, "terminal_unavailable", "终端服务不可用")
-		return
-	}
 	id := r.PathValue("id")
 	defer s.sessionOps.lock(id)()
 	if err := s.terminals.Reconnect(id); err != nil {
@@ -236,10 +220,8 @@ func (s *Server) discardSessionRow(ctx context.Context, id string) {
 	if err := s.store.DeleteSession(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
 		s.logger.Warn("remove unstarted session", "session", id, "error", err)
 	}
-	if s.transcripts != nil {
-		if err := s.transcripts.Remove(id); err != nil {
-			s.logger.Warn("remove terminal transcript", "session", id, "error", err)
-		}
+	if err := s.transcripts.Remove(id); err != nil {
+		s.logger.Warn("remove terminal transcript", "session", id, "error", err)
 	}
 }
 

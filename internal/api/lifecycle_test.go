@@ -8,75 +8,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/waterlens/wmux/internal/app"
-	"github.com/waterlens/wmux/internal/config"
 	"github.com/waterlens/wmux/internal/store"
 	"github.com/waterlens/wmux/internal/terminal"
-	"github.com/waterlens/wmux/internal/transcript"
 )
-
-type liveAPIFixture struct {
-	server   *httptest.Server
-	database *store.Store
-	manager  *terminal.Manager
-	cookie   string
-}
-
-func newLiveAPIFixture(t *testing.T, ctx context.Context) *liveAPIFixture {
-	return newLiveAPIFixtureWithReplayLimit(t, ctx, 1)
-}
-
-func newLiveAPIFixtureWithReplayLimit(t *testing.T, ctx context.Context, replayLimit int) *liveAPIFixture {
-	t.Helper()
-	dir := t.TempDir()
-	database, err := store.Open(ctx, filepath.Join(dir, "wmux.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	recordings, err := transcript.NewDirectory(transcript.DirectoryConfig{Root: filepath.Join(dir, "recordings"), SyncWrites: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	key := bytes.Repeat([]byte{7}, 32)
-	repository := &app.RuntimeRepository{Store: database, MasterKey: key, Logger: logger}
-	manager, err := terminal.NewManager(terminal.Config{
-		Repository:   repository,
-		Callbacks:    repository,
-		Transcripts:  recordings,
-		ReplayLimit:  replayLimit,
-		ReconnectMin: 5 * time.Millisecond,
-		ReconnectMax: 20 * time.Millisecond,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	application := New(config.Config{SessionTTL: time.Hour}, database, key, manager, recordings, logger)
-	httpServer := httptest.NewServer(application.Handler())
-	fixture := &liveAPIFixture{server: httpServer, database: database, manager: manager}
-	fixture.cookie = setupOverHTTP(t, ctx, httpServer.URL)
-	t.Cleanup(func() {
-		httpServer.Close()
-		_ = manager.Close()
-		_ = database.Close()
-	})
-	return fixture
-}
 
 func TestTerminalWebSocketReplayBoundarySeparatesHistoryFromLiveOutput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixtureWithReplayLimit(t, ctx, 128)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 128})
 	id := createSessionForTest(t, ctx, fixture, map[string]any{
 		"name": "Replay boundary", "kind": "local", "command": "cat", "persistence": "none",
 	})
@@ -170,7 +116,7 @@ func TestTerminalWebSocketReplayBoundarySeparatesHistoryFromLiveOutput(t *testin
 func TestTerminalWebSocketReadLimitBoundary(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixture(t, ctx)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
 	id := createSessionForTest(t, ctx, fixture, map[string]any{
 		"name": "Read limit", "kind": "local", "command": "cat", "persistence": "none",
 	})
@@ -210,7 +156,7 @@ func TestTerminalWebSocketReadLimitBoundary(t *testing.T) {
 func TestTerminalWebSocketControlReplayAndShutdownReason(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixture(t, ctx)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
 	id := createSessionForTest(t, ctx, fixture, map[string]any{
 		"name": "WebSocket", "kind": "local", "command": "cat", "persistence": "none",
 	})
@@ -276,7 +222,7 @@ func TestTerminalWebSocketControlReplayAndShutdownReason(t *testing.T) {
 func TestSessionPatchRestartAndDeleteLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixture(t, ctx)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
 	id := createSessionForTest(t, ctx, fixture, map[string]any{
 		"name": "生命周期", "kind": "local", "command": "cat", "persistence": "none",
 	})
@@ -334,7 +280,7 @@ func TestSessionPatchRestartAndDeleteLifecycle(t *testing.T) {
 func TestDeleteDormantPersistentSSHSessionsWithoutContactingUnreachableHost(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixture(t, ctx)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
 
 	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/hosts", map[string]any{
 		"name": "unreachable", "address": "127.0.0.1", "port": 1,
@@ -412,7 +358,7 @@ func TestDeleteDormantPersistentSSHSessionsWithoutContactingUnreachableHost(t *t
 func TestHostPatchPreservesSecretAndReferencedHostCannotBeDeleted(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixture(t, ctx)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
 
 	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/hosts", map[string]any{
 		"name": "家庭服务器", "address": "192.0.2.10", "port": 22,
@@ -459,7 +405,7 @@ func TestHostPatchPreservesSecretAndReferencedHostCannotBeDeleted(t *testing.T) 
 	}
 }
 
-func createSessionForTest(t *testing.T, ctx context.Context, fixture *liveAPIFixture, value map[string]any) string {
+func createSessionForTest(t *testing.T, ctx context.Context, fixture *apiFixture, value map[string]any) string {
 	t.Helper()
 	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/sessions", value)
 	if response.StatusCode != http.StatusCreated {
@@ -470,7 +416,7 @@ func createSessionForTest(t *testing.T, ctx context.Context, fixture *liveAPIFix
 	return session.ID
 }
 
-func doJSONForTest(t *testing.T, ctx context.Context, fixture *liveAPIFixture, method, path string, value any) *http.Response {
+func doJSONForTest(t *testing.T, ctx context.Context, fixture *apiFixture, method, path string, value any) *http.Response {
 	t.Helper()
 	var body io.Reader
 	if value != nil {
@@ -510,7 +456,7 @@ func failResponse(t *testing.T, response *http.Response) {
 	t.Fatalf("request returned %d: %s", response.StatusCode, payload)
 }
 
-func dialTerminalForTest(t *testing.T, ctx context.Context, fixture *liveAPIFixture, id string, since uint64) *websocket.Conn {
+func dialTerminalForTest(t *testing.T, ctx context.Context, fixture *apiFixture, id string, since uint64) *websocket.Conn {
 	t.Helper()
 	address := "ws" + strings.TrimPrefix(fixture.server.URL, "http") + "/ws/sessions/" + url.PathEscape(id) + "?since=" + fmt.Sprint(since)
 	connection, _, err := websocket.Dial(ctx, address, &websocket.DialOptions{HTTPHeader: http.Header{"Cookie": []string{fixture.cookie}}})
@@ -651,7 +597,7 @@ func sendAndCollectOutput(t *testing.T, ctx context.Context, connection *websock
 func TestDeleteRunningSessionOnUnreachableHostWarnsAndReleasesTheHost(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixture(t, ctx)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
 
 	response := doJSONForTest(t, ctx, fixture, http.MethodPost, "/api/hosts", map[string]any{
 		"name": "unreachable", "address": "127.0.0.1", "port": 1,
@@ -711,7 +657,7 @@ func TestDeleteRunningSessionOnUnreachableHostWarnsAndReleasesTheHost(t *testing
 func TestReconnectSessionRetriesBackendOrReportsMissingSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixture(t, ctx)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
 	id := createSessionForTest(t, ctx, fixture, map[string]any{
 		"name": "重试连接", "kind": "local", "command": "cat", "persistence": "none",
 	})
@@ -736,7 +682,7 @@ func TestReconnectSessionRetriesBackendOrReportsMissingSession(t *testing.T) {
 func TestTerminalWebSocketClosesWhenTheLoginIsRevoked(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixture(t, ctx)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
 	id := createSessionForTest(t, ctx, fixture, map[string]any{
 		"name": "登出", "kind": "local", "command": "cat", "persistence": "none",
 	})
@@ -773,7 +719,7 @@ func TestTerminalWebSocketClosesWhenTheLoginIsRevoked(t *testing.T) {
 func TestTerminalWebSocketDeliversBufferedOutputBeforeExit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixtureWithReplayLimit(t, ctx, 128)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 128})
 	// The session writes its payload in many small chunks and then exits.
 	id := createSessionForTest(t, ctx, fixture, map[string]any{
 		"name": "尾部输出", "kind": "local", "persistence": "none",
@@ -818,7 +764,7 @@ func TestTerminalWebSocketDeliversBufferedOutputBeforeExit(t *testing.T) {
 func TestRestartClosesAttachedSocketForReconnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixture(t, ctx)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
 	id := createSessionForTest(t, ctx, fixture, map[string]any{
 		"name": "重启", "kind": "local", "command": "cat", "persistence": "none",
 	})
@@ -881,7 +827,7 @@ func waitForTerminalState(t *testing.T, ctx context.Context, manager *terminal.M
 func TestTerminalWebSocketAsksBrowserToRetryWhileRuntimeIsMissing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fixture := newLiveAPIFixture(t, ctx)
+	fixture := newAPIFixture(t, apiOptions{replayLimit: 1})
 	// A row without a runtime is the window between stopping and re-creating.
 	id := "ses_restart_window"
 	if _, err := fixture.database.CreateSession(ctx, store.Session{ID: id, Name: id, Kind: store.SessionKindLocal, Cols: 120, Rows: 36}); err != nil {

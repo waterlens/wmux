@@ -5,55 +5,25 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/waterlens/wmux/internal/app"
-	"github.com/waterlens/wmux/internal/config"
 	"github.com/waterlens/wmux/internal/store"
-	"github.com/waterlens/wmux/internal/terminal"
-	"github.com/waterlens/wmux/internal/transcript"
 )
 
 func TestLocalTerminalOverWebSocket(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	dir := t.TempDir()
-	database, err := store.Open(ctx, filepath.Join(dir, "wmux.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	recordings, err := transcript.NewDirectory(transcript.DirectoryConfig{Root: filepath.Join(dir, "recordings"), SyncWrites: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	key := bytes.Repeat([]byte{3}, 32)
-	repository := &app.RuntimeRepository{Store: database, MasterKey: key, Logger: logger}
-	manager, err := terminal.NewManager(terminal.Config{Repository: repository, Callbacks: repository, Transcripts: recordings})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = manager.Close() })
+	fixture := newAPIFixture(t, apiOptions{})
+	sessionID := createLocalSessionOverHTTP(t, ctx, fixture.server.URL, fixture.cookie)
 
-	server := New(config.Config{SessionTTL: time.Hour}, database, key, manager, recordings, logger)
-	httpServer := httptest.NewServer(server.Handler())
-	t.Cleanup(httpServer.Close)
-
-	cookie := setupOverHTTP(t, ctx, httpServer.URL)
-	sessionID := createLocalSessionOverHTTP(t, ctx, httpServer.URL, cookie)
-
-	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/sessions/" + url.PathEscape(sessionID)
-	connection, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Cookie": []string{cookie}}})
+	wsURL := "ws" + strings.TrimPrefix(fixture.server.URL, "http") + "/ws/sessions/" + url.PathEscape(sessionID)
+	connection, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Cookie": []string{fixture.cookie}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,30 +39,6 @@ func TestLocalTerminalOverWebSocket(t *testing.T) {
 			output.Write(payload[9:])
 		}
 	}
-}
-
-func setupOverHTTP(t *testing.T, ctx context.Context, baseURL string) string {
-	t.Helper()
-	body, _ := json.Marshal(map[string]any{"username": "owner", "password": "integration-password"})
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/setup", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusCreated {
-		payload, _ := io.ReadAll(response.Body)
-		t.Fatalf("setup returned %d: %s", response.StatusCode, payload)
-	}
-	cookies := response.Cookies()
-	if len(cookies) == 0 {
-		t.Fatal("setup response did not set login cookie")
-	}
-	return cookies[0].String()
 }
 
 func createLocalSessionOverHTTP(t *testing.T, ctx context.Context, baseURL, cookie string) string {

@@ -2,30 +2,13 @@ package api
 
 import (
 	"bytes"
-	"context"
-	"encoding/json"
-	"io"
-	"log/slog"
 	"net/http"
-	"net/http/httptest"
-	"path/filepath"
 	"testing"
-	"time"
-
-	"github.com/waterlens/wmux/internal/config"
-	"github.com/waterlens/wmux/internal/store"
 )
 
 func TestSetupLoginAndProtectedHostCRUD(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	database, err := store.Open(context.Background(), filepath.Join(dir, "wmux.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	cfg := config.Config{SessionTTL: time.Hour}
-	server := New(cfg, database, bytes.Repeat([]byte{7}, 32), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server := newAPIFixture(t, apiOptions{skipSetup: true}).api
 
 	status := performJSON(t, server.Handler(), http.MethodGet, "/api/status", nil, "")
 	if status.Code != http.StatusOK || !bytes.Contains(status.Body.Bytes(), []byte(`"setupRequired":true`)) {
@@ -91,13 +74,7 @@ func TestSetupLoginAndProtectedHostCRUD(t *testing.T) {
 
 func TestRejectsCrossOriginMutation(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	database, err := store.Open(context.Background(), filepath.Join(dir, "wmux.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	server := New(config.Config{SessionTTL: time.Hour}, database, bytes.Repeat([]byte{9}, 32), nil, nil, nil)
+	server := newAPIFixture(t, apiOptions{skipSetup: true}).api
 	recorder := performJSONWithOrigin(t, server.Handler(), http.MethodPost, "/api/setup", map[string]any{
 		"username": "owner",
 		"password": "a-long-test-password",
@@ -105,34 +82,4 @@ func TestRejectsCrossOriginMutation(t *testing.T) {
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("expected forbidden origin, got %d %s", recorder.Code, recorder.Body.String())
 	}
-}
-
-func performJSON(t *testing.T, handler http.Handler, method, path string, body any, cookie string) *httptest.ResponseRecorder {
-	t.Helper()
-	return performJSONWithOrigin(t, handler, method, path, body, cookie, "")
-}
-
-func performJSONWithOrigin(t *testing.T, handler http.Handler, method, path string, body any, cookie, origin string) *httptest.ResponseRecorder {
-	t.Helper()
-	var encoded io.Reader
-	if body != nil {
-		value, err := json.Marshal(body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		encoded = bytes.NewReader(value)
-	}
-	request := httptest.NewRequest(method, path, encoded)
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	if cookie != "" {
-		request.Header.Set("Cookie", cookie)
-	}
-	if origin != "" {
-		request.Header.Set("Origin", origin)
-	}
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	return recorder
 }

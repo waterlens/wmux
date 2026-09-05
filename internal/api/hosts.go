@@ -134,9 +134,7 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreError(w, err, "SSH 主机不存在")
 		return
 	}
-	if s.terminals != nil {
-		s.logger.Debug("retried host sessions after an edit", "host", host.ID, "sessions", s.terminals.RefreshHost(host.ID))
-	}
+	s.logger.Debug("retried host sessions after an edit", "host", host.ID, "sessions", s.terminals.RefreshHost(host.ID))
 	writeJSON(w, http.StatusOK, publicHost(host))
 }
 
@@ -159,11 +157,7 @@ func (s *Server) probeHost(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreError(w, err, "SSH 主机不存在")
 		return
 	}
-	probe := s.probeSSH
-	if probe == nil {
-		probe = sshx.Probe
-	}
-	fingerprint, algorithm, err := probe(r.Context(), app.SSHAddress(host), host.Username)
+	fingerprint, algorithm, err := s.probeSSH(r.Context(), app.SSHAddress(host), host.Username)
 	if err != nil {
 		s.upstreamError(w, "探测 SSH 主机指纹", "ssh_probe_failed", "无法读取 SSH 主机指纹，请检查地址和网络连接", err)
 		return
@@ -183,11 +177,7 @@ func (s *Server) trustHost(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreError(w, err, "SSH 主机不存在")
 		return
 	}
-	probe := s.probeSSH
-	if probe == nil {
-		probe = sshx.Probe
-	}
-	actual, _, err := probe(r.Context(), app.SSHAddress(host), host.Username)
+	actual, _, err := s.probeSSH(r.Context(), app.SSHAddress(host), host.Username)
 	if err != nil {
 		s.upstreamError(w, "重新探测 SSH 主机指纹", "ssh_probe_failed", "无法再次读取 SSH 主机指纹，请检查地址和网络连接", err)
 		return
@@ -203,9 +193,7 @@ func (s *Server) trustHost(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreError(w, err, "SSH 主机不存在")
 		return
 	}
-	if s.terminals != nil {
-		s.logger.Debug("retried host sessions after trusting a new key", "host", host.ID, "sessions", s.terminals.RefreshHost(host.ID))
-	}
+	s.logger.Debug("retried host sessions after trusting a new key", "host", host.ID, "sessions", s.terminals.RefreshHost(host.ID))
 	w.WriteHeader(http.StatusNoContent)
 }
 

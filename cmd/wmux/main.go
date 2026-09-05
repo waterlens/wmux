@@ -109,7 +109,7 @@ func run(logger *slog.Logger) error {
 		logger.Warn("some terminal sessions could not be restored", "error", err)
 	}
 
-	handler := api.New(cfg, database, masterKey, terminalManager, recordings, logger, runtimeRepository).Handler()
+	handler := api.New(cfg, database, masterKey, terminalManager, recordings, runtimeRepository, logger).Handler()
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,

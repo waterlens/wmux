@@ -5,9 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"io/fs"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,7 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/waterlens/wmux/internal/config"
 	"github.com/waterlens/wmux/internal/sshconfig"
@@ -64,39 +61,14 @@ func (f *fakeSSHConfigDiscoverer) calls() (discover, resolve int, alias string) 
 	return f.discoverCalls, f.resolveCalls, f.resolvedAlias
 }
 
-func newSSHConfigAPIFixture(t *testing.T) (*Server, *store.Store, string) {
-	return newSSHConfigAPIFixtureWithConfig(t, config.Config{SessionTTL: time.Hour})
-}
-
-func newSSHConfigAPIFixtureWithConfig(t *testing.T, cfg config.Config) (*Server, *store.Store, string) {
-	t.Helper()
-	database, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "wmux.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	if cfg.SessionTTL == 0 {
-		cfg.SessionTTL = time.Hour
-	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := New(cfg, database, bytes.Repeat([]byte{17}, 32), nil, nil, logger)
-	setup := performJSON(t, server.Handler(), http.MethodPost, "/api/setup", map[string]any{
-		"username": "owner",
-		"password": "a-long-test-password",
-	}, "")
-	if setup.Code != http.StatusCreated || len(setup.Result().Cookies()) == 0 {
-		t.Fatalf("setup: %d %s", setup.Code, setup.Body.String())
-	}
-	return server, database, setup.Result().Cookies()[0].String()
-}
-
 func TestSSHConfigConfiguredPathDoesNotExposeIdentityFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ssh-config")
 	contents := []byte("Host lab\n  HostName lab.internal\n  User deploy\n  Port 2202\n  IdentityFile /secret/PRIVATE_KEY_NAME\n")
 	if err := os.WriteFile(path, contents, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	server, _, cookie := newSSHConfigAPIFixtureWithConfig(t, config.Config{SSHConfigPath: path, SessionTTL: time.Hour})
+	fixture := newAPIFixture(t, apiOptions{config: config.Config{SSHConfigPath: path}})
+	server, cookie := fixture.api, fixture.cookie
 	response := performJSON(t, server.Handler(), http.MethodGet, "/api/hosts/ssh-config", nil, cookie)
 	if response.Code != http.StatusOK {
 		t.Fatalf("discover configured path: %d %s", response.Code, response.Body.String())
@@ -114,7 +86,8 @@ func TestSSHConfigConfiguredPathDoesNotExposeIdentityFile(t *testing.T) {
 }
 
 func TestSSHConfigRoutesRequireAuthAndSameOrigin(t *testing.T) {
-	server, _, cookie := newSSHConfigAPIFixture(t)
+	fixture := newAPIFixture(t, apiOptions{})
+	server, cookie := fixture.api, fixture.cookie
 	fake := &fakeSSHConfigDiscoverer{result: sshconfig.Result{Available: true, Source: "~/.ssh/config", Candidates: []sshconfig.Candidate{}}}
 	server.sshConfig = fake
 
@@ -134,7 +107,8 @@ func TestSSHConfigRoutesRequireAuthAndSameOrigin(t *testing.T) {
 }
 
 func TestDiscoverSSHConfigIsReadOnlyAndMarksExactExistingHost(t *testing.T) {
-	server, database, cookie := newSSHConfigAPIFixture(t)
+	fixture := newAPIFixture(t, apiOptions{})
+	server, database, cookie := fixture.api, fixture.database, fixture.cookie
 	existing, err := database.CreateHost(context.Background(), store.Host{
 		Name: "Existing", Address: "lab.internal", Port: 2222, Username: "alice", AuthType: store.HostAuthAgent,
 	})
@@ -193,7 +167,8 @@ func TestDiscoverSSHConfigIsReadOnlyAndMarksExactExistingHost(t *testing.T) {
 }
 
 func TestConcurrentSSHConfigImportCreatesOneHost(t *testing.T) {
-	server, database, cookie := newSSHConfigAPIFixture(t)
+	fixture := newAPIFixture(t, apiOptions{})
+	server, database, cookie := fixture.api, fixture.database, fixture.cookie
 	server.sshConfig = &fakeSSHConfigDiscoverer{resolveValue: sshconfig.Candidate{
 		Alias: "lab", Address: "lab.internal", Port: 22, Username: "alice", Unsupported: []string{},
 	}}
@@ -246,7 +221,8 @@ func TestConcurrentSSHConfigImportCreatesOneHost(t *testing.T) {
 }
 
 func TestImportSSHConfigReResolvesWithoutCredentialsFingerprintOrProbe(t *testing.T) {
-	server, database, cookie := newSSHConfigAPIFixture(t)
+	fixture := newAPIFixture(t, apiOptions{})
+	server, database, cookie := fixture.api, fixture.database, fixture.cookie
 	fake := &fakeSSHConfigDiscoverer{
 		result: sshconfig.Result{Available: true, Source: "~/.ssh/config", Candidates: []sshconfig.Candidate{
 			{Alias: "lab", Address: "old.internal", Port: 22, Username: "old", Unsupported: []string{}},
@@ -295,7 +271,8 @@ func TestImportSSHConfigReResolvesWithoutCredentialsFingerprintOrProbe(t *testin
 
 func TestImportSSHConfigRejectsUnsupportedMissingDuplicateAndInvalid(t *testing.T) {
 	t.Run("unsupported", func(t *testing.T) {
-		server, _, cookie := newSSHConfigAPIFixture(t)
+		fixture := newAPIFixture(t, apiOptions{})
+		server, cookie := fixture.api, fixture.cookie
 		server.sshConfig = &fakeSSHConfigDiscoverer{resolveValue: sshconfig.Candidate{
 			Alias: "jumped", Address: "internal", Port: 22, Username: "owner", Unsupported: []string{"ProxyJump"},
 		}}
@@ -304,14 +281,16 @@ func TestImportSSHConfigRejectsUnsupportedMissingDuplicateAndInvalid(t *testing.
 	})
 
 	t.Run("alias not found", func(t *testing.T) {
-		server, _, cookie := newSSHConfigAPIFixture(t)
+		fixture := newAPIFixture(t, apiOptions{})
+		server, cookie := fixture.api, fixture.cookie
 		server.sshConfig = &fakeSSHConfigDiscoverer{resolveErr: errors.Join(errors.New("safe wrapper"), sshconfig.ErrAliasNotFound)}
 		response := performJSON(t, server.Handler(), http.MethodPost, "/api/hosts/import-ssh-config", map[string]string{"alias": "missing"}, cookie)
 		assertAPIError(t, response, http.StatusNotFound, "ssh_config_host_not_found")
 	})
 
 	t.Run("duplicate normalized endpoint", func(t *testing.T) {
-		server, database, cookie := newSSHConfigAPIFixture(t)
+		fixture := newAPIFixture(t, apiOptions{})
+		server, database, cookie := fixture.api, fixture.database, fixture.cookie
 		if _, err := database.CreateHost(context.Background(), store.Host{
 			Name: "Existing", Address: "lab.internal", Port: 22, Username: "alice", AuthType: store.HostAuthAgent,
 		}); err != nil {
@@ -325,7 +304,8 @@ func TestImportSSHConfigRejectsUnsupportedMissingDuplicateAndInvalid(t *testing.
 	})
 
 	t.Run("invalid resolved candidate", func(t *testing.T) {
-		server, _, cookie := newSSHConfigAPIFixture(t)
+		fixture := newAPIFixture(t, apiOptions{})
+		server, cookie := fixture.api, fixture.cookie
 		server.sshConfig = &fakeSSHConfigDiscoverer{resolveValue: sshconfig.Candidate{
 			Alias: "bad", Address: "https://not-an-ssh-host", Port: 22, Username: "owner", Unsupported: []string{},
 		}}
@@ -334,7 +314,8 @@ func TestImportSSHConfigRejectsUnsupportedMissingDuplicateAndInvalid(t *testing.
 	})
 
 	t.Run("only alias is accepted", func(t *testing.T) {
-		server, _, cookie := newSSHConfigAPIFixture(t)
+		fixture := newAPIFixture(t, apiOptions{})
+		server, cookie := fixture.api, fixture.cookie
 		fake := &fakeSSHConfigDiscoverer{}
 		server.sshConfig = fake
 		response := performJSON(t, server.Handler(), http.MethodPost, "/api/hosts/import-ssh-config", map[string]any{"alias": "lab", "address": "attacker"}, cookie)
@@ -347,7 +328,8 @@ func TestImportSSHConfigRejectsUnsupportedMissingDuplicateAndInvalid(t *testing.
 
 func TestSSHConfigMissingAndFailuresHaveStableSafeResponses(t *testing.T) {
 	t.Run("public source", func(t *testing.T) {
-		server, _, cookie := newSSHConfigAPIFixture(t)
+		fixture := newAPIFixture(t, apiOptions{})
+		server, cookie := fixture.api, fixture.cookie
 		server.sshConfig = &fakeSSHConfigDiscoverer{result: sshconfig.Result{
 			Available: false, Source: "/Users/private-account/.ssh/config", Candidates: []sshconfig.Candidate{},
 		}}
@@ -371,7 +353,8 @@ func TestSSHConfigMissingAndFailuresHaveStableSafeResponses(t *testing.T) {
 	})
 
 	t.Run("missing file", func(t *testing.T) {
-		server, _, cookie := newSSHConfigAPIFixture(t)
+		fixture := newAPIFixture(t, apiOptions{})
+		server, cookie := fixture.api, fixture.cookie
 		server.sshConfig = sshconfig.New(filepath.Join(t.TempDir(), "missing-config"))
 		response := performJSON(t, server.Handler(), http.MethodGet, "/api/hosts/ssh-config", nil, cookie)
 		if response.Code != http.StatusOK {
@@ -387,7 +370,8 @@ func TestSSHConfigMissingAndFailuresHaveStableSafeResponses(t *testing.T) {
 	})
 
 	t.Run("invalid syntax", func(t *testing.T) {
-		server, _, cookie := newSSHConfigAPIFixture(t)
+		fixture := newAPIFixture(t, apiOptions{})
+		server, cookie := fixture.api, fixture.cookie
 		server.sshConfig = &fakeSSHConfigDiscoverer{discoverErr: errors.New("parse /secret/config: token SUPER_SECRET")}
 		response := performJSON(t, server.Handler(), http.MethodGet, "/api/hosts/ssh-config", nil, cookie)
 		assertAPIError(t, response, http.StatusUnprocessableEntity, "ssh_config_invalid")
@@ -397,7 +381,8 @@ func TestSSHConfigMissingAndFailuresHaveStableSafeResponses(t *testing.T) {
 	})
 
 	t.Run("unreadable file", func(t *testing.T) {
-		server, _, cookie := newSSHConfigAPIFixture(t)
+		fixture := newAPIFixture(t, apiOptions{})
+		server, cookie := fixture.api, fixture.cookie
 		server.sshConfig = &fakeSSHConfigDiscoverer{discoverErr: &fs.PathError{Op: "open", Path: "/secret/home/.ssh/config", Err: fs.ErrPermission}}
 		response := performJSON(t, server.Handler(), http.MethodGet, "/api/hosts/ssh-config", nil, cookie)
 		assertAPIError(t, response, http.StatusServiceUnavailable, "ssh_config_unavailable")
@@ -407,7 +392,8 @@ func TestSSHConfigMissingAndFailuresHaveStableSafeResponses(t *testing.T) {
 	})
 
 	t.Run("resolve failure", func(t *testing.T) {
-		server, _, cookie := newSSHConfigAPIFixture(t)
+		fixture := newAPIFixture(t, apiOptions{})
+		server, cookie := fixture.api, fixture.cookie
 		server.sshConfig = &fakeSSHConfigDiscoverer{resolveErr: errors.New("parse failed with PRIVATE_VALUE")}
 		response := performJSON(t, server.Handler(), http.MethodPost, "/api/hosts/import-ssh-config", map[string]string{"alias": "lab"}, cookie)
 		assertAPIError(t, response, http.StatusUnprocessableEntity, "ssh_config_invalid")
