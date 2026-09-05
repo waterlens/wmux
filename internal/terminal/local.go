@@ -368,13 +368,16 @@ func localEnvironment(extra map[string]string) []string {
 	return sortedEnv(values)
 }
 
+// terminalSize substitutes the defaults for a spec that carries no dimensions.
+// Every spec the application builds is sized, so this is only a zero-value
+// guard for direct callers of the package.
 func terminalSize(spec SessionSpec) (cols, rows uint16) {
 	cols, rows = spec.Cols, spec.Rows
 	if cols == 0 {
-		cols = defaultCols
+		cols = DefaultCols
 	}
 	if rows == 0 {
-		rows = defaultRows
+		rows = DefaultRows
 	}
 	return cols, rows
 }

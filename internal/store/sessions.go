@@ -235,12 +235,6 @@ func applySessionDefaults(session *Session) {
 	if session.Status == "" {
 		session.Status = SessionStatusConnecting
 	}
-	if session.Cols == 0 {
-		session.Cols = 120
-	}
-	if session.Rows == 0 {
-		session.Rows = 36
-	}
 }
 
 // validateSession covers only the host/kind agreement, which no single-column

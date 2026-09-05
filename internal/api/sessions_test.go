@@ -17,7 +17,7 @@ func TestAvailableSessionNameUsesFirstFreeSuffix(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	for _, name := range []string{"本机终端", "本机终端 2", "本机终端 4"} {
-		if _, err := database.CreateSession(ctx, store.Session{Name: name, Kind: store.SessionKindLocal}); err != nil {
+		if _, err := database.CreateSession(ctx, store.Session{Name: name, Kind: store.SessionKindLocal, Cols: 120, Rows: 36}); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -21,6 +21,7 @@ func TestSessionCRUDAndHostJoin(t *testing.T) {
 	session, err := s.CreateSession(ctx, Session{
 		Name: "Remote shell", Kind: SessionKindSSH, HostID: &host.ID,
 		Cwd: "/srv/app", Persistence: SessionPersistenceTmux,
+		Cols: 120, Rows: 36,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +72,7 @@ func TestSessionValidationAndExit(t *testing.T) {
 	}
 	local, err := s.CreateSession(ctx, Session{
 		Name: "Local", Kind: SessionKindLocal, Persistence: SessionPersistenceNone,
+		Cols: 120, Rows: 36,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +99,7 @@ func TestRuntimeUpdatesPreserveProductFieldsAndListOrder(t *testing.T) {
 	ctx := context.Background()
 	first, err := s.CreateSession(ctx, Session{
 		Name: "First", Kind: SessionKindLocal, Persistence: SessionPersistenceAuto,
+		Cols: 120, Rows: 36,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -104,6 +107,7 @@ func TestRuntimeUpdatesPreserveProductFieldsAndListOrder(t *testing.T) {
 	now = now.Add(time.Minute)
 	second, err := s.CreateSession(ctx, Session{
 		Name: "Second", Kind: SessionKindLocal, Persistence: SessionPersistenceAuto,
+		Cols: 120, Rows: 36,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +162,7 @@ func TestSessionGenerationIsolatesRestartsFromLateRuntimeCallbacks(t *testing.T)
 	ctx := context.Background()
 	session, err := s.CreateSession(ctx, Session{
 		ID: "restarted", Name: "Restarted", Kind: SessionKindLocal,
-		Persistence: SessionPersistenceAuto,
+		Persistence: SessionPersistenceAuto, Cols: 120, Rows: 36,
 	})
 	if err != nil {
 		t.Fatal(err)

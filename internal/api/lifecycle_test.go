@@ -448,6 +448,7 @@ func TestHostPatchPreservesSecretAndReferencedHostCannotBeDeleted(t *testing.T) 
 	hostID := created.ID
 	if _, err := fixture.database.CreateSession(ctx, store.Session{
 		Name: "uses-host", Kind: store.SessionKindSSH, HostID: &hostID,
+		Cols: 120, Rows: 36,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -883,7 +884,7 @@ func TestTerminalWebSocketAsksBrowserToRetryWhileRuntimeIsMissing(t *testing.T) 
 	fixture := newLiveAPIFixture(t, ctx)
 	// A row without a runtime is the window between stopping and re-creating.
 	id := "ses_restart_window"
-	if _, err := fixture.database.CreateSession(ctx, store.Session{ID: id, Name: id, Kind: store.SessionKindLocal}); err != nil {
+	if _, err := fixture.database.CreateSession(ctx, store.Session{ID: id, Name: id, Kind: store.SessionKindLocal, Cols: 120, Rows: 36}); err != nil {
 		t.Fatal(err)
 	}
 

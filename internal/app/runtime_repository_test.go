@@ -95,7 +95,7 @@ func TestStaleGenerationCallbackIsIgnored(t *testing.T) {
 	repository := &RuntimeRepository{Store: database}
 	created, err := database.CreateSession(ctx, store.Session{
 		ID: "restarted", Name: "Restarted", Kind: store.SessionKindLocal,
-		Persistence: store.SessionPersistenceTmux,
+		Persistence: store.SessionPersistenceTmux, Cols: 120, Rows: 36,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -58,9 +58,14 @@ const (
 	muxSettleTimeout = 2 * time.Second
 	muxPollInterval  = 50 * time.Millisecond
 
-	defaultCols       = 80
-	defaultRows       = 24
 	backendReadBuffer = 32 << 10
+)
+
+// DefaultCols and DefaultRows are the terminal dimensions a new session starts
+// with, before a browser reports the size it actually rendered.
+const (
+	DefaultCols uint16 = 120
+	DefaultRows uint16 = 36
 )
 
 // tmuxBaseEnvironment is tmux's documented update-environment default.

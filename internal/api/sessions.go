@@ -53,8 +53,8 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		Command:     input.Command,
 		Persistence: input.Persistence,
 		Status:      store.SessionStatusConnecting,
-		Cols:        120,
-		Rows:        36,
+		Cols:        int(terminal.DefaultCols),
+		Rows:        int(terminal.DefaultRows),
 	}
 	if input.Kind == store.SessionKindSSH {
 		host, hostErr := s.store.GetHost(r.Context(), input.HostID)
