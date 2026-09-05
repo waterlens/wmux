@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -54,7 +53,7 @@ func TestFromLookupEnv(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat %s: %v", path, err)
 		}
-		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		if info.Mode().Perm() != 0o700 {
 			t.Fatalf("mode for %s = %o", path, info.Mode().Perm())
 		}
 	}
@@ -80,9 +79,6 @@ func TestFromLookupEnvRejectsInvalidValues(t *testing.T) {
 }
 
 func TestEnsureRejectsSymlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink permissions vary on Windows")
-	}
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
 	if err := os.Mkdir(target, 0o700); err != nil {
@@ -136,7 +132,7 @@ func TestDataDirLockAcrossProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(filepath.Join(dir, "wmux.lock"))
-	if err == nil && runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+	if err == nil && info.Mode().Perm() != 0o600 {
 		t.Fatalf("lock file mode = %o", info.Mode().Perm())
 	}
 }

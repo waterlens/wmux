@@ -3,6 +3,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -47,12 +48,12 @@ func Load() (Config, error) {
 // loading deterministic in tests and embedded deployments.
 func FromLookupEnv(lookup func(string) (string, bool)) (Config, error) {
 	if lookup == nil {
-		return Config{}, fmt.Errorf("config lookup function is nil")
+		return Config{}, errors.New("config: lookup function is nil")
 	}
 
 	host := valueOr(lookup, "WMUX_HOST", defaultHost)
 	if strings.TrimSpace(host) == "" {
-		return Config{}, fmt.Errorf("WMUX_HOST must not be empty")
+		return Config{}, errors.New("config: WMUX_HOST must not be empty")
 	}
 
 	port, err := intValue(lookup, "WMUX_PORT", defaultPort)
@@ -60,19 +61,19 @@ func FromLookupEnv(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, err
 	}
 	if port < 1 || port > 65535 {
-		return Config{}, fmt.Errorf("WMUX_PORT must be between 1 and 65535")
+		return Config{}, errors.New("config: WMUX_PORT must be between 1 and 65535")
 	}
 
 	dataDir := valueOr(lookup, "WMUX_DATA_DIR", defaultDataDir)
 	dataDir, err = filepath.Abs(filepath.Clean(dataDir))
 	if err != nil {
-		return Config{}, fmt.Errorf("resolve WMUX_DATA_DIR: %w", err)
+		return Config{}, fmt.Errorf("config: resolve WMUX_DATA_DIR: %w", err)
 	}
 	sshConfigPath := strings.TrimSpace(valueOr(lookup, "WMUX_SSH_CONFIG", ""))
 	if sshConfigPath != "" {
 		sshConfigPath, err = filepath.Abs(filepath.Clean(sshConfigPath))
 		if err != nil {
-			return Config{}, fmt.Errorf("resolve WMUX_SSH_CONFIG: %w", err)
+			return Config{}, fmt.Errorf("config: resolve WMUX_SSH_CONFIG: %w", err)
 		}
 	}
 
@@ -80,10 +81,10 @@ func FromLookupEnv(lookup func(string) (string, bool)) (Config, error) {
 	if publicURL != "" {
 		parsed, parseErr := url.Parse(publicURL)
 		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return Config{}, fmt.Errorf("WMUX_PUBLIC_URL must be an absolute URL")
+			return Config{}, errors.New("config: WMUX_PUBLIC_URL must be an absolute URL")
 		}
 		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			return Config{}, fmt.Errorf("WMUX_PUBLIC_URL must use http or https")
+			return Config{}, errors.New("config: WMUX_PUBLIC_URL must use http or https")
 		}
 		publicURL = strings.TrimRight(publicURL, "/")
 	}
@@ -102,7 +103,7 @@ func FromLookupEnv(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, err
 	}
 	if ttl <= 0 {
-		return Config{}, fmt.Errorf("WMUX_SESSION_TTL must be positive")
+		return Config{}, errors.New("config: WMUX_SESSION_TTL must be positive")
 	}
 
 	cfg := Config{
@@ -128,7 +129,7 @@ func FromLookupEnv(lookup func(string) (string, bool)) (Config, error) {
 func (c Config) Ensure() error {
 	for _, path := range []string{c.DataDir, c.RecordingsDir} {
 		if strings.TrimSpace(path) == "" {
-			return fmt.Errorf("configuration contains an empty data path")
+			return errors.New("config: configuration contains an empty data path")
 		}
 		if err := ensurePrivateDir(path); err != nil {
 			return err
@@ -139,22 +140,22 @@ func (c Config) Ensure() error {
 
 func ensurePrivateDir(path string) error {
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing symlink data directory %q", path)
+		return fmt.Errorf("config: refusing symlink data directory %q", path)
 	} else if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("inspect data directory %q: %w", path, err)
+		return fmt.Errorf("config: inspect data directory %q: %w", path, err)
 	}
 	if err := os.MkdirAll(path, 0o700); err != nil {
-		return fmt.Errorf("create data directory %q: %w", path, err)
+		return fmt.Errorf("config: create data directory %q: %w", path, err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("inspect data directory %q: %w", path, err)
+		return fmt.Errorf("config: inspect data directory %q: %w", path, err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("data path %q is not a directory", path)
+		return fmt.Errorf("config: data path %q is not a directory", path)
 	}
 	if err := os.Chmod(path, 0o700); err != nil {
-		return fmt.Errorf("secure data directory %q: %w", path, err)
+		return fmt.Errorf("config: secure data directory %q: %w", path, err)
 	}
 	return nil
 }
@@ -173,7 +174,7 @@ func intValue(lookup func(string) (string, bool), key string, fallback int) (int
 	}
 	parsed, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil {
-		return 0, fmt.Errorf("%s must be an integer: %w", key, err)
+		return 0, fmt.Errorf("config: %s must be an integer: %w", key, err)
 	}
 	return parsed, nil
 }
@@ -185,7 +186,7 @@ func boolValue(lookup func(string) (string, bool), key string, fallback bool) (b
 	}
 	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
 	if err != nil {
-		return false, fmt.Errorf("%s must be a boolean: %w", key, err)
+		return false, fmt.Errorf("config: %s must be a boolean: %w", key, err)
 	}
 	return parsed, nil
 }
@@ -197,7 +198,7 @@ func durationValue(lookup func(string) (string, bool), key string, fallback time
 	}
 	parsed, err := time.ParseDuration(strings.TrimSpace(value))
 	if err != nil {
-		return 0, fmt.Errorf("%s must be a duration: %w", key, err)
+		return 0, fmt.Errorf("config: %s must be a duration: %w", key, err)
 	}
 	return parsed, nil
 }
