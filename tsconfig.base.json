@@ -1,14 +1,20 @@
 {
+  // Shared by every TypeScript project in the repo. Nothing here is emitted:
+  // Vite builds the app and Playwright transpiles its own config and specs, so
+  // both projects only ever run tsc as a checker. Both are also bundler-loaded
+  // rather than resolved by Node's ESM loader, hence the bundler resolution.
   "compilerOptions": {
     "target": "ES2023",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "noEmit": true
   }
 }

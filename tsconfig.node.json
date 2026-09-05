@@ -1,0 +1,11 @@
+{
+  // Playwright's config and browser specs: they run under Node but also carry
+  // page.evaluate bodies, so they need the Node globals on top of the DOM lib
+  // the base config already provides.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo"
+  },
+  "include": ["playwright.config.ts", "tests/browser"]
+}
