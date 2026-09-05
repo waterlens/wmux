@@ -4,14 +4,14 @@ package sshx
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
-	"strings"
 	"time"
 
+	"github.com/waterlens/wmux/internal/store"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -20,11 +20,10 @@ const defaultTimeout = 8 * time.Second
 
 // Credentials is the decrypted authentication material for one host.
 type Credentials struct {
-	AuthType    string
-	Password    string
-	PrivateKey  string
-	Passphrase  string
-	AgentSocket string
+	AuthType   string
+	Password   string
+	PrivateKey string
+	Passphrase string
 }
 
 // Target contains only data needed for a short-lived SSH connection.
@@ -43,19 +42,20 @@ func Probe(ctx context.Context, address, username string) (fingerprint, algorith
 
 	connection, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
 	if err != nil {
-		return "", "", fmt.Errorf("连接 SSH 主机: %w", err)
+		return "", "", fmt.Errorf("sshx: dial ssh host: %w", err)
 	}
 	defer connection.Close()
 	applyDeadline(ctx, connection)
 
-	captured := errors.New("ssh host key captured")
 	config := &ssh.ClientConfig{
 		User:    username,
 		Timeout: defaultTimeout,
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			fingerprint = ssh.FingerprintSHA256(key)
 			algorithm = key.Type()
-			return captured
+			// Returning a non-nil error aborts the handshake before any
+			// authentication is attempted; the captured values are read below.
+			return errors.New("sshx: host key captured")
 		},
 	}
 	_, _, _, handshakeErr := ssh.NewClientConn(connection, address, config)
@@ -63,9 +63,9 @@ func Probe(ctx context.Context, address, username string) (fingerprint, algorith
 		return fingerprint, algorithm, nil
 	}
 	if handshakeErr != nil {
-		return "", "", fmt.Errorf("读取 SSH host key: %w", handshakeErr)
+		return "", "", fmt.Errorf("sshx: read ssh host key: %w", handshakeErr)
 	}
-	return "", "", errors.New("SSH 主机未提供 host key")
+	return "", "", errors.New("sshx: ssh host offered no host key")
 }
 
 // Test authenticates with strict host-key verification and executes `true`.
@@ -73,23 +73,27 @@ func Test(ctx context.Context, target Target) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 	if target.Fingerprint == "" {
-		return errors.New("请先验证并信任 SSH host key")
+		return errors.New("sshx: ssh host key is not trusted yet")
 	}
 
 	auth, cleanup, err := authMethod(target.Credentials)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	if cleanup != nil {
+		defer cleanup.Close()
+	}
 
 	config := &ssh.ClientConfig{
 		User:    target.Username,
 		Auth:    []ssh.AuthMethod{auth},
 		Timeout: defaultTimeout,
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			// Fingerprints are public values shown to the user, so a plain
+			// comparison is enough.
 			actual := ssh.FingerprintSHA256(key)
-			if subtle.ConstantTimeCompare([]byte(actual), []byte(target.Fingerprint)) != 1 {
-				return fmt.Errorf("SSH host key 已变化：期望 %s，实际 %s", target.Fingerprint, actual)
+			if actual != target.Fingerprint {
+				return fmt.Errorf("sshx: ssh host key changed: want %s, got %s", target.Fingerprint, actual)
 			}
 			return nil
 		},
@@ -97,36 +101,39 @@ func Test(ctx context.Context, target Target) error {
 
 	netConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", target.Address)
 	if err != nil {
-		return fmt.Errorf("连接 SSH 主机: %w", err)
+		return fmt.Errorf("sshx: dial ssh host: %w", err)
 	}
 	applyDeadline(ctx, netConn)
 	clientConn, channels, requests, err := ssh.NewClientConn(netConn, target.Address, config)
 	if err != nil {
 		_ = netConn.Close()
-		return fmt.Errorf("SSH 验证失败: %w", err)
+		return fmt.Errorf("sshx: ssh authentication failed: %w", err)
 	}
 	client := ssh.NewClient(clientConn, channels, requests)
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		return fmt.Errorf("创建 SSH 测试会话: %w", err)
+		return fmt.Errorf("sshx: open ssh test session: %w", err)
 	}
 	defer session.Close()
 	if err := session.Run("true"); err != nil {
-		return fmt.Errorf("SSH 测试命令失败: %w", err)
+		return fmt.Errorf("sshx: ssh test command failed: %w", err)
 	}
 	return nil
 }
 
-func authMethod(credentials Credentials) (ssh.AuthMethod, func(), error) {
+// authMethod builds the SSH authentication method for one host. The returned
+// io.Closer is nil unless the method owns a resource, which only the agent
+// branch does.
+func authMethod(credentials Credentials) (ssh.AuthMethod, io.Closer, error) {
 	switch credentials.AuthType {
-	case "password":
+	case store.HostAuthPassword:
 		if credentials.Password == "" {
-			return nil, func() {}, errors.New("SSH 密码为空")
+			return nil, nil, errors.New("sshx: ssh password is empty")
 		}
-		return ssh.Password(credentials.Password), func() {}, nil
-	case "privateKey":
+		return ssh.Password(credentials.Password), nil, nil
+	case store.HostAuthKey:
 		var signer ssh.Signer
 		var err error
 		if credentials.Passphrase != "" {
@@ -135,24 +142,21 @@ func authMethod(credentials Credentials) (ssh.AuthMethod, func(), error) {
 			signer, err = ssh.ParsePrivateKey([]byte(credentials.PrivateKey))
 		}
 		if err != nil {
-			return nil, func() {}, fmt.Errorf("解析 SSH 私钥: %w", err)
+			return nil, nil, fmt.Errorf("sshx: parse ssh private key: %w", err)
 		}
-		return ssh.PublicKeys(signer), func() {}, nil
-	case "agent":
-		socket := strings.TrimSpace(credentials.AgentSocket)
+		return ssh.PublicKeys(signer), nil, nil
+	case store.HostAuthAgent:
+		socket := os.Getenv("SSH_AUTH_SOCK")
 		if socket == "" {
-			socket = os.Getenv("SSH_AUTH_SOCK")
-		}
-		if socket == "" {
-			return nil, func() {}, errors.New("SSH_AUTH_SOCK 未设置")
+			return nil, nil, errors.New("sshx: SSH_AUTH_SOCK is not set")
 		}
 		connection, err := net.DialTimeout("unix", socket, defaultTimeout)
 		if err != nil {
-			return nil, func() {}, fmt.Errorf("连接 SSH agent: %w", err)
+			return nil, nil, fmt.Errorf("sshx: dial ssh agent: %w", err)
 		}
-		return ssh.PublicKeysCallback(agent.NewClient(connection).Signers), func() { _ = connection.Close() }, nil
+		return ssh.PublicKeysCallback(agent.NewClient(connection).Signers), connection, nil
 	default:
-		return nil, func() {}, errors.New("不支持的 SSH 认证方式")
+		return nil, nil, fmt.Errorf("sshx: unsupported ssh authentication type %q", credentials.AuthType)
 	}
 }
 

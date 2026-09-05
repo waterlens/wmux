@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/waterlens/wmux/internal/store"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -32,7 +33,7 @@ func TestProbeAndStrictPasswordTest(t *testing.T) {
 		Address:     address,
 		Username:    "tester",
 		Fingerprint: fingerprint,
-		Credentials: Credentials{AuthType: "password", Password: "secret"},
+		Credentials: Credentials{AuthType: store.HostAuthPassword, Password: "secret"},
 	})
 	if err != nil {
 		t.Fatalf("Test valid target: %v", err)
@@ -42,7 +43,7 @@ func TestProbeAndStrictPasswordTest(t *testing.T) {
 		Address:     address,
 		Username:    "tester",
 		Fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-		Credentials: Credentials{AuthType: "password", Password: "secret"},
+		Credentials: Credentials{AuthType: store.HostAuthPassword, Password: "secret"},
 	})
 	if err == nil {
 		t.Fatal("Test accepted a changed host key")
