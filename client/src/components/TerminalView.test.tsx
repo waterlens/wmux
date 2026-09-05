@@ -390,9 +390,9 @@ describe('TerminalView rendering and input surface', () => {
     });
 
     terminal.modes.applicationCursorKeysMode = true;
-    fireEvent.click(screen.getByRole('button', { name: 'Ctrl' }));
+    fireEvent.click(screen.getByRole('button', { name: 'CTRL' }));
     act(() => terminal.emitData('\x1b[0n'));
-    expect(screen.getByRole('button', { name: 'Ctrl' }).className).toBe('is-active');
+    expect(screen.getByRole('button', { name: 'CTRL' }).className).toBe('is-active');
     expect(socket.sent.filter((value) => value instanceof ArrayBuffer)).toHaveLength(0);
 
     act(() => socket.emitMessage('{"type":"replay_end","sequence":0}'));
@@ -402,8 +402,12 @@ describe('TerminalView rendering and input surface', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '向左' }));
     fireEvent.click(screen.getByRole('button', { name: '向上' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Alt' }));
+    fireEvent.click(screen.getByRole('button', { name: 'ALT' }));
     fireEvent.click(screen.getByRole('button', { name: '向右' }));
+    fireEvent.click(screen.getByRole('button', { name: 'HOME' }));
+    fireEvent.click(screen.getByRole('button', { name: 'CTRL' }));
+    fireEvent.click(screen.getByRole('button', { name: 'PGUP' }));
+    fireEvent.click(screen.getByRole('button', { name: 'PGDN' }));
 
     const frames = socket.sent.filter((value): value is ArrayBuffer => value instanceof ArrayBuffer);
     const decoder = new TextDecoder();
@@ -411,6 +415,9 @@ describe('TerminalView rendering and input surface', () => {
       '\x1b[1;5D',
       '\x1bOA',
       '\x1b[1;3C',
+      '\x1bOH',
+      '\x1b[5;5~',
+      '\x1b[6~',
     ]);
   });
 

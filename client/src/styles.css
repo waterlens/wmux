@@ -1337,6 +1337,7 @@ code {
 .terminal-identity {
   display: flex;
   min-width: 0;
+  flex: 1;
   align-items: center;
   gap: var(--space-3);
 }
@@ -2327,9 +2328,14 @@ code {
   .terminal-view {
     grid-template-rows: auto minmax(0, 1fr) auto;
   }
+  /* The tab bar gives way to the terminal toolbar, which carries the sidebar button instead. */
+  .tabbar.is-terminal {
+    display: none;
+  }
   .terminal-toolbar {
-    min-height: 3.25rem;
-    padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+    min-height: 2.75rem;
+    gap: var(--space-2);
+    padding: 0 var(--space-2) 0 var(--space-1);
   }
   .terminal-identity div > span {
     display: none;
@@ -2362,40 +2368,45 @@ code {
     right: 0;
   }
   .special-keys {
-    display: flex;
-    min-height: calc(3.25rem + env(safe-area-inset-bottom));
-    align-items: flex-start;
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     gap: var(--space-1);
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
     padding: var(--space-1) var(--space-2) calc(var(--space-1) + env(safe-area-inset-bottom));
-    border-top: 1px solid var(--border);
-    background: var(--surface);
-    scrollbar-width: none;
-  }
-  .special-keys::-webkit-scrollbar {
-    display: none;
+    border-top: 1px solid var(--terminal-overlay-border-soft);
+    background: var(--terminal-bg);
   }
   .special-keys > button {
     display: inline-flex;
-    min-width: var(--control-touch);
+    min-width: 0;
     height: var(--control-touch);
-    flex: 0 0 auto;
     align-items: center;
     justify-content: center;
-    padding: 0 var(--space-3);
-    border: 1px solid var(--border-strong);
+    padding: 0;
+    border: 0;
     border-radius: var(--radius-md);
-    background: var(--surface-muted);
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
+    background: transparent;
+    color: var(--terminal-overlay-text);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
     font-weight: var(--weight-semibold);
+    letter-spacing: 0.02em;
+  }
+  .special-keys > button:active {
+    background: var(--terminal-overlay-control-bg);
   }
   .special-keys > button.is-active {
-    border-color: var(--accent);
-    background: var(--accent);
-    color: var(--accent-contrast);
+    background: var(--terminal-overlay-control-bg);
+    box-shadow: inset 0 0 0 1px var(--terminal-overlay-control-border);
+    color: var(--terminal-overlay-contrast);
+  }
+  .special-keys .key-arrow {
+    font-size: 1.2rem;
+    font-weight: var(--weight-medium);
+  }
+  .special-keys .key-tab {
+    display: grid;
+    font-size: 0.8rem;
+    line-height: 0.85;
   }
 
   .modal-layer {
@@ -2486,7 +2497,8 @@ code {
 
   .toast-stack {
     right: var(--space-2);
-    bottom: calc(3.75rem + env(safe-area-inset-bottom));
+    /* Clears the two-row key grid: 2 × --control-touch plus its gap and padding. */
+    bottom: calc(6.75rem + env(safe-area-inset-bottom));
     width: calc(100vw - var(--space-4));
   }
   .toast-stack.is-drawer-open {

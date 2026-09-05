@@ -196,7 +196,7 @@ test('a bracketed paste larger than 128 KiB reaches the PTY intact', async ({ pa
 
   await signIn(page);
   const input = await startSession(page, '大块粘贴');
-  // The toolbar paste button only exists in the phone layout (`.special-keys`).
+  // The toolbar paste button only exists in the phone layout.
   await page.setViewportSize(mobileViewport);
   await input.focus();
   await page.keyboard.insertText(

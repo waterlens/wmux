@@ -99,7 +99,13 @@ export function applyTerminalModifiers(value: string, ctrl: boolean, alt: boolea
   return alt ? `\x1b${output}` : output;
 }
 
-export type CursorDirection = 'up' | 'down' | 'left' | 'right';
+/** Arrow keys plus Home/End, which xterm encodes with the same cursor-key rules. */
+export type CursorDirection = 'up' | 'down' | 'left' | 'right' | 'home' | 'end';
+
+/** xterm modifier parameter: 1 + Alt(2) + Ctrl(4). */
+function modifierParameter(ctrl: boolean, alt: boolean): number {
+  return 1 + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+}
 
 /** Encode a virtual cursor key using xterm/DEC cursor and modifier semantics. */
 export function encodeCursorKey(
@@ -108,13 +114,17 @@ export function encodeCursorKey(
   ctrl: boolean,
   alt: boolean,
 ): string {
-  const final = { up: 'A', down: 'B', right: 'C', left: 'D' }[direction];
-  if (ctrl || alt) {
-    // xterm modifier parameter: 1 + Alt(2) + Ctrl(4).
-    const modifier = 1 + (alt ? 2 : 0) + (ctrl ? 4 : 0);
-    return `\x1b[1;${modifier}${final}`;
-  }
+  const final = { up: 'A', down: 'B', right: 'C', left: 'D', home: 'H', end: 'F' }[direction];
+  if (ctrl || alt) return `\x1b[1;${modifierParameter(ctrl, alt)}${final}`;
   return applicationCursorMode ? `\x1bO${final}` : `\x1b[${final}`;
+}
+
+export type PageDirection = 'up' | 'down';
+
+/** Encode Page Up / Page Down (CSI 5~ / 6~) with xterm's modifier parameter. */
+export function encodePageKey(direction: PageDirection, ctrl: boolean, alt: boolean): string {
+  const code = direction === 'up' ? 5 : 6;
+  return ctrl || alt ? `\x1b[${code};${modifierParameter(ctrl, alt)}~` : `\x1b[${code}~`;
 }
 
 /** Holds terminal input closed until xterm has parsed every replay write. */

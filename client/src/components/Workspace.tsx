@@ -285,7 +285,8 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
       />
 
       <section className="workspace-main">
-        <header className="tabbar">
+        {/* On phones the terminal toolbar carries the sidebar button, so the tab bar hides while a terminal is shown. */}
+        <header className={`tabbar ${currentView === 'terminal' && openSessions.length > 0 ? 'is-terminal' : ''}`}>
           <div className="tabbar__leading">
             <button
               className="sidebar-open-button"
@@ -358,6 +359,7 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
                     restarting={restartingIds.has(session.id)}
                     onRestart={requestRestart}
                     onTerminate={setDeleteTarget}
+                    onOpenSidebar={() => setMobileSidebar(true)}
                     notify={notify}
                   />
                 ))}

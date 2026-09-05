@@ -3,6 +3,7 @@ import {
   applyTerminalModifiers,
   decodeTerminalOutput,
   encodeCursorKey,
+  encodePageKey,
   encodeTerminalBinaryFrames,
   encodeTerminalTextFrames,
   isPermanentSocketClose,
@@ -140,5 +141,21 @@ describe('terminal control protocol', () => {
     expect(isPermanentSocketClose(1008)).toBe(true);
     expect(isPermanentSocketClose(1012)).toBe(false);
     expect(isPermanentSocketClose(1013)).toBe(false);
+  });
+});
+
+describe('navigation key encoding', () => {
+  it('encodes Home and End like cursor keys, honouring application mode and modifiers', () => {
+    expect(encodeCursorKey('home', false, false, false)).toBe('\x1b[H');
+    expect(encodeCursorKey('end', true, false, false)).toBe('\x1bOF');
+    expect(encodeCursorKey('home', true, true, false)).toBe('\x1b[1;5H');
+    expect(encodeCursorKey('end', false, true, true)).toBe('\x1b[1;7F');
+  });
+
+  it('encodes Page Up and Page Down with the CSI ~ form', () => {
+    expect(encodePageKey('up', false, false)).toBe('\x1b[5~');
+    expect(encodePageKey('down', false, false)).toBe('\x1b[6~');
+    expect(encodePageKey('up', true, false)).toBe('\x1b[5;5~');
+    expect(encodePageKey('down', false, true)).toBe('\x1b[6;3~');
   });
 });

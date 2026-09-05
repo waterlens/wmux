@@ -4,17 +4,13 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal } from '@xterm/xterm';
 import {
   AlertTriangle,
-  ArrowDown,
-  ArrowLeft,
-  ArrowRight,
-  ArrowUp,
   Clipboard,
   Copy,
   Eraser,
-  Keyboard,
   LoaderCircle,
   Lock,
   Maximize2,
+  Menu,
   RefreshCw,
   Server,
   Square,
@@ -26,7 +22,14 @@ import { AUTO_COLUMNS } from '../preferences';
 import { liveStatusLabel } from '../sessionStatus';
 import { TerminalConnection } from '../terminalConnection';
 import { resolveTerminalFontFamily, TERMINAL_SYSTEM_FONT_FAMILY, type TerminalFontId } from '../terminalFonts';
-import { applyTerminalModifiers, encodeCursorKey, type CursorDirection, type LiveStatus } from '../terminalProtocol';
+import {
+  applyTerminalModifiers,
+  encodeCursorKey,
+  encodePageKey,
+  type CursorDirection,
+  type LiveStatus,
+  type PageDirection,
+} from '../terminalProtocol';
 import type { Notify, Session, TerminalPreferences } from '../types';
 import { Button } from './UI';
 
@@ -37,6 +40,8 @@ type TerminalViewProps = {
   restarting?: boolean | undefined;
   onRestart: (session: Session) => void;
   onTerminate: (session: Session) => void;
+  /** Phone layout only: the toolbar hosts the sidebar button because the tab bar is hidden there. */
+  onOpenSidebar?: (() => void) | undefined;
   notify: Notify;
 };
 
@@ -115,6 +120,7 @@ export function TerminalView({
   restarting,
   onRestart,
   onTerminate,
+  onOpenSidebar,
   notify,
 }: TerminalViewProps) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -366,6 +372,13 @@ export function TerminalView({
     terminal?.focus();
   }
 
+  function sendPage(direction: PageDirection) {
+    const value = encodePageKey(direction, ctrlRef.current, altRef.current);
+    clearModifiers();
+    connectionRef.current?.send(value);
+    terminalRef.current?.focus();
+  }
+
   function availableClipboard(): Clipboard | null {
     if (!window.isSecureContext) {
       notify('当前来源不是安全上下文；剪贴板功能需要 HTTPS（localhost 或回环地址除外）。', 'error');
@@ -441,6 +454,11 @@ export function TerminalView({
       data-replay-complete={replayComplete}
     >
       <header className="terminal-toolbar">
+        {onOpenSidebar && (
+          <button className="tool-button mobile-only" onClick={onOpenSidebar} aria-label="打开侧栏" title="打开侧栏">
+            <Menu size={19} />
+          </button>
+        )}
         <div className="terminal-identity">
           <span className={`connection-dot ${statusClass}`} />
           <div>
@@ -462,8 +480,16 @@ export function TerminalView({
             )}
             {liveStatusLabel(liveStatus)}
           </span>
-          <button className="tool-button desktop-only" onClick={() => void copySelection()} title="复制选中内容">
+          <button className="tool-button" onClick={() => void copySelection()} title="复制选中内容">
             <Copy size={16} />
+          </button>
+          <button
+            className="tool-button mobile-only"
+            onClick={() => void pasteClipboard()}
+            aria-label="粘贴"
+            title="粘贴"
+          >
+            <Clipboard size={16} />
           </button>
           <button
             className="tool-button desktop-only"
@@ -553,39 +579,41 @@ export function TerminalView({
         )}
       </div>
 
+      {/* Phone key grid: two rows of seven, laid out like a hardware terminal keypad. */}
       <nav className="special-keys" aria-label="终端特殊按键">
-        <button className={ctrl ? 'is-active' : ''} onClick={toggleCtrl}>
-          Ctrl
-        </button>
-        <button className={alt ? 'is-active' : ''} onClick={toggleAlt}>
-          Alt
-        </button>
-        <button onClick={() => sendSpecial('\x1b')}>Esc</button>
-        <button onClick={() => sendSpecial('\t')}>Tab</button>
-        <button onClick={() => sendSpecial('|')}>|</button>
+        <button onClick={() => sendSpecial('\x1b')}>ESC</button>
         <button onClick={() => sendSpecial('/')}>/</button>
-        <button onClick={() => sendSpecial('-')}>-</button>
-        <button aria-label="向左" onClick={() => sendCursor('left')}>
-          <ArrowLeft size={16} />
+        <button aria-label="-" onClick={() => sendSpecial('-')}>
+          —
         </button>
-        <button aria-label="向下" onClick={() => sendCursor('down')}>
-          <ArrowDown size={16} />
+        <button onClick={() => sendCursor('home')}>HOME</button>
+        <button className="key-arrow" aria-label="向上" onClick={() => sendCursor('up')}>
+          ↑
         </button>
-        <button aria-label="向上" onClick={() => sendCursor('up')}>
-          <ArrowUp size={16} />
+        <button onClick={() => sendCursor('end')}>END</button>
+        <button onClick={() => sendPage('up')}>PGUP</button>
+        <button aria-label="Tab" onClick={() => sendSpecial('\t')}>
+          <span className="key-tab" aria-hidden="true">
+            <span>⇤</span>
+            <span>⇥</span>
+          </span>
         </button>
-        <button aria-label="向右" onClick={() => sendCursor('right')}>
-          <ArrowRight size={16} />
+        <button className={ctrl ? 'is-active' : ''} aria-pressed={ctrl} onClick={toggleCtrl}>
+          CTRL
         </button>
-        <button aria-label="复制选中内容" onClick={() => void copySelection()}>
-          <Copy size={16} />
+        <button className={alt ? 'is-active' : ''} aria-pressed={alt} onClick={toggleAlt}>
+          ALT
         </button>
-        <button aria-label="粘贴" onClick={() => void pasteClipboard()}>
-          <Clipboard size={16} />
+        <button className="key-arrow" aria-label="向左" onClick={() => sendCursor('left')}>
+          ←
         </button>
-        <button aria-label="显示键盘" onClick={() => terminalRef.current?.focus()}>
-          <Keyboard size={16} />
+        <button className="key-arrow" aria-label="向下" onClick={() => sendCursor('down')}>
+          ↓
         </button>
+        <button className="key-arrow" aria-label="向右" onClick={() => sendCursor('right')}>
+          →
+        </button>
+        <button onClick={() => sendPage('down')}>PGDN</button>
       </nav>
     </div>
   );
