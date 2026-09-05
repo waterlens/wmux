@@ -6,7 +6,7 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['dist/**', 'internal/webui/dist/**', 'node_modules/**'],
+    ignores: ['bin/**', 'internal/webui/dist/**', 'node_modules/**', 'playwright-report/**', 'test-results/**'],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
@@ -25,7 +25,6 @@ export default tseslint.config(
     rules: {
       ...reactHooks.configs.flat.recommended.rules,
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
-      '@typescript-eslint/no-explicit-any': 'error',
     },
   },
   {
@@ -35,7 +34,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['scripts/**/*.mjs', 'eslint.config.js'],
+    files: ['eslint.config.js', 'playwright.config.ts', 'tests/browser/**/*.ts'],
     languageOptions: {
       globals: {
         ...globals.node,

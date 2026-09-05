@@ -6,7 +6,7 @@
   "description": "A self-hosted, persistent web terminal for local shells and SSH hosts.",
   "packageManager": "pnpm@11.25.0",
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=24"
   },
   "scripts": {
     "dev": "concurrently -k -n server,web -c cyan,green \"pnpm dev:server\" \"pnpm dev:web\"",
@@ -15,16 +15,15 @@
     "build": "pnpm build:web && pnpm build:server",
     "build:web": "vite build",
     "build:server": "sh scripts/build-server.sh",
-    "start": "./dist/wmux",
+    "start": "./bin/wmux",
     "lint": "eslint . --max-warnings 0",
-    "format": "prettier --write client scripts vite.config.ts package.json tsconfig.base.json tsconfig.client.json",
-    "format:check": "prettier --check client scripts vite.config.ts package.json tsconfig.base.json tsconfig.client.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "typecheck": "tsc -p tsconfig.client.json --noEmit",
-    "test": "pnpm lint && pnpm typecheck && pnpm test:unit && pnpm test:go",
+    "test": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:unit && pnpm test:go",
     "test:unit": "vitest run",
-    "test:go": "go test ./...",
-    "test:all": "pnpm test && pnpm build && pnpm test:browser",
-    "test:browser": "node scripts/browser-smoke.mjs",
+    "test:go": "go test -race ./... && go vet ./...",
+    "test:browser": "playwright test",
     "test:watch": "vitest"
   },
   "dependencies": {
@@ -43,6 +42,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
     "@types/react": "^19.2.18",
@@ -54,7 +54,6 @@
     "eslint-plugin-react-refresh": "^0.5.6",
     "globals": "^17.12.0",
     "jsdom": "^30.0.1",
-    "playwright-core": "^1.62.1",
     "prettier": "^3.9.6",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.69.0",
