@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -37,26 +36,15 @@ type Result struct {
 
 // Discoverer loads SSH configuration afresh for every call, so edits made by
 // the user are visible without restarting wmux.
-type Discoverer interface {
-	Discover(context.Context) (Result, error)
-	Resolve(context.Context, string) (Candidate, error)
-}
-
-type discoverer struct {
+type Discoverer struct {
 	path         string
 	homeOverride string
 }
 
 // New creates a Discoverer. An empty path selects ~/.ssh/config for the system
 // account running wmux; HOME does not override the account's home directory.
-func New(path string) Discoverer {
-	return &discoverer{path: path}
-}
-
-// newWithHome is intentionally private. It lets tests model the account home
-// independently from the process environment without changing global state.
-func newWithHome(path, home string) Discoverer {
-	return &discoverer{path: path, homeOverride: home}
+func New(path string) *Discoverer {
+	return &Discoverer{path: path}
 }
 
 type systemAccount struct {
@@ -65,8 +53,8 @@ type systemAccount struct {
 	homeDir  string
 }
 
-func (d *discoverer) Discover(ctx context.Context) (Result, error) {
-	if err := contextError(ctx); err != nil {
+func (d *Discoverer) Discover(ctx context.Context) (Result, error) {
+	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
 	account, err := runningAccount(d.homeOverride)
@@ -90,14 +78,11 @@ func (d *discoverer) Discover(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if len(aliases) == 0 {
+	if len(aliases.order) == 0 {
 		return result, nil
 	}
-	result.Candidates = make([]Candidate, 0, len(aliases))
-	for _, alias := range aliases {
-		if err := contextError(ctx); err != nil {
-			return Result{}, err
-		}
+	result.Candidates = make([]Candidate, 0, len(aliases.order))
+	for _, alias := range aliases.order {
 		candidate, err := document.resolve(ctx, alias, account)
 		if err != nil {
 			return Result{}, err
@@ -107,8 +92,8 @@ func (d *discoverer) Discover(ctx context.Context) (Result, error) {
 	return result, nil
 }
 
-func (d *discoverer) Resolve(ctx context.Context, alias string) (Candidate, error) {
-	if err := contextError(ctx); err != nil {
+func (d *Discoverer) Resolve(ctx context.Context, alias string) (Candidate, error) {
+	if err := ctx.Err(); err != nil {
 		return Candidate{}, err
 	}
 	account, err := runningAccount(d.homeOverride)
@@ -125,16 +110,14 @@ func (d *discoverer) Resolve(ctx context.Context, alias string) (Candidate, erro
 	}
 	found := false
 	if available {
-		found, err = document.hasLiteralAlias(ctx, alias)
-		if err != nil {
-			return Candidate{}, err
+		aliases, aliasErr := document.literalAliases(ctx)
+		if aliasErr != nil {
+			return Candidate{}, aliasErr
 		}
+		_, found = aliases.seen[alias]
 	}
 	if !available || !found {
 		return Candidate{}, fmt.Errorf("%w: %s", ErrAliasNotFound, alias)
-	}
-	if err := contextError(ctx); err != nil {
-		return Candidate{}, err
 	}
 	return document.resolve(ctx, alias, account)
 }
@@ -170,14 +153,6 @@ func expandHome(path, accountHome string) (string, error) {
 	return filepath.Join(accountHome, path[2:]), nil
 }
 
-func processUsername() (string, error) {
-	account, err := runningAccount("")
-	if err != nil {
-		return "", err
-	}
-	return account.username, nil
-}
-
 func runningAccount(homeOverride string) (systemAccount, error) {
 	current, err := user.Current()
 	if err != nil {
@@ -203,13 +178,6 @@ func runningAccount(homeOverride string) (systemAccount, error) {
 	}
 	account.homeDir = filepath.Clean(absoluteHome)
 	return account, nil
-}
-
-func contextError(ctx context.Context) error {
-	if ctx == nil {
-		return errors.New("sshconfig: nil context")
-	}
-	return ctx.Err()
 }
 
 type resolvedOptions struct {
@@ -260,7 +228,7 @@ func (d document) resolve(ctx context.Context, alias string, account systemAccou
 		candidate.Port = port
 	}
 	if options.userSet && options.user != "" {
-		username, err := expandUser(options.user, alias, candidate.Address, candidate.Port, account, options.proxyJump)
+		username, err := expandUser(options.user)
 		if err != nil {
 			return Candidate{}, fmt.Errorf("sshconfig: %s:%d: User: %w", options.userSource, options.userLine, err)
 		}
@@ -284,12 +252,7 @@ func (d document) apply(ctx context.Context, file configFile, alias string, opti
 		return fmt.Errorf("sshconfig: include depth exceeds %d at %s", maxIncludeDepth, file.path)
 	}
 	active := true
-	for index, directive := range file.directives {
-		if index%64 == 0 {
-			if err := contextError(ctx); err != nil {
-				return err
-			}
-		}
+	for _, directive := range file.directives {
 		switch directive.keyword {
 		case "host":
 			active = hostPatternsMatch(directive.arguments, alias)
@@ -380,48 +343,15 @@ func expandHostName(value, alias string) (string, error) {
 	})
 }
 
-func expandUser(value, alias, address string, port int, account systemAccount, proxyJump string) (string, error) {
-	// Expanding arbitrary process environment variables into a value returned by
-	// the discovery API would expose service secrets. Include retains environment
-	// expansion because it is needed to locate config, but User is fail-closed.
+// expandUser accepts literal user names only. Expanding either environment
+// variables or %-tokens into a value the discovery API returns would leak
+// service-side state (secrets, home directory, uid, local hostname), so User
+// is fail-closed exactly like a Match condition. %% still yields a literal %.
+func expandUser(value string) (string, error) {
 	if strings.Contains(value, "${") {
 		return "", errors.New("environment expansion is disabled for User")
 	}
 	return expandPercentTokens(value, func(token byte) (string, error) {
-		switch token {
-		case 'd':
-			return account.homeDir, nil
-		case 'h':
-			return address, nil
-		case 'i':
-			if account.uid == "" {
-				return "", errors.New("resolve %i user ID: empty user ID")
-			}
-			return account.uid, nil
-		case 'j':
-			if isNone(proxyJump) {
-				return "", nil
-			}
-			return proxyJump, nil
-		case 'l', 'L':
-			hostname, err := os.Hostname()
-			if err != nil {
-				return "", fmt.Errorf("resolve %%%c local hostname: %w", token, err)
-			}
-			if token == 'L' {
-				hostname, _, _ = strings.Cut(hostname, ".")
-			}
-			return hostname, nil
-		case 'n':
-			return alias, nil
-		case 'p':
-			return strconv.Itoa(port), nil
-		case 'u':
-			return account.username, nil
-		case 'k':
-			return "", errors.New("token %k requires HostKeyAlias, which discovery does not import")
-		default:
-			return "", fmt.Errorf("unsupported token %%%c", token)
-		}
+		return "", fmt.Errorf("token %%%c in User is not supported by discovery", token)
 	})
 }

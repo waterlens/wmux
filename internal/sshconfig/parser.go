@@ -8,7 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -59,7 +59,9 @@ type documentLoader struct {
 }
 
 func (l *documentLoader) loadFile(ctx context.Context, path string, root bool) (configFile, bool, error) {
-	if err := contextError(ctx); err != nil {
+	// Reading files is the only part of discovery that can block, so this is
+	// the one cancellation check below the two API entry points.
+	if err := ctx.Err(); err != nil {
 		return configFile{}, false, err
 	}
 	absolute, err := filepath.Abs(path)
@@ -107,9 +109,6 @@ func (l *documentLoader) loadFile(ctx context.Context, path string, root bool) (
 	lineNumber := 0
 	for scanner.Scan() {
 		lineNumber++
-		if err := contextError(ctx); err != nil {
-			return configFile{}, false, err
-		}
 		keyword, arguments, ok, err := parseDirective(scanner.Text())
 		if err != nil {
 			return configFile{}, false, fmt.Errorf("sshconfig: %s:%d: %w", absolute, lineNumber, err)
@@ -124,9 +123,6 @@ func (l *documentLoader) loadFile(ctx context.Context, path string, root bool) (
 	if err := scanner.Err(); err != nil {
 		return configFile{}, false, fmt.Errorf("sshconfig: read %s: %w", absolute, err)
 	}
-	if err := contextError(ctx); err != nil {
-		return configFile{}, false, err
-	}
 	l.cache[canonical] = parsed
 	return parsed, true, nil
 }
@@ -134,9 +130,6 @@ func (l *documentLoader) loadFile(ctx context.Context, path string, root bool) (
 func (d document) includedFiles(ctx context.Context, include directive) ([]configFile, error) {
 	files := make([]configFile, 0)
 	for _, pattern := range include.arguments {
-		if err := contextError(ctx); err != nil {
-			return nil, err
-		}
 		matches, err := includeMatches(pattern, d.loader.includeBase, d.loader.account)
 		if err != nil {
 			return nil, fmt.Errorf("sshconfig: %s:%d: Include %q: %w", include.source, include.line, pattern, err)
@@ -174,7 +167,7 @@ func includeMatches(pattern, relativeTo string, account systemAccount) ([]string
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(matches)
+	slices.Sort(matches)
 	return matches, nil
 }
 
@@ -276,43 +269,48 @@ func expandPercentTokens(value string, resolve func(byte) (string, error)) (stri
 	return expanded.String(), nil
 }
 
-func (d document) literalAliases(ctx context.Context) ([]string, error) {
-	aliases := make([]string, 0)
-	seen := make(map[string]struct{})
-	stack := map[string]bool{d.root.canonical: true}
-	if err := d.collectAliases(ctx, d.root, &aliases, seen, stack, 0); err != nil {
-		return nil, err
-	}
-	return aliases, nil
+// aliasCollector accumulates importable Host aliases in first-seen order and
+// answers membership without a second pass.
+type aliasCollector struct {
+	order []string
+	seen  map[string]struct{}
 }
 
-func (d document) collectAliases(ctx context.Context, file configFile, aliases *[]string, seen map[string]struct{}, stack map[string]bool, depth int) error {
+func (c *aliasCollector) add(alias string) {
+	if _, exists := c.seen[alias]; exists {
+		return
+	}
+	c.seen[alias] = struct{}{}
+	c.order = append(c.order, alias)
+}
+
+func (d document) literalAliases(ctx context.Context) (aliasCollector, error) {
+	collector := aliasCollector{order: make([]string, 0), seen: make(map[string]struct{})}
+	stack := map[string]bool{d.root.canonical: true}
+	if err := d.collectAliases(ctx, d.root, &collector, stack, 0); err != nil {
+		return aliasCollector{}, err
+	}
+	return collector, nil
+}
+
+func (d document) collectAliases(ctx context.Context, file configFile, collector *aliasCollector, stack map[string]bool, depth int) error {
 	if depth > maxIncludeDepth {
 		return fmt.Errorf("sshconfig: include depth exceeds %d at %s", maxIncludeDepth, file.path)
 	}
 	includeAllowed := true
-	for index, directive := range file.directives {
-		if index%64 == 0 {
-			if err := contextError(ctx); err != nil {
-				return err
-			}
-		}
+	for _, directive := range file.directives {
 		switch directive.keyword {
 		case "host":
 			for _, pattern := range directive.arguments {
 				if pattern == "" || strings.HasPrefix(pattern, "!") || strings.ContainsAny(pattern, "*?") {
 					continue
 				}
-				if _, exists := seen[pattern]; exists {
-					continue
-				}
-				seen[pattern] = struct{}{}
-				*aliases = append(*aliases, pattern)
+				collector.add(pattern)
 			}
 			// An unnegated literal "*" matches every possible target, so an
 			// Include in that block is as safe to enumerate as a global Include.
 			// Every other Host condition remains fail-closed during discovery.
-			includeAllowed = hostPatternsMatchAll(directive.arguments)
+			includeAllowed = hostPatternsAreUniversal(directive.arguments)
 		case "match":
 			includeAllowed = isMatchAll(directive.arguments)
 		case "include":
@@ -331,7 +329,7 @@ func (d document) collectAliases(ctx context.Context, file configFile, aliases *
 					return fmt.Errorf("sshconfig: recursive Include cycle at %s", child.path)
 				}
 				stack[child.canonical] = true
-				err := d.collectAliases(ctx, child, aliases, seen, stack, depth+1)
+				err := d.collectAliases(ctx, child, collector, stack, depth+1)
 				delete(stack, child.canonical)
 				if err != nil {
 					return err
@@ -342,24 +340,13 @@ func (d document) collectAliases(ctx context.Context, file configFile, aliases *
 	return nil
 }
 
-func (d document) hasLiteralAlias(ctx context.Context, alias string) (bool, error) {
-	aliases, err := d.literalAliases(ctx)
-	if err != nil {
-		return false, err
-	}
-	for _, candidate := range aliases {
-		if candidate == alias {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 func isMatchAll(arguments []string) bool {
 	return len(arguments) == 1 && strings.EqualFold(arguments[0], "all")
 }
 
-func hostPatternsMatchAll(patterns []string) bool {
+// hostPatternsAreUniversal reports whether the pattern list matches every
+// possible target, i.e. contains an unnegated "*".
+func hostPatternsAreUniversal(patterns []string) bool {
 	hasUniversalPattern := false
 	for _, pattern := range patterns {
 		if strings.HasPrefix(pattern, "!") {
@@ -502,6 +489,9 @@ func hostPatternsMatch(patterns []string, alias string) bool {
 	return matched
 }
 
+// wildcardMatch deliberately does not use path.Match: OpenSSH Host patterns
+// support only "*" and "?", so the "[...]" character classes path.Match would
+// interpret must stay literal, and path.Match also treats "/" specially.
 func wildcardMatch(pattern, value string) bool {
 	patternRunes := []rune(pattern)
 	valueRunes := []rune(value)

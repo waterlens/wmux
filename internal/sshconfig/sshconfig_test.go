@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -120,7 +121,7 @@ Host "quoted alias"
 		t.Fatalf("candidate order = %#v, want %#v", got, want)
 	}
 	for _, forbidden := range []string{"*.wild", "*.root", "!negative", "!negated"} {
-		if contains(candidateAliases(result.Candidates), forbidden) {
+		if slices.Contains(candidateAliases(result.Candidates), forbidden) {
 			t.Fatalf("non-literal Host pattern %q became a candidate", forbidden)
 		}
 	}
@@ -583,27 +584,26 @@ func TestHostNameExpandsAliasAndLiteralPercent(t *testing.T) {
 	}
 }
 
-func TestUserExpandsSafeAccountAndTargetTokens(t *testing.T) {
+func TestUserRejectsPercentTokensButKeepsLiteralPercent(t *testing.T) {
 	accountHome := t.TempDir()
-	path := filepath.Join(t.TempDir(), "config")
 	t.Setenv("HOME", t.TempDir())
-	writeConfig(t, path, `Host production
-  HostName node-%h.example
-  Port 2201
-  User deploy-%d-%u-%n-%h-%p-%%
-`)
+	for _, token := range []string{"%d", "%u", "%n", "%h", "%p", "%i", "%j", "%l", "%L", "%k"} {
+		path := filepath.Join(t.TempDir(), "config")
+		writeConfig(t, path, "Host production\n  User deploy-"+token+"\n")
+		_, err := newWithHome(path, accountHome).Resolve(context.Background(), "production")
+		if err == nil || !strings.Contains(err.Error(), "token "+token+" in User is not supported") {
+			t.Fatalf("User %s error = %v, want an explicit rejection", token, err)
+		}
+	}
 
+	path := filepath.Join(t.TempDir(), "config")
+	writeConfig(t, path, "Host production\n  User deploy-100%%\n")
 	candidate, err := newWithHome(path, accountHome).Resolve(context.Background(), "production")
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := processUsername()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "deploy-" + accountHome + "-" + current + "-production-node-production.example-2201-%"
-	if candidate.Username != want {
-		t.Fatalf("expanded User = %q, want %q", candidate.Username, want)
+	if candidate.Username != "deploy-100%" {
+		t.Fatalf("literal percent User = %q", candidate.Username)
 	}
 }
 
@@ -801,15 +801,6 @@ func candidateAliases(candidates []Candidate) []string {
 		aliases[index] = candidate.Alias
 	}
 	return aliases
-}
-
-func contains(values []string, wanted string) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
-	}
-	return false
 }
 
 func configName(index int) string {
