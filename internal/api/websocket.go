@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -21,9 +20,7 @@ const (
 	serverOutputFrame = byte(1)
 	maxSocketMessage  = 128 << 10
 
-	// socketStatePeriod is the heartbeat that re-checks the login and reports
-	// state even if a status update was missed. Live changes arrive earlier
-	// over the attachment's state channel.
+	// socketStatePeriod is the heartbeat that re-checks the login and state.
 	socketStatePeriod = 2 * time.Second
 	socketPingPeriod  = 30 * time.Second
 	socketPingTimeout = 10 * time.Second
@@ -40,7 +37,7 @@ type socketEvent struct {
 	ClientID   string `json:"clientId,omitempty"`
 	Status     string `json:"status,omitempty"`
 	Backend    string `json:"backend,omitempty"`
-	Generation uint64 `json:"generation,omitempty"`
+	Generation int    `json:"generation,omitempty"`
 	Writer     *bool  `json:"writer,omitempty"`
 	WriterID   string `json:"writerId,omitempty"`
 	Clients    int    `json:"clients,omitempty"`
@@ -51,6 +48,12 @@ type socketEvent struct {
 }
 
 func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
+	// The heartbeat re-reads this login, so the stream cannot outlive it.
+	auth, ok := r.Context().Value(authContextKey{}).(store.AuthSession)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+		return
+	}
 	if s.terminals == nil {
 		writeError(w, http.StatusServiceUnavailable, "terminal_unavailable", "终端服务不可用")
 		return
@@ -93,9 +96,7 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Warn("attach terminal WebSocket", "session_id", id, "error", err)
 		if errors.Is(err, terminal.ErrSessionNotFound) {
-			// The row was read a moment ago, so the runtime is between a stop
-			// and its replacement: tell the browser to come back instead of
-			// reporting a policy failure it would read as a lost login.
+			// A row without a runtime means a restart is in flight.
 			_ = writeSocketJSON(r.Context(), connection, socketEvent{Type: "disconnect", Status: "reconnecting", Reason: string(terminal.AttachmentRestarted)})
 			_ = connection.Close(websocket.StatusTryAgainLater, "session restarting")
 			return
@@ -135,11 +136,8 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		delivered = frame.Sequence
 	}
-	// Attach takes the transcript snapshot and installs the live subscriber
-	// under the same runtime lock.  Sending this marker before we start reading
-	// Frames therefore gives clients an exact replay/live boundary: every
-	// binary frame before it is durable history and every binary frame after it
-	// was published after that snapshot.
+	// Attach snapshots the transcript and subscribes under one lock, so this
+	// marker is an exact replay/live boundary.
 	delivered = attachment.LatestSequence
 	if err := writeSocketJSON(r.Context(), connection, socketEvent{
 		Type:     "replay_end",
@@ -157,9 +155,6 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		readDone <- s.readTerminalSocket(r.Context(), connection, id, attachment, controlOut)
 	}()
 
-	// requireAuth put the login that opened this socket in the context. A long
-	// lived stream must not outlive it, so the heartbeat re-reads it.
-	auth, _ := r.Context().Value(authContextKey{}).(store.AuthSession)
 	ticker := time.NewTicker(socketStatePeriod)
 	defer ticker.Stop()
 	frames := attachment.Frames
@@ -189,14 +184,11 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 				states = nil
 				continue
 			}
-			// The runtime queues output before the status that describes it, so
-			// deliver what is already waiting first: a session's last output
-			// must never be overtaken by the event announcing its end.
-			flushed, err := flushFrames(r.Context(), connection, frames, delivered)
-			if err != nil {
-				return
+			// Terminal outcomes come from closeTerminalSocket; a restart also
+			// passes through StateTerminating.
+			if publicTerminalState(status.State) == "exited" {
+				continue
 			}
-			delivered = flushed
 			if err := writeSocketJSON(r.Context(), connection, terminalStateEvent(status, attachment.IsWriter(), delivered)); err != nil {
 				return
 			}
@@ -205,8 +197,7 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		case frame, ok := <-frames:
 			if !ok {
-				// The terminal closes Closed before Frames, so the reason is
-				// already buffered even when this select observes Frames first.
+				// Closed is closed before Frames, so the reason is already buffered.
 				reason := <-closed
 				s.closeTerminalSocket(r.Context(), connection, reason, frames, delivered)
 				return
@@ -228,6 +219,9 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			if err != nil {
 				return
+			}
+			if publicTerminalState(status.State) == "exited" {
+				continue
 			}
 			if err := writeSocketJSON(r.Context(), connection, terminalStateEvent(status, attachment.IsWriter(), delivered)); err != nil {
 				return
@@ -264,8 +258,7 @@ func (s *Server) readTerminalSocket(ctx context.Context, connection *websocket.C
 					continue
 				}
 				if errors.Is(writeErr, context.DeadlineExceeded) {
-					// One slow write is a stuck terminal, not a broken session:
-					// report it and keep the stream (and the backend) alive.
+					// A slow write keeps the stream and the backend alive.
 					nonBlockingEvent(controlOut, socketEvent{Type: "error", Message: "终端未响应输入，请稍后重试"})
 					continue
 				}
@@ -301,8 +294,7 @@ func (s *Server) readTerminalSocket(ctx context.Context, connection *websocket.C
 	}
 }
 
-// pingSocket keeps idle proxies from dropping the stream and detects a peer
-// that stopped answering. The returned function stops it.
+// pingSocket detects a silent peer; the returned function stops it.
 func pingSocket(ctx context.Context, connection *websocket.Conn) func() {
 	pingCtx, stop := context.WithCancel(ctx)
 	go func() {
@@ -326,25 +318,6 @@ func pingSocket(ctx context.Context, connection *websocket.Conn) func() {
 		}
 	}()
 	return stop
-}
-
-// flushFrames writes the output already queued for this client without waiting
-// for more. It returns the newest sequence written.
-func flushFrames(ctx context.Context, connection *websocket.Conn, frames <-chan terminal.OutputFrame, delivered uint64) (uint64, error) {
-	for {
-		select {
-		case frame, ok := <-frames:
-			if !ok {
-				return delivered, nil
-			}
-			if err := writeOutputFrame(ctx, connection, frame); err != nil {
-				return delivered, err
-			}
-			delivered = frame.Sequence
-		default:
-			return delivered, nil
-		}
-	}
 }
 
 func terminalStateEvent(status terminal.SessionStatus, writer bool, delivered uint64) socketEvent {
@@ -382,18 +355,15 @@ func publicTerminalMessage(status terminal.SessionStatus) string {
 	if status.LastError == "" {
 		return ""
 	}
-	// A missing tmux/screen session is an ordinary outcome, not a fault: say so
-	// instead of sending the operator to check the connection.
-	if publicTerminalState(status.State) == "exited" && strings.Contains(status.LastError, "no longer exists") {
+	// A missing tmux/screen session is an ordinary outcome, not a fault.
+	if publicTerminalState(status.State) == "exited" && status.LastError == terminal.ErrBackendMissing.Error() {
 		return "后台会话已不存在"
 	}
 	return "终端暂时不可用，请检查会话配置或主机连接"
 }
 
-// closeTerminalSocket reports the runtime's own reason for ending the stream.
-// The runtime closes Frames together with Closed, so everything it buffered
-// before stopping is delivered here: a session's last output must not be lost
-// to its own exit.
+// closeTerminalSocket flushes the runtime's remaining output and reports why
+// the stream ended.
 func (s *Server) closeTerminalSocket(ctx context.Context, connection *websocket.Conn, reason terminal.AttachmentCloseReason, frames <-chan terminal.OutputFrame, delivered uint64) {
 	if reason == terminal.AttachmentClientClosed {
 		return

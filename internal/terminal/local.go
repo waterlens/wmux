@@ -25,9 +25,7 @@ type localBackend struct {
 
 	closeOnce sync.Once
 	closeErr  error
-	// input is a capacity-1 semaphore. Waiting for it honours the caller's
-	// context so a stuck write never blocks another client, and a caller that
-	// gives up never closes this shared backend.
+	// input is a capacity-1 semaphore that serializes writes.
 	input chan struct{}
 }
 
@@ -64,8 +62,7 @@ func (l launcher) startLocal(ctx context.Context, spec SessionSpec, requested Pe
 		cmd = exec.CommandContext(ctx, tool, "-c", screenConfig, "-x", name)
 		cmd.Env = screenEnv
 	case PersistenceNone:
-		// A plain PTY has nothing to reattach to, so an attach-only launch
-		// must report the missing backend instead of re-running the command.
+		// A plain PTY has nothing to reattach to.
 		if !create {
 			return nil, "", ErrBackendMissing
 		}
@@ -117,9 +114,8 @@ func (l launcher) ensureLocalTmux(ctx context.Context, path, name string, spec S
 	if !create {
 		return ErrBackendMissing
 	}
-	// update-environment and new-session must run in one tmux invocation so
-	// the new session inherits this client's per-session variables. ";" is a
-	// separate argv element, which is tmux's command separator.
+	// update-environment and new-session run in one invocation; ";" is a separate
+	// argv element because it is tmux's command separator.
 	args := l.tmuxArgs(
 		"set-option", "-g", "update-environment", tmuxEnvironmentList(spec.Env), ";",
 		"new-session", "-d", "-s", name, "-x", fmt.Sprint(cols), "-y", fmt.Sprint(rows),
@@ -156,17 +152,14 @@ func (l launcher) configureLocalTmux(ctx context.Context, path string) error {
 			return permanentStartError(fmt.Errorf("terminal: configure isolated tmux server: %w: %s", err, strings.TrimSpace(string(output))))
 		}
 	}
-	// tmux gained native OSC 8 support after terminal-features already
-	// existed. Treat an unknown feature as an optional capability so older
-	// tmux releases keep working; never enable allow-passthrough as a fallback.
+	// An unknown terminal feature stays optional; passthrough is never enabled.
 	if err := l.appendTmuxOption(ctx, path, "terminal-features", tmuxHyperlinkFeatures, "xterm*:hyperlinks"); err != nil {
 		return err
 	}
 	return l.appendTmuxOption(ctx, path, "terminal-overrides", tmuxTrueColorOverride, "xterm*:Tc")
 }
 
-// appendTmuxOption appends value to a server option unless marker is already
-// present. An option an older tmux rejects stays optional rather than fatal.
+// appendTmuxOption appends value to a server option unless marker is present.
 func (l launcher) appendTmuxOption(ctx context.Context, path, option, value, marker string) error {
 	current, queryErr := exec.CommandContext(ctx, path, l.tmuxArgs("show-options", "-gqv", option)...).CombinedOutput()
 	if ctx.Err() != nil {
@@ -203,9 +196,7 @@ func (l launcher) ensureLocalScreen(ctx context.Context, path, config string, en
 	if spec.Cwd != "" {
 		cmd.Dir = spec.Cwd
 	}
-	// Do not use CombinedOutput here. Some screen versions let the detached
-	// daemon inherit os/exec's capture pipe, which makes CombinedOutput wait for
-	// the lifetime of the session rather than the short-lived client process.
+	// CombinedOutput would wait for the detached daemon, not the client process.
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -399,9 +390,6 @@ func localEnvironment(extra map[string]string) []string {
 	if _, explicitlySet := extra["TERM"]; !explicitlySet {
 		values["TERM"] = "xterm-256color"
 	}
-	if _, explicitlySet := extra["COLORTERM"]; !explicitlySet {
-		values["COLORTERM"] = "truecolor"
-	}
 	for key, value := range extra {
 		values[key] = value
 	}
@@ -425,9 +413,7 @@ func (b *localBackend) Write(p []byte) (int, error) {
 	return b.WriteContext(context.Background(), p)
 }
 
-// WriteContext serializes input through a capacity-1 semaphore. A caller whose
-// context expires while queued gives up its turn; it never closes the backend,
-// because one stuck client must not end the session for everyone else.
+// WriteContext waits for its turn under the caller's context.
 func (b *localBackend) WriteContext(ctx context.Context, p []byte) (int, error) {
 	select {
 	case b.input <- struct{}{}:
@@ -456,10 +442,7 @@ func (b *localBackend) Wait(ctx context.Context) error {
 
 func (b *localBackend) Close() error {
 	b.closeOnce.Do(func() {
-		// Close is the detach operation for tmux/screen and the shutdown
-		// operation for a direct PTY. Killing this client process cannot kill a
-		// named tmux/screen server, and guarantees Manager.Close does not wait
-		// forever on a process that ignores terminal hangup.
+		// Close detaches from tmux/screen and shuts down a direct PTY.
 		var processErr error
 		if b.cmd.Process != nil {
 			processErr = b.cmd.Process.Kill()

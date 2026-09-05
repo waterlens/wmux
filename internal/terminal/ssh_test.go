@@ -88,7 +88,7 @@ func TestRemoteAttachCommandQuotesValues(t *testing.T) {
 		Cwd:   "/tmp/a'b",
 		Shell: "/bin/zsh",
 		Args:  []string{"-l", "argument with spaces"},
-		Env:   map[string]string{"SAFE_NAME": "a'b"},
+		Env:   map[string]string{"SAFE_NAME": "a'b", "COLORTERM": "truecolor"},
 	}, PersistenceTmux, "wmux-safe", true)
 	for _, wanted := range []string{
 		"export SAFE_NAME='a'\"'\"'b'",
@@ -130,7 +130,7 @@ func TestRemoteAttachCommandsUseIsolatedMuxAndExpandHome(t *testing.T) {
 		t.Fatalf("tmux command enables unsafe passthrough: %q", tmux)
 	}
 
-	// Attach-only launches must never create or re-run anything.
+	// Attach-only launches create and re-run nothing.
 	attachOnly := l.remoteAttachCommand(SessionSpec{Shell: "/bin/sh", Args: []string{"-lc", "make"}}, PersistenceTmux, "wmux-demo", false)
 	if strings.Contains(attachOnly, "new-session") || strings.Contains(attachOnly, "make") {
 		t.Fatalf("attach-only tmux command can still create a session: %q", attachOnly)

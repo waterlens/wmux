@@ -41,7 +41,7 @@ func TestRuntimeStateCallbacksPreserveProductMetadata(t *testing.T) {
 	metadataTime := session.UpdatedAt
 
 	status := terminal.SessionStatus{
-		ID: created.ID, Generation: uint64(created.Generation),
+		ID: created.ID, Generation: created.Generation,
 		State: terminal.StateRunning, Persistence: terminal.PersistenceTmux,
 	}
 	repository.OnSessionState(status)
@@ -69,7 +69,7 @@ func TestRuntimeStateCallbacksPreserveProductMetadata(t *testing.T) {
 	if !record.Active || record.Name != "Renamed by user" || record.ResolvedPersistence != terminal.PersistenceTmux {
 		t.Fatalf("restored record = %+v", record)
 	}
-	if record.Generation != uint64(created.Generation) {
+	if record.Generation != created.Generation {
 		t.Fatalf("restored generation = %d, want %d", record.Generation, created.Generation)
 	}
 	if record.Env["WMUX_SESSION_ID"] != created.ID || record.Env["COLORTERM"] != "truecolor" {
@@ -80,7 +80,7 @@ func TestRuntimeStateCallbacksPreserveProductMetadata(t *testing.T) {
 	}
 
 	repository.OnSessionState(terminal.SessionStatus{
-		ID: created.ID, Generation: uint64(created.Generation),
+		ID: created.ID, Generation: created.Generation,
 		State: terminal.StateExited, Persistence: terminal.PersistenceTmux,
 	})
 	records, err = repository.ListSessions(ctx)
@@ -108,14 +108,13 @@ func TestStaleGenerationCallbackIsIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Generation != uint64(generation) {
+	if spec.Generation != generation {
 		t.Fatalf("spec generation = %d, want %d", spec.Generation, generation)
 	}
 
-	// The previous execution reports its exit only now. The restarted session
-	// must keep the state of the generation that replaced it.
+	// The previous execution reports its exit after the restart.
 	repository.OnSessionState(terminal.SessionStatus{
-		ID: created.ID, Generation: uint64(created.Generation),
+		ID: created.ID, Generation: created.Generation,
 		State: terminal.StateExited, Persistence: terminal.PersistenceTmux,
 		LastError: "terminal: backend session no longer exists",
 	})

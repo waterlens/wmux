@@ -224,3 +224,5 @@ xterm.js 本身支持 24-bit 色，但 tmux 内的 neovim/bat/delta 等会降级
 - 引入 `@xterm/addon-webgl`，失败或上下文丢失时回退 DOM 渲染（M3）。
 
 **未处理**：移动端与无障碍项（R12–R19、C01）、回放移出会话锁（M7）、历史加密（M6，README 已明确其明文特性）、已信任主机的密钥轮换重验（R06）及其余低优先级项。
+
+**代码风格与过度工程复审（2026-09-05，第二轮）**：去掉了 WebSocket 状态推送路径里重复的尾帧排空与重复的 exited 事件，并修复了由此暴露的重启缺陷（其他设备先收到 terminating 映射的 exited 而不再重连）；COLORTERM 默认值只保留 app 一处；删除无调用方的 `UpdateSessionStatus`；错误文本子串匹配改为与 `ErrBackendMissing` 精确比较；generation 统一为 `int`；`notifyLocked` 与 `notifyWritersLocked` 写法统一；WebSocket 登录断言失败直接返回 401；前端删除仅供测试的 `generation` 状态，`restartingIds` 改为 Set，`disconnect(reconnecting)` 显式恢复重连；真实 tmux 测试统一以 `WMUX_TMUX_INTEGRATION` 门控并加入 CI；测试中的 sleep 排序改为通道同步，重复的读循环合并为助手；全部注释按"只保留一句事实"精简。

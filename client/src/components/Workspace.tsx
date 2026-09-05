@@ -79,7 +79,7 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [restartTarget, setRestartTarget] = useState<Session | null>(null);
-  const [restartingIds, setRestartingIds] = useState<string[]>([]);
+  const [restartingIds, setRestartingIds] = useState<ReadonlySet<string>>(() => new Set());
   const restartingRef = useRef<Set<string>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [preferences, setPreferences] = useState<TerminalPreferences>(loadPreferences);
@@ -143,7 +143,7 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
       const request = ++requestId;
       try {
         const [nextSessions, nextHosts] = await Promise.all([api.sessions(), api.hosts()]);
-        // A slow earlier poll must never overwrite a newer list.
+        // A slow earlier poll can still land after a newer one.
         if (stopped || request !== requestId) return;
         setSessions(nextSessions);
         setHosts(nextHosts);
@@ -155,7 +155,7 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
           return next;
         });
       } catch {
-        // Global 401 handling redirects; transient polling failures keep the last known list.
+        // Transient polling failures keep the last known list.
       }
     };
     const timer = window.setInterval(() => void refresh(), 5000);
@@ -218,13 +218,12 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
     [notify, openSession],
   );
 
-  // The ref (not the state) is the re-entrancy guard: repeated clicks in one
-  // React batch would all read the same stale state.
+  // The ref guards re-entrancy; the state only drives the UI.
   const restartSession = useCallback(
     async (session: Session) => {
       if (restartingRef.current.has(session.id)) return;
       restartingRef.current.add(session.id);
-      setRestartingIds((current) => [...current, session.id]);
+      setRestartingIds((current) => new Set(current).add(session.id));
       try {
         const updated = await api.restartSession(session.id);
         updateSession(updated);
@@ -235,7 +234,11 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
         notify(errorMessage(reason), 'error');
       } finally {
         restartingRef.current.delete(session.id);
-        setRestartingIds((current) => current.filter((id) => id !== session.id));
+        setRestartingIds((current) => {
+          const next = new Set(current);
+          next.delete(session.id);
+          return next;
+        });
       }
     },
     [notify, openSession, updateSession],
@@ -244,7 +247,6 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
   const requestRestart = useCallback(
     (session: Session) => {
       if (restartingRef.current.has(session.id)) return;
-      // A live session loses its running processes, so ask first.
       if (session.status === 'connecting' || session.status === 'running' || session.status === 'reconnecting') {
         setRestartTarget(session);
         return;
@@ -383,7 +385,7 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
                     session={session}
                     active={activeId === session.id && currentView === 'terminal'}
                     preferences={preferences}
-                    restarting={restartingIds.includes(session.id)}
+                    restarting={restartingIds.has(session.id)}
                     onRestart={requestRestart}
                     onTerminate={setDeleteTarget}
                     notify={notify}
@@ -425,7 +427,7 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
         title={`重启「${restartTarget?.name ?? '会话'}」？`}
         description="当前进程会被结束，终端会重新启动。"
         confirmLabel="重启会话"
-        busy={Boolean(restartTarget && restartingIds.includes(restartTarget.id))}
+        busy={Boolean(restartTarget && restartingIds.has(restartTarget.id))}
         onCancel={() => setRestartTarget(null)}
         onConfirm={() => void confirmRestart()}
       />

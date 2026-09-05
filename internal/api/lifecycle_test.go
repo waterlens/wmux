@@ -103,9 +103,7 @@ func TestTerminalWebSocketReplayBoundarySeparatesHistoryFromLiveOutput(t *testin
 		t.Fatalf("first replay WebSocket message = %q, want hello", event.Type)
 	}
 
-	// This output is produced after Attach captured its transcript snapshot. It
-	// may already be queued while the initial replay is being written, but must
-	// never cross the explicit boundary or reuse a replay sequence.
+	// This output is produced after Attach captured its transcript snapshot.
 	live := "WMUX_LIVE_AFTER_ATTACH\n"
 	if err := writer.Write(ctx, websocket.MessageBinary, append([]byte{clientInputFrame}, []byte(live)...)); err != nil {
 		t.Fatal(err)
@@ -184,9 +182,7 @@ func TestTerminalWebSocketReadLimitBoundary(t *testing.T) {
 	}
 	awaitSocketEvent(t, ctx, connection, "replay_end", nil)
 
-	// SetReadLimit is inclusive. Keep this boundary explicit because terminal
-	// input reserves one byte for its binary frame type, so callers may send at
-	// most maxSocketMessage-1 input bytes in a single message.
+	// SetReadLimit is inclusive, and input reserves one byte for the frame type.
 	exact := paddedSocketControlForTest(maxSocketMessage)
 	if err := connection.Write(ctx, websocket.MessageText, exact); err != nil {
 		t.Fatalf("write exact-limit message: %v", err)
@@ -297,8 +293,7 @@ func TestSessionPatchRestartAndDeleteLifecycle(t *testing.T) {
 		t.Fatalf("unexpected patched session: %#v", patched)
 	}
 
-	// Terminal dimensions belong to the live attachment. A patch that still
-	// carries them is rejected outright and must never resize the session.
+	// Terminal dimensions belong to the live attachment.
 	response = doJSONForTest(t, ctx, fixture, http.MethodPatch, "/api/sessions/"+id, map[string]any{
 		"name": "尺寸补丁", "cols": 132, "rows": 41,
 	})
@@ -540,29 +535,47 @@ func readSocketEventForTest(t *testing.T, ctx context.Context, connection *webso
 	return event
 }
 
+// socketTail is everything a terminal socket delivered before it closed.
+type socketTail struct {
+	events       []socketEvent
+	output       []byte
+	lastSequence uint64
+	closeStatus  websocket.StatusCode
+}
+
+func readSocketToClose(t *testing.T, ctx context.Context, connection *websocket.Conn) socketTail {
+	t.Helper()
+	var tail socketTail
+	var output bytes.Buffer
+	for {
+		messageType, payload, err := connection.Read(ctx)
+		if err != nil {
+			tail.closeStatus = websocket.CloseStatus(err)
+			tail.output = output.Bytes()
+			return tail
+		}
+		switch messageType {
+		case websocket.MessageBinary:
+			if len(payload) < 9 || payload[0] != serverOutputFrame {
+				t.Fatalf("invalid terminal output frame: %x", payload)
+			}
+			tail.lastSequence = binary.BigEndian.Uint64(payload[1:9])
+			output.Write(payload[9:])
+		case websocket.MessageText:
+			var event socketEvent
+			if err := json.Unmarshal(payload, &event); err != nil {
+				t.Fatalf("decode terminal event: %v", err)
+			}
+			tail.events = append(tail.events, event)
+		}
+	}
+}
+
 func paddedSocketControlForTest(size int) []byte {
 	prefix := []byte(`{"type":"unsupported"}`)
 	payload := bytes.Repeat([]byte{' '}, size)
 	copy(payload, prefix)
 	return payload
-}
-
-func waitForTerminalState(t *testing.T, ctx context.Context, manager *terminal.Manager, sessionID string, wanted terminal.SessionState) {
-	t.Helper()
-	for {
-		status, err := manager.Status(sessionID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if status.State == wanted {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("terminal state = %s, want %s: %v", status.State, wanted, ctx.Err())
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
 }
 
 func awaitSocketEvent(t *testing.T, ctx context.Context, connection *websocket.Conn, eventType string, accept func(socketEvent) bool) socketEvent {
@@ -664,12 +677,10 @@ func TestDeleteRunningSessionOnUnreachableHostWarnsAndReleasesTheHost(t *testing
 	if err := fixture.database.UpdateSessionRuntime(ctx, id, created.Generation, store.SessionStatusRunning, "tmux", terminal.BackendName(id), nil); err != nil {
 		t.Fatal(err)
 	}
-	// Restoring a running session against a host that refuses every connection
-	// is exactly the state in which deletion used to be impossible.
 	if err := fixture.manager.Restore(ctx); err != nil {
 		t.Fatal(err)
 	}
-	waitForAnyTerminalState(t, ctx, fixture.manager, id, terminal.StateDisconnected, terminal.StateError)
+	waitForTerminalState(t, ctx, fixture.manager, id, terminal.StateDisconnected, terminal.StateError)
 
 	response = doJSONForTest(t, ctx, fixture, http.MethodDelete, "/api/sessions/"+id, nil)
 	if response.StatusCode != http.StatusOK {
@@ -740,26 +751,15 @@ func TestTerminalWebSocketClosesWhenTheLoginIsRevoked(t *testing.T) {
 		t.Fatalf("logout returned %d, want %d", response.StatusCode, http.StatusNoContent)
 	}
 
-	// The heartbeat re-reads the login every two seconds, so a revoked session
-	// must drop the stream within one more period.
+	// The heartbeat re-reads the login every two seconds.
 	deadline, cancelDeadline := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelDeadline()
+	tail := readSocketToClose(t, deadline, connection)
+	if tail.closeStatus != websocket.StatusPolicyViolation {
+		t.Fatalf("close status = %v, want %v", tail.closeStatus, websocket.StatusPolicyViolation)
+	}
 	unauthorized := false
-	for {
-		messageType, payload, err := connection.Read(deadline)
-		if err != nil {
-			if status := websocket.CloseStatus(err); status != websocket.StatusPolicyViolation {
-				t.Fatalf("close status = %v, want %v (error: %v)", status, websocket.StatusPolicyViolation, err)
-			}
-			break
-		}
-		if messageType != websocket.MessageText {
-			continue
-		}
-		var event socketEvent
-		if err := json.Unmarshal(payload, &event); err != nil {
-			continue
-		}
+	for _, event := range tail.events {
 		if event.Type == "disconnect" && event.Reason == "unauthorized" {
 			unauthorized = true
 		}
@@ -773,9 +773,7 @@ func TestTerminalWebSocketDeliversBufferedOutputBeforeExit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	fixture := newLiveAPIFixtureWithReplayLimit(t, ctx, 128)
-	// The session waits for one line, then writes a payload in many small
-	// chunks and exits: most of it is still buffered when the runtime closes
-	// the stream, which is exactly the output that used to be lost.
+	// The session writes its payload in many small chunks and then exits.
 	id := createSessionForTest(t, ctx, fixture, map[string]any{
 		"name": "尾部输出", "kind": "local", "persistence": "none",
 		"command": `read -r _; i=0; while [ $i -lt 120 ]; do printf 'WMUX_TAIL_%s\n' "$i"; i=$((i+1)); done`,
@@ -791,47 +789,28 @@ func TestTerminalWebSocketDeliversBufferedOutputBeforeExit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Read to the end of the stream: every exited event must follow the output
-	// it describes, whether it arrives with the state change or with the close.
-	var output bytes.Buffer
-	lastSequence := uint64(0)
+	tail := readSocketToClose(t, ctx, connection)
+	if tail.closeStatus != websocket.StatusNormalClosure {
+		t.Fatalf("close status = %v, want %v", tail.closeStatus, websocket.StatusNormalClosure)
+	}
 	exits := 0
-	for {
-		messageType, payload, err := connection.Read(ctx)
-		if err != nil {
-			if status := websocket.CloseStatus(err); status != websocket.StatusNormalClosure {
-				t.Fatalf("close status = %v, want %v (error: %v)", status, websocket.StatusNormalClosure, err)
-			}
-			break
+	for _, event := range tail.events {
+		if event.Status != "exited" {
+			continue
 		}
-		switch messageType {
-		case websocket.MessageBinary:
-			if len(payload) < 9 || payload[0] != serverOutputFrame {
-				t.Fatalf("invalid terminal output frame: %x", payload)
-			}
-			lastSequence = binary.BigEndian.Uint64(payload[1:9])
-			output.Write(payload[9:])
-		case websocket.MessageText:
-			var event socketEvent
-			if err := json.Unmarshal(payload, &event); err != nil {
-				t.Fatalf("decode terminal event: %v", err)
-			}
-			if event.Status != "exited" {
-				continue
-			}
-			exits++
-			for _, marker := range []string{"WMUX_TAIL_0", "WMUX_TAIL_60", "WMUX_TAIL_119"} {
-				if !bytes.Contains(output.Bytes(), []byte(marker)) {
-					t.Fatalf("exited event arrived before buffered output %q: %q", marker, output.Bytes())
-				}
-			}
-			if event.Sequence != lastSequence {
-				t.Fatalf("exited sequence = %d, want the last delivered frame %d", event.Sequence, lastSequence)
-			}
+		exits++
+		// The exit reports the last frame the client received.
+		if event.Sequence != tail.lastSequence {
+			t.Fatalf("exited sequence = %d, want the last delivered frame %d", event.Sequence, tail.lastSequence)
 		}
 	}
-	if exits == 0 {
-		t.Fatalf("session end was never reported: %q", output.Bytes())
+	if exits != 1 {
+		t.Fatalf("session end was reported %d times, want once: %q", exits, tail.output)
+	}
+	for _, marker := range []string{"WMUX_TAIL_0", "WMUX_TAIL_60", "WMUX_TAIL_119"} {
+		if !bytes.Contains(tail.output, []byte(marker)) {
+			t.Fatalf("terminal output %q is missing %q", tail.output, marker)
+		}
 	}
 }
 
@@ -859,24 +838,18 @@ func TestRestartClosesAttachedSocketForReconnect(t *testing.T) {
 		t.Fatalf("restart generation = %d, want 2", restarted.Generation)
 	}
 
+	tail := readSocketToClose(t, ctx, connection)
+	if tail.closeStatus != websocket.StatusTryAgainLater {
+		t.Fatalf("close status = %v, want %v", tail.closeStatus, websocket.StatusTryAgainLater)
+	}
 	announced := false
-	for {
-		messageType, payload, err := connection.Read(ctx)
-		if err != nil {
-			if status := websocket.CloseStatus(err); status != websocket.StatusTryAgainLater {
-				t.Fatalf("close status = %v, want %v (error: %v)", status, websocket.StatusTryAgainLater, err)
-			}
-			break
-		}
-		if messageType != websocket.MessageText {
-			continue
-		}
-		var event socketEvent
-		if err := json.Unmarshal(payload, &event); err != nil {
-			continue
-		}
+	for _, event := range tail.events {
 		if event.Type == "disconnect" && event.Reason == string(terminal.AttachmentRestarted) {
 			announced = true
+			break
+		}
+		if event.Status == "exited" {
+			t.Fatalf("restart reported an exit before the reconnect: %#v", tail.events)
 		}
 	}
 	if !announced {
@@ -884,7 +857,7 @@ func TestRestartClosesAttachedSocketForReconnect(t *testing.T) {
 	}
 }
 
-func waitForAnyTerminalState(t *testing.T, ctx context.Context, manager *terminal.Manager, sessionID string, wanted ...terminal.SessionState) {
+func waitForTerminalState(t *testing.T, ctx context.Context, manager *terminal.Manager, sessionID string, wanted ...terminal.SessionState) {
 	t.Helper()
 	for {
 		status, err := manager.Status(sessionID)
@@ -908,9 +881,7 @@ func TestTerminalWebSocketAsksBrowserToRetryWhileRuntimeIsMissing(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	fixture := newLiveAPIFixture(t, ctx)
-	// A row without a runtime is what a browser finds in the window between
-	// stopping a session and creating its replacement. That is a retry, not the
-	// policy failure a lost login would be.
+	// A row without a runtime is the window between stopping and re-creating.
 	id := "ses_restart_window"
 	if _, err := fixture.database.CreateSession(ctx, store.Session{ID: id, Name: id, Kind: store.SessionKindLocal}); err != nil {
 		t.Fatal(err)
@@ -918,22 +889,12 @@ func TestTerminalWebSocketAsksBrowserToRetryWhileRuntimeIsMissing(t *testing.T) 
 
 	connection := dialTerminalForTest(t, ctx, fixture, id, 0)
 	defer connection.CloseNow()
+	tail := readSocketToClose(t, ctx, connection)
+	if tail.closeStatus != websocket.StatusTryAgainLater {
+		t.Fatalf("close status = %v, want %v", tail.closeStatus, websocket.StatusTryAgainLater)
+	}
 	reconnecting := false
-	for {
-		messageType, payload, err := connection.Read(ctx)
-		if err != nil {
-			if status := websocket.CloseStatus(err); status != websocket.StatusTryAgainLater {
-				t.Fatalf("close status = %v, want %v (error: %v)", status, websocket.StatusTryAgainLater, err)
-			}
-			break
-		}
-		if messageType != websocket.MessageText {
-			continue
-		}
-		var event socketEvent
-		if err := json.Unmarshal(payload, &event); err != nil {
-			continue
-		}
+	for _, event := range tail.events {
 		if event.Type == "disconnect" && event.Status == "reconnecting" {
 			reconnecting = true
 		}

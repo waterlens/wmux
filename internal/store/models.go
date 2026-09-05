@@ -24,8 +24,6 @@ const (
 )
 
 // Credentials is the JSON payload encrypted into Host.EncryptedCredentials.
-// It supports password, private-key and encrypted-private-key SSH auth. Empty
-// fields are omitted from the plaintext JSON before encryption.
 type Credentials struct {
 	Password   string `json:"password,omitempty"`
 	PrivateKey string `json:"privateKey,omitempty"`
@@ -39,8 +37,7 @@ type User struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
-// AuthSession stores only a SHA-256 token digest. The bearer token must never
-// be assigned to this type or persisted.
+// AuthSession stores only a SHA-256 token digest, never the bearer token.
 type AuthSession struct {
 	ID         string    `json:"id"`
 	TokenHash  []byte    `json:"-"`

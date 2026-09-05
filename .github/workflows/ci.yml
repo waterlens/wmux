@@ -37,5 +37,5 @@ jobs:
       - name: Screen persistence integration
         run: WMUX_SCREEN_INTEGRATION=1 go test -timeout 30s ./internal/terminal -run '^TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt$' -count=1 -v
       - name: Tmux restore integration
-        run: WMUX_TMUX_INTEGRATION=1 go test -timeout 30s ./internal/terminal -run '^TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt$' -count=1 -v
+        run: WMUX_TMUX_INTEGRATION=1 go test -timeout 60s ./internal/terminal -run '^(TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt|TestLocalTmuxGivesEachSessionItsOwnEnvironment|TestLocalTmuxAttachOnlyReportsMissingSession)$' -count=1 -v
       - run: pnpm test:browser

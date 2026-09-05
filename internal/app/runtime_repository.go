@@ -1,5 +1,4 @@
-// Package app wires product storage to the terminal runtime without making
-// either package depend on the other's representation.
+// Package app wires product storage to the terminal runtime.
 package app
 
 import (
@@ -18,7 +17,7 @@ import (
 )
 
 // RuntimeRepository adapts SQLite sessions and encrypted hosts to terminal's
-// secret-free persistence interface. It also records runtime state callbacks.
+// secret-free persistence interface.
 type RuntimeRepository struct {
 	Store     *store.Store
 	MasterKey []byte
@@ -28,8 +27,7 @@ type RuntimeRepository struct {
 	states  map[string]terminal.SessionState
 }
 
-// ListSessions returns every product session: active entries reconnect while
-// exited entries remain available for transcript replay.
+// ListSessions returns every product session, active or exited.
 func (r *RuntimeRepository) ListSessions(ctx context.Context) ([]terminal.SessionRecord, error) {
 	sessions, err := r.Store.ListSessions(ctx)
 	if err != nil {
@@ -47,7 +45,7 @@ func (r *RuntimeRepository) ListSessions(ctx context.Context) ([]terminal.Sessio
 			Cols:                uint16(session.Cols),
 			Rows:                uint16(session.Rows),
 			Active:              session.Status == store.SessionStatusConnecting || session.Status == store.SessionStatusRunning || session.Status == store.SessionStatusReconnecting || session.Status == store.SessionStatusDetached,
-			Generation:          uint64(session.Generation),
+			Generation:          session.Generation,
 		}
 		if session.HostID != nil {
 			record.HostID = *session.HostID
@@ -61,8 +59,7 @@ func (r *RuntimeRepository) ListSessions(ctx context.Context) ([]terminal.Sessio
 	return result, nil
 }
 
-// LoadHost decrypts credentials only when terminal needs to establish an SSH
-// connection. Secrets do not enter SessionRecord or API responses.
+// LoadHost decrypts credentials only when terminal needs an SSH connection.
 func (r *RuntimeRepository) LoadHost(ctx context.Context, id string) (terminal.HostSpec, error) {
 	host, err := r.Store.GetHost(ctx, id)
 	if err != nil {
@@ -117,7 +114,7 @@ func (r *RuntimeRepository) OnSessionState(status terminal.SessionStatus) {
 		backend = string(status.Persistence)
 		backendName = terminal.BackendName(status.ID)
 	}
-	if err := r.Store.UpdateSessionRuntime(ctx, status.ID, int(status.Generation), state, backend, backendName, sessionError); err != nil {
+	if err := r.Store.UpdateSessionRuntime(ctx, status.ID, status.Generation, state, backend, backendName, sessionError); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			r.logError("persist terminal runtime", err, "session", status.ID)
 		}
@@ -126,26 +123,23 @@ func (r *RuntimeRepository) OnSessionState(status terminal.SessionStatus) {
 	r.logStateChange(status)
 }
 
-// OnWriterChanged is intentionally ephemeral; writer leases belong to current
-// browser connections and must never survive a restart.
+// OnWriterChanged does nothing: writer leases are not persisted.
 func (r *RuntimeRepository) OnWriterChanged(string, string) {}
 
-// OnClientDropped records slow-consumer diagnostics without exposing terminal
-// output or client identifiers to persistent storage.
+// OnClientDropped logs slow-consumer diagnostics without terminal output.
 func (r *RuntimeRepository) OnClientDropped(sessionID, clientID, reason string) {
 	if r.Logger != nil {
 		r.Logger.Warn("terminal client dropped", "session", sessionID, "client", clientID, "reason", reason)
 	}
 }
 
-// SessionSpec constructs a launch spec from an already persisted product
-// session. It is used for initial creation and explicit restart.
+// SessionSpec builds a launch spec from a persisted product session.
 func (r *RuntimeRepository) SessionSpec(ctx context.Context, session store.Session) (terminal.SessionSpec, error) {
 	spec := terminal.SessionSpec{
 		ID:          session.ID,
 		Name:        session.Name,
 		Persistence: terminal.Persistence(session.Persistence),
-		Generation:  uint64(session.Generation),
+		Generation:  session.Generation,
 		Cwd:         session.Cwd,
 		Cols:        uint16(session.Cols),
 		Rows:        uint16(session.Rows),
@@ -165,9 +159,7 @@ func (r *RuntimeRepository) SessionSpec(ctx context.Context, session store.Sessi
 	return spec, nil
 }
 
-// sessionEnvironment is the per-session environment every launch and restore
-// shares. WMUX_SESSION_ID lets shell integrations recognise the session, and
-// COLORTERM is what makes 24-bit colour survive tmux.
+// sessionEnvironment is the per-session environment every launch shares.
 func sessionEnvironment(id string) map[string]string {
 	return map[string]string{"WMUX_SESSION_ID": id, "COLORTERM": "truecolor"}
 }

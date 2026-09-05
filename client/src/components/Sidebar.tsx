@@ -19,6 +19,8 @@ import { persistenceLabel, sessionStatusLabel, sessionStatusTone } from '../sess
 import type { Host, Session, User } from '../types';
 import { ActionMenu, Button } from './UI';
 
+const EMPTY_RESTARTING: ReadonlySet<string> = new Set();
+
 type SidebarProps = {
   sessions: Session[];
   hosts: Host[];
@@ -33,7 +35,7 @@ type SidebarProps = {
   onHosts: () => void;
   onRename: (session: Session) => void;
   onRestart: (session: Session) => void;
-  restartingIds?: string[] | undefined;
+  restartingIds?: ReadonlySet<string> | undefined;
   onDelete: (session: Session) => void;
   onSettings: () => void;
   onCollapse: () => void;
@@ -53,7 +55,7 @@ export function Sidebar({
   onHosts,
   onRename,
   onRestart,
-  restartingIds = [],
+  restartingIds = EMPTY_RESTARTING,
   onDelete,
   onSettings,
   onCollapse,
@@ -197,7 +199,7 @@ export function Sidebar({
                           </button>
                           <button
                             role="menuitem"
-                            disabled={restartingIds.includes(session.id)}
+                            disabled={restartingIds.has(session.id)}
                             onClick={() => {
                               setOpenMenuId(null);
                               onRestart(session);

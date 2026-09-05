@@ -88,8 +88,7 @@ ORDER BY name COLLATE NOCASE, id`)
 	return hosts, nil
 }
 
-// UpdateHost replaces every mutable host field. CreatedAt from the input is
-// ignored; callers receive the canonical stored timestamps.
+// UpdateHost replaces every mutable host field and ignores CreatedAt.
 func (s *Store) UpdateHost(ctx context.Context, host Host) (Host, error) {
 	if strings.TrimSpace(host.ID) == "" {
 		return Host{}, fmt.Errorf("%w: host id is empty", ErrInvalidInput)
@@ -125,8 +124,7 @@ WHERE id = ?`,
 	return s.GetHost(ctx, host.ID)
 }
 
-// UpdateHostFingerprint records a confirmed SSH host key. It touches only the
-// fingerprint so a concurrent edit of the rest of the host is never lost.
+// UpdateHostFingerprint records a confirmed SSH host key and nothing else.
 func (s *Store) UpdateHostFingerprint(ctx context.Context, id, fingerprint string) error {
 	result, err := s.db.ExecContext(ctx, `
 UPDATE hosts SET fingerprint = ?, updated_at = ? WHERE id = ?`,

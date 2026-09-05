@@ -207,11 +207,11 @@ func assertCapturedArgs(t *testing.T, path string, want []string) {
 	}
 }
 
-// TestLocalTmuxGivesEachSessionItsOwnEnvironment exercises the real tmux
-// binary: update-environment and new-session run as one invocation, so each
-// session inherits the variables of the client that created it rather than the
-// values the tmux server happened to start with.
+// A session inherits the variables of the tmux client that created it.
 func TestLocalTmuxGivesEachSessionItsOwnEnvironment(t *testing.T) {
+	if os.Getenv("WMUX_TMUX_INTEGRATION") != "1" {
+		t.Skip("set WMUX_TMUX_INTEGRATION=1 to exercise the host tmux binary")
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("tmux is Unix-only")
 	}
@@ -263,9 +263,11 @@ func TestLocalTmuxGivesEachSessionItsOwnEnvironment(t *testing.T) {
 	}
 }
 
-// TestLocalTmuxAttachOnlyReportsMissingSession covers the restore path: a
-// session whose tmux backend is gone must never be recreated.
+// A session whose tmux backend is gone is never recreated.
 func TestLocalTmuxAttachOnlyReportsMissingSession(t *testing.T) {
+	if os.Getenv("WMUX_TMUX_INTEGRATION") != "1" {
+		t.Skip("set WMUX_TMUX_INTEGRATION=1 to exercise the host tmux binary")
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("tmux is Unix-only")
 	}

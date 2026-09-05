@@ -101,10 +101,8 @@ func (s *Store) listSessions(ctx context.Context, query string, args []any) ([]S
 	return sessions, nil
 }
 
-// UpdateSession replaces product-owned session fields. Runtime-owned fields
-// (backend, status, attachment, exit and error) are deliberately preserved so
-// a concurrent terminal callback cannot be overwritten by a stale API model.
-// Size-only updates do not change UpdatedAt, keeping sidebar ordering stable.
+// UpdateSession replaces product-owned session fields; runtime-owned fields and
+// the UpdatedAt of a size-only change are preserved.
 func (s *Store) UpdateSession(ctx context.Context, session Session) (Session, error) {
 	if strings.TrimSpace(session.ID) == "" {
 		return Session{}, fmt.Errorf("%w: session id is empty", ErrInvalidInput)
@@ -166,8 +164,7 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 	return nil
 }
 
-// UpdateSessionName updates the only frequently edited product metadata field
-// and returns the joined representation used by the API.
+// UpdateSessionName renames a session and returns the joined row.
 func (s *Store) UpdateSessionName(ctx context.Context, id, name string) (Session, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -183,23 +180,6 @@ WHERE id = ? AND name IS NOT ?`, name, unixMillis(s.utcNow()), id, name)
 		return Session{}, err
 	}
 	return s.GetSession(ctx, id)
-}
-
-func (s *Store) UpdateSessionStatus(ctx context.Context, id, status string, exitCode *int, sessionError *string) error {
-	if !validSessionStatus(status) {
-		return fmt.Errorf("%w: unsupported session status %q", ErrInvalidInput, status)
-	}
-	result, err := s.db.ExecContext(ctx, `
-UPDATE sessions
-SET status = ?, exit_code = ?, last_error = ?
-WHERE id = ?
-  AND (status IS NOT ? OR exit_code IS NOT ? OR last_error IS NOT ?)`,
-		status, nullableInt(exitCode), nullableString(sessionError),
-		id, status, nullableInt(exitCode), nullableString(sessionError))
-	if err != nil {
-		return fmt.Errorf("update session status: %w", err)
-	}
-	return s.requireSession(ctx, id, result)
 }
 
 func (s *Store) UpdateSessionSize(ctx context.Context, id string, cols, rows int) error {
@@ -233,12 +213,8 @@ WHERE id = ? AND last_attached_at IS NOT ?`,
 	return s.requireSession(ctx, id, result)
 }
 
-// UpdateSessionRuntime atomically applies a terminal callback. An empty
-// backend leaves the resolved backend untouched (connecting callbacks occur
-// before backend resolution). A callback from a superseded generation is
-// silently ignored, so a stopped execution can never resurrect its state on
-// the row of the restart that replaced it. Repeated identical callbacks
-// perform no write, and runtime activity never changes UpdatedAt.
+// UpdateSessionRuntime applies a terminal callback, ignoring an empty backend
+// field and any superseded generation.
 func (s *Store) UpdateSessionRuntime(ctx context.Context, id string, generation int, status, backend, backendName string, sessionError *string) error {
 	if !validSessionStatus(status) {
 		return fmt.Errorf("%w: unsupported session status %q", ErrInvalidInput, status)
@@ -272,10 +248,8 @@ WHERE id = ? AND generation = ? AND (
 	return s.requireSession(ctx, id, result)
 }
 
-// BeginSessionRestart opens a new execution of a session: it increments the
-// generation, clears the previous exit and moves the row back to connecting.
-// Callbacks still in flight from the previous execution carry the old
-// generation and are ignored from this point on.
+// BeginSessionRestart increments the generation, clears the previous exit and
+// returns the row to connecting.
 func (s *Store) BeginSessionRestart(ctx context.Context, id string) (int, error) {
 	var generation int
 	err := s.db.QueryRowContext(ctx, `

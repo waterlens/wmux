@@ -7,17 +7,17 @@ import { Workspace } from './Workspace';
 
 type SidebarStubProps = {
   sessions: Session[];
-  restartingIds?: string[] | undefined;
+  restartingIds?: ReadonlySet<string> | undefined;
   onDelete: (session: Session) => void;
   onRestart: (session: Session) => void;
 };
 
 vi.mock('./Sidebar', () => ({
-  Sidebar: ({ sessions, restartingIds = [], onDelete, onRestart }: SidebarStubProps) => (
+  Sidebar: ({ sessions, restartingIds = new Set<string>(), onDelete, onRestart }: SidebarStubProps) => (
     <>
       <button onClick={() => sessions[0] && onDelete(sessions[0])}>请求结束</button>
       <button
-        disabled={Boolean(sessions[0] && restartingIds.includes(sessions[0].id))}
+        disabled={Boolean(sessions[0] && restartingIds.has(sessions[0].id))}
         onClick={() => sessions[0] && onRestart(sessions[0])}
       >
         请求重启

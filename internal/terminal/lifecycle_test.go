@@ -308,7 +308,7 @@ func TestWriteTimeoutReturnsContextErrorAndKeepsBackendOpen(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
 		t.Fatalf("WriteContext cancellation took %s", elapsed)
 	}
-	// One stuck client must never end the shared session.
+	// A stuck client does not end the shared session.
 	if b.isClosed() {
 		t.Fatal("input timeout closed the shared backend")
 	}
@@ -365,8 +365,11 @@ func TestNewerSizeIsNeverOverwrittenByAnOlderOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The activation resize is the blocked one; the older 200x50 request then
-	// queues behind it while a newer 220x60 arrives.
+	session, err := manager.session("resize-order")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both requests queue behind the blocked activation resize.
 	select {
 	case <-b.entered:
 	case <-ctx.Done():
@@ -374,10 +377,10 @@ func TestNewerSizeIsNeverOverwrittenByAnOlderOne(t *testing.T) {
 	}
 	older := make(chan error, 1)
 	go func() { older <- a.Resize(200, 50) }()
-	time.Sleep(20 * time.Millisecond)
+	waitCondition(t, ctx, func() bool { return requestedSize(session) == [2]uint16{200, 50} })
 	newer := make(chan error, 1)
 	go func() { newer <- a.Resize(220, 60) }()
-	time.Sleep(20 * time.Millisecond)
+	waitCondition(t, ctx, func() bool { return requestedSize(session) == [2]uint16{220, 60} })
 	close(b.release)
 	if err := <-older; err != nil {
 		t.Fatalf("older resize: %v", err)
@@ -386,20 +389,20 @@ func TestNewerSizeIsNeverOverwrittenByAnOlderOne(t *testing.T) {
 		t.Fatalf("newer resize: %v", err)
 	}
 	applied := b.applied()
-	last := applied[len(applied)-1]
-	if last != [2]uint16{220, 60} {
-		t.Fatalf("applied sizes %v end with %v, want [220 60]", applied, last)
+	if len(applied) < 2 || applied[0] != [2]uint16{120, 36} {
+		t.Fatalf("applied sizes %v do not start with the launch size", applied)
 	}
-	for index, size := range applied {
-		if size == [2]uint16{220, 60} {
-			for _, later := range applied[index+1:] {
-				if later != ([2]uint16{220, 60}) {
-					t.Fatalf("older size %v was applied after the newer one: %v", later, applied)
-				}
-			}
-			break
+	for _, size := range applied[1:] {
+		if size != [2]uint16{220, 60} {
+			t.Fatalf("applied sizes %v include a superseded size", applied)
 		}
 	}
+}
+
+func requestedSize(s *runtimeSession) [2]uint16 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return [2]uint16{s.cols, s.rows}
 }
 
 type sizeRecordingBackend struct {
@@ -621,8 +624,7 @@ func TestRestoreOnlyAttachesAndExitsWhenTheBackendIsGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitState(t, ctx, manager, "restored", StateExited)
-	// A missing backend must never re-run the session command, and it must not
-	// be retried in the background either.
+	// Negative check: a stray retry would need time to appear.
 	time.Sleep(40 * time.Millisecond)
 	flags := launcher.createFlags()
 	if len(flags) != 1 || flags[0] {
@@ -706,6 +708,7 @@ func TestPermanentHostErrorWaitsForReconnectAndReloadsHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Negative check: a retry after the attach would need time to appear.
 	time.Sleep(30 * time.Millisecond)
 	if got := starts.Load(); got != 1 {
 		t.Fatalf("permanent error retried after attach: starts=%d", got)

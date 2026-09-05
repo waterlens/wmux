@@ -63,9 +63,7 @@ CREATE TABLE sessions (
 CREATE INDEX sessions_updated_at_idx ON sessions(updated_at DESC);
 CREATE INDEX sessions_host_id_idx ON sessions(host_id);
 `,
-	// generation numbers one execution of a session. Runtime callbacks carry
-	// the generation they belong to, so state from a stopped execution can
-	// never overwrite the state of the restart that replaced it.
+	// generation numbers one execution of a session; callbacks carry their own.
 	2: `
 ALTER TABLE sessions ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;
 `,

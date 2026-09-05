@@ -155,7 +155,7 @@ export const api = {
     request('/api/login', userSchema, { method: 'POST', body: body({ username, password }) }, false),
   logout: () => request('/api/logout', z.undefined(), { method: 'POST' }),
   me: () => request('/api/me', userSchema),
-  // A rejected current password must not look like an expired session.
+  // 401 here is a wrong password, not an expired session.
   changePassword: (currentPassword: string, newPassword: string) =>
     request('/api/me/password', z.undefined(), { method: 'POST', body: body({ currentPassword, newPassword }) }, false),
 

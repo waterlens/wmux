@@ -41,8 +41,6 @@ export function SettingsDialog({
   const [passwordError, setPasswordError] = useState('');
   const [passwordSaved, setPasswordSaved] = useState(false);
 
-  // A failed logout keeps the confirmation open: the session is still active,
-  // so silently closing the dialog would claim an exit that never happened.
   async function logout() {
     setLoggingOut(true);
     setLogoutError('');
@@ -85,7 +83,6 @@ export function SettingsDialog({
       setPasswordConfirm('');
       setPasswordSaved(true);
     } catch (reason) {
-      // 401 here rejects the supplied current password; the session is intact.
       setPasswordError(reason instanceof ApiError && reason.status === 401 ? '当前密码不正确' : errorMessage(reason));
     } finally {
       setPasswordBusy(false);

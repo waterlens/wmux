@@ -274,7 +274,7 @@ func TestSessionCRUDAndHostJoin(t *testing.T) {
 	if err := s.TouchSession(ctx, session.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpdateSessionStatus(ctx, session.ID, SessionStatusRunning, nil, nil); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, session.ID, session.Generation, SessionStatusRunning, "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	session, err = s.GetSession(ctx, session.ID)
@@ -318,13 +318,12 @@ func TestSessionValidationAndExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exitCode := 7
 	message := "process failed"
-	if err := s.UpdateSessionStatus(ctx, local.ID, SessionStatusExited, &exitCode, &message); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, local.ID, local.Generation, SessionStatusExited, "", "", &message); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetSession(ctx, local.ID)
-	if err != nil || got.ExitCode == nil || *got.ExitCode != 7 || got.Error == nil || *got.Error != message {
+	if err != nil || got.Status != SessionStatusExited || got.Error == nil || *got.Error != message {
 		t.Fatalf("exited session = %+v, %v", got, err)
 	}
 	if err := s.DeleteSession(ctx, "missing"); !errors.Is(err, ErrNotFound) {
@@ -437,9 +436,8 @@ func TestSessionGenerationIsolatesRestartsFromLateRuntimeCallbacks(t *testing.T)
 	if session.Generation != 1 {
 		t.Fatalf("created generation = %d, want 1", session.Generation)
 	}
-	exitCode := 3
 	message := "backend session no longer exists"
-	if err := s.UpdateSessionStatus(ctx, session.ID, SessionStatusExited, &exitCode, &message); err != nil {
+	if err := s.UpdateSessionRuntime(ctx, session.ID, session.Generation, SessionStatusExited, "", "", &message); err != nil {
 		t.Fatal(err)
 	}
 
@@ -454,12 +452,11 @@ func TestSessionGenerationIsolatesRestartsFromLateRuntimeCallbacks(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restarted.Status != SessionStatusConnecting || restarted.ExitCode != nil || restarted.Error != nil {
+	if restarted.Status != SessionStatusConnecting || restarted.Error != nil {
 		t.Fatalf("restart did not clear the previous execution: %+v", restarted)
 	}
 
-	// The stopped execution reports its exit after the restart began. It must
-	// not resurrect the old state, and it must not look like a missing row.
+	// The stopped execution reports its exit after the restart began.
 	staleError := "connection lost"
 	if err := s.UpdateSessionRuntime(ctx, session.ID, 1, SessionStatusExited, "tmux", "wmux-restarted", &staleError); err != nil {
 		t.Fatalf("stale runtime callback = %v, want silently ignored", err)

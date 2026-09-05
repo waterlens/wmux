@@ -56,11 +56,8 @@ func NewManager(cfg Config) (*Manager, error) {
 	}, nil
 }
 
-// Create registers a runtime for a session row the application already
-// persisted, and makes it available for any number of browser attachments.
-// Only this first launch may create the tmux/screen session; every later
-// connection attempt attaches to it. Create never writes Repository: all
-// durable state flows through Callbacks.OnSessionState.
+// Create starts the runtime for a persisted session row; only this first launch
+// may create the tmux/screen session.
 func (m *Manager) Create(ctx context.Context, spec SessionSpec) (SessionStatus, error) {
 	spec = cloneSpec(spec)
 	if err := validateSpec(spec); err != nil {
@@ -104,9 +101,8 @@ func (m *Manager) Create(ctx context.Context, spec SessionSpec) (SessionStatus, 
 	return s.status(), nil
 }
 
-// Restore reconnects to the backends of active repository records. It only
-// ever attaches: a session whose tmux/screen backend is gone becomes exited
-// instead of running its command a second time.
+// Restore attaches to the backends of active repository records; a session whose
+// backend is gone becomes exited.
 func (m *Manager) Restore(ctx context.Context) error {
 	if m.cfg.Repository == nil {
 		return nil
@@ -197,9 +193,7 @@ func (m *Manager) Status(sessionID string) (SessionStatus, error) {
 	return s.status(), nil
 }
 
-// RefreshHost retries every session of one host immediately, whether it is
-// waiting on a permanent configuration error or on a reconnect backoff. The
-// next attempt reloads the HostSpec and credentials from Repository.
+// RefreshHost retries every session of one host with a freshly loaded HostSpec.
 func (m *Manager) RefreshHost(hostID string) int {
 	m.mu.RLock()
 	sessions := make([]*runtimeSession, 0, len(m.sessions))
@@ -227,17 +221,13 @@ func (m *Manager) Reconnect(sessionID string) error {
 	return nil
 }
 
-// Terminate kills the named tmux/screen or direct shell and removes the
-// runtime. A runtime that already exited is terminated without contacting the
-// host at all, so an unreachable host cannot block deletion. A failed kill
-// keeps the runtime attachable and returns the error. Application metadata and
-// transcript files are the caller's transaction.
+// Terminate kills the backend and removes the runtime; a failed kill keeps the
+// runtime attachable and returns the error.
 func (m *Manager) Terminate(ctx context.Context, sessionID string) error {
 	return m.stop(ctx, sessionID, AttachmentExited)
 }
 
-// StopForRestart is Terminate with a close reason that tells browsers to
-// reconnect to the replacement session instead of reporting an exit.
+// StopForRestart is Terminate with a close reason that asks browsers to reconnect.
 func (m *Manager) StopForRestart(ctx context.Context, sessionID string) error {
 	return m.stop(ctx, sessionID, AttachmentRestarted)
 }
@@ -254,9 +244,7 @@ func (m *Manager) stop(ctx context.Context, sessionID string, reason AttachmentC
 	return nil
 }
 
-// Discard forgets a runtime in any state without contacting or killing its
-// backend. It is how metadata is removed when the remote host is unreachable;
-// a persistent tmux/screen session deliberately keeps running.
+// Discard forgets a runtime without contacting or killing its backend.
 func (m *Manager) Discard(ctx context.Context, sessionID string) error {
 	s, err := m.session(sessionID)
 	if err != nil {
@@ -269,16 +257,14 @@ func (m *Manager) Discard(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// Close detaches all backend clients. Persistent tmux/screen sessions are not
-// killed and remain Active in Repository for the next Restore.
+// Close detaches all backend clients without killing tmux/screen sessions.
 func (m *Manager) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.ShutdownTimeout)
 	defer cancel()
 	return m.CloseContext(ctx)
 }
 
-// CloseContext detaches every runtime session without killing named
-// tmux/screen sessions. It returns when cleanup completes or ctx expires.
+// CloseContext is Close bounded by ctx.
 func (m *Manager) CloseContext(ctx context.Context) error {
 	m.mu.Lock()
 	if m.closed {
@@ -409,8 +395,7 @@ func (s *runtimeSession) start() {
 	go s.run()
 }
 
-// markDormant registers an already finished session. It stays attachable for
-// transcript replay but never contacts a backend.
+// markDormant registers a finished session that stays attachable for replay.
 func (s *runtimeSession) markDormant() {
 	s.mu.Lock()
 	if !s.started {
@@ -425,9 +410,7 @@ func (s *runtimeSession) markDormant() {
 
 func (s *runtimeSession) run() {
 	defer close(s.done)
-	// Only a freshly created session may create its backend, and only until
-	// one launch succeeds. Everything after that - reconnects and restores -
-	// attaches, so a command that already finished is never run again.
+	// Only a freshly created session may create its backend, and only once.
 	create := s.created
 	attempt := 0
 	for {
@@ -490,9 +473,7 @@ func (s *runtimeSession) run() {
 		if !s.waitIfTerminating() {
 			return
 		}
-		// Wait is authoritative for process/channel exit. A clean SSH command
-		// produces EOF on its output pipe, but must not be mistaken for a
-		// transport failure and automatically recreated.
+		// Wait is authoritative for exit; a clean SSH command also closes its pipe.
 		backendErr := waitErr
 		if backendErr == nil && readErr != nil && !isTerminalEOF(readErr) {
 			backendErr = readErr
@@ -510,8 +491,7 @@ func (s *runtimeSession) run() {
 	}
 }
 
-// activateBackend publishes a freshly launched backend and reconciles the size
-// requested while launcher.start was still running.
+// activateBackend publishes a freshly launched backend and applies the current size.
 func (s *runtimeSession) activateBackend(b backend, resolved Persistence) error {
 	s.mu.Lock()
 	if err := s.ctx.Err(); err != nil {
@@ -537,9 +517,7 @@ func (s *runtimeSession) activateBackend(b backend, resolved Persistence) error 
 	return nil
 }
 
-// applySize pushes the newest requested size to the live backend. sizeMu
-// serializes concurrent callers and the size is always re-read inside it, so
-// an older size can never land after a newer one.
+// applySize pushes the newest requested size to the live backend under sizeMu.
 func (s *runtimeSession) applySize() error {
 	s.sizeMu.Lock()
 	defer s.sizeMu.Unlock()
@@ -573,8 +551,7 @@ func (s *runtimeSession) handleStartError(err error, attempt *int) bool {
 		return false
 	}
 	if isPermanentStartError(err) {
-		// A bad credential or missing tool repeats forever. Wait for an
-		// explicit Reconnect or RefreshHost instead of burning the host.
+		// A permanent failure repeats, so wait for Reconnect or RefreshHost.
 		s.setState(StateError, err)
 		select {
 		case <-s.ctx.Done():
@@ -709,9 +686,7 @@ func (s *runtimeSession) publish(data []byte) {
 	s.signal()
 }
 
-// waitForRetry blocks until the next connection attempt should run: an
-// explicit Reconnect at any time, a timed backoff while browsers are watching,
-// or the first attachment when nobody is.
+// waitForRetry blocks until the next connection attempt should run.
 func (s *runtimeSession) waitForRetry(attempt int) bool {
 	for {
 		if s.ctx.Err() != nil {
@@ -798,9 +773,7 @@ func (s *runtimeSession) statusLocked() SessionStatus {
 	}
 }
 
-// notifyLocked snapshots the runtime state and hands it to every attached
-// client. Each subscriber keeps only the newest status, so a slow reader sees
-// current state instead of a queue of stale ones.
+// notifyLocked hands the current status to every client, newest status only.
 func (s *runtimeSession) notifyLocked() SessionStatus {
 	status := s.statusLocked()
 	for _, client := range s.clients {
@@ -811,10 +784,7 @@ func (s *runtimeSession) notifyLocked() SessionStatus {
 			case <-client.states:
 			default:
 			}
-			select {
-			case client.states <- status:
-			default:
-			}
+			client.states <- status
 		}
 	}
 	return status
@@ -904,8 +874,7 @@ func (s *runtimeSession) closeClients(reason AttachmentCloseReason) {
 	}
 }
 
-// stop kills the backend, removes the runtime and closes every client with
-// reason. Terminate and StopForRestart differ only in that reason.
+// stop kills the backend, removes the runtime and closes every client with reason.
 func (s *runtimeSession) stop(ctx context.Context, reason AttachmentCloseReason) error {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
@@ -915,8 +884,7 @@ func (s *runtimeSession) stop(ctx context.Context, reason AttachmentCloseReason)
 		return nil
 	}
 	previous := s.state
-	// An exited or terminated runtime has no backend left to contact, so an
-	// unreachable host can never block deleting or restarting it.
+	// An exited or terminated runtime has no backend left to contact.
 	kill := previous != StateExited && previous != StateTerminated
 	var b backend
 	var resolved Persistence
@@ -945,8 +913,7 @@ func (s *runtimeSession) killBackend(ctx context.Context, b backend, resolved Pe
 		return err
 	}
 	if resolved != "" && resolved != PersistenceNone && resolved != PersistenceAuto {
-		// Use a separate control connection/process. The live data backend
-		// stays intact if this fails, so its run loop can continue.
+		// A separate control connection leaves the live backend intact on failure.
 		return s.manager.launcher.terminate(ctx, spec, resolved)
 	}
 	if b != nil {
@@ -955,8 +922,7 @@ func (s *runtimeSession) killBackend(ctx context.Context, b backend, resolved Pe
 	return nil
 }
 
-// abortStop restores an attachable runtime after a failed kill. Nothing was
-// destroyed, so nothing may be torn down.
+// abortStop restores an attachable runtime after a failed kill.
 func (s *runtimeSession) abortStop(previous SessionState, err error) {
 	s.mu.Lock()
 	s.terminating = false
@@ -975,8 +941,7 @@ func (s *runtimeSession) abortStop(previous SessionState, err error) {
 	s.manager.callbacks.OnSessionState(status)
 }
 
-// finishStop ends the run loop, detaches the data connection, closes clients
-// and releases the transcript after a successful destructive operation.
+// finishStop ends the run loop, closes clients and releases the transcript.
 func (s *runtimeSession) finishStop(reason AttachmentCloseReason) {
 	s.mu.Lock()
 	b := s.backend
@@ -994,9 +959,7 @@ func (s *runtimeSession) finishStop(reason AttachmentCloseReason) {
 		select {
 		case <-s.done:
 		case <-ctx.Done():
-			// The destructive operation already succeeded, so a tardy cleanup
-			// must not turn this into an undeletable runtime. Real backends are
-			// cancellable; this bound also protects against faulty ones.
+			// The kill already succeeded, so cleanup may not block the caller.
 		}
 	}
 	s.mu.Lock()
@@ -1009,8 +972,7 @@ func (s *runtimeSession) finishStop(reason AttachmentCloseReason) {
 	_ = s.log.Close()
 }
 
-// discard forgets a runtime in any state without killing its backend: the run
-// loop stops, the data connection detaches and the transcript is released.
+// discard forgets a runtime without killing its backend.
 func (s *runtimeSession) discard(ctx context.Context) error {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()

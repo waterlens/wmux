@@ -27,10 +27,8 @@ type backend interface {
 	Reconnectable(error) bool
 }
 
-// backendLauncher creates or attaches a backend connection. create is true
-// only for the very first launch of a session the application just created;
-// every reconnect and every restore attaches to an existing tmux/screen
-// session and fails with ErrBackendMissing when it is gone.
+// backendLauncher creates or attaches a backend connection; create is set only
+// for a session's first launch.
 type backendLauncher interface {
 	start(ctx context.Context, spec SessionSpec, resolved Persistence, create bool) (backend, Persistence, error)
 	terminate(ctx context.Context, spec SessionSpec, resolved Persistence) error
@@ -48,18 +46,14 @@ const (
 	tmuxHyperlinkFeatures = ",xterm*:hyperlinks"
 	tmuxTrueColorOverride = ",xterm*:Tc"
 
-	// remoteMissingExitStatus is the exit status the remote attach script uses
-	// to report that the named tmux/screen session is gone.
+	// remoteMissingExitStatus is the attach script's exit status for a missing session.
 	remoteMissingExitStatus = 3
 )
 
-// tmuxBaseEnvironment is tmux's documented update-environment default plus the
-// variables wmux always propagates into a session. Setting update-environment
-// and creating the session in one tmux invocation gives every session the
-// values from that client's own process environment.
+// tmuxBaseEnvironment is tmux's documented update-environment default.
 var tmuxBaseEnvironment = []string{
 	"DISPLAY", "KRB5CCNAME", "SSH_ASKPASS", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-	"SSH_CONNECTION", "WINDOWID", "XAUTHORITY", "COLORTERM",
+	"SSH_CONNECTION", "WINDOWID", "XAUTHORITY",
 }
 
 func newLauncher(cfg Config) launcher {
@@ -148,8 +142,7 @@ func isPermanentStartError(err error) bool {
 	return errors.As(err, &target)
 }
 
-// IsPermanentStartError reports whether reconnecting without a configuration
-// refresh would repeat the same failure (for example bad credentials).
+// IsPermanentStartError reports whether a retry would repeat the same failure.
 func IsPermanentStartError(err error) bool { return isPermanentStartError(err) }
 
 func isTerminalEOF(err error) bool {
@@ -172,7 +165,6 @@ func backendName(id string) string {
 }
 
 // BackendName returns the deterministic tmux/screen name used for a session.
-// Storage and diagnostics can use it without duplicating sanitization rules.
 func BackendName(sessionID string) string {
 	return backendName(sessionID)
 }
@@ -215,8 +207,7 @@ func shellJoin(command string, args []string) string {
 	return strings.Join(parts, " ")
 }
 
-// tmuxEnvironmentList is the update-environment value that lets tmux copy the
-// per-session variables out of the tmux client that creates the session.
+// tmuxEnvironmentList is the update-environment value for a session's variables.
 func tmuxEnvironmentList(env map[string]string) string {
 	names := append([]string(nil), tmuxBaseEnvironment...)
 	for _, key := range sortedKeys(env) {
@@ -227,8 +218,7 @@ func tmuxEnvironmentList(env map[string]string) string {
 	return strings.Join(names, " ")
 }
 
-// posixScript wraps a script so it runs under /bin/sh even when the account's
-// login shell is fish, csh or another non-POSIX shell.
+// posixScript wraps a script so it runs under /bin/sh, not the login shell.
 func posixScript(script string) string {
 	return "exec /bin/sh -c " + shellQuote(script)
 }

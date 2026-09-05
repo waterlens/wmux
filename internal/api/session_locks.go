@@ -2,10 +2,7 @@ package api
 
 import "sync"
 
-// keyedMutex serializes work that shares a key. Session deletion, restart and
-// reconnect each stop and re-create one runtime, so two of them running at once
-// on the same session would race over its generation. Entries are reference
-// counted, so the map only ever holds the operations currently in flight.
+// keyedMutex serializes work that shares a key.
 type keyedMutex struct {
 	mu      sync.Mutex
 	entries map[string]*keyedMutexEntry

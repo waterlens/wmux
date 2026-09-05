@@ -286,9 +286,7 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	}
 }
 
-// memorySessionRepository stands in for the application's session table: the
-// test seeds a row, and terminal keeps its Active flag current through the
-// state callback rather than by writing the repository itself.
+// memorySessionRepository stands in for the application's session table.
 type memorySessionRepository struct {
 	mu      sync.Mutex
 	records map[string]SessionRecord
@@ -462,8 +460,7 @@ func assertIsolatedTmuxInteractionOptions(t *testing.T, path string, l launcher)
 		t.Fatalf("isolated tmux terminal-overrides = %q, %v; want truecolor support", overrides, err)
 	}
 	if count := strings.Count(features, "xterm*:hyperlinks"); count != 1 {
-		// Distinguish an old tmux that safely rejects the feature from a
-		// compatible tmux where wmux failed to configure it.
+		// An old tmux rejects the feature; a compatible one must have it set.
 		probe := exec.Command(path, l.tmuxArgs("set-option", "-as", "terminal-features", tmuxHyperlinkFeatures)...)
 		if probeErr := probe.Run(); probeErr == nil {
 			t.Fatalf("compatible tmux did not configure hyperlinks exactly once; value %q", features)

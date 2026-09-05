@@ -38,8 +38,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	autoNamed := input.Name == ""
-	// Default-name selection and runtime persistence are one in-process
-	// critical section so two devices cannot create indistinguishable defaults.
+	// Naming and creation share one critical section so defaults stay distinct.
 	s.sessionNameMu.Lock()
 	defer s.sessionNameMu.Unlock()
 	id, err := newID("ses")
@@ -83,8 +82,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	model.Name = input.Name
-	// The row owns the session's identity and generation, so it exists before
-	// any runtime does. A launch failure removes it again.
+	// The row owns the session id and generation, so it exists before the runtime.
 	created, err := s.store.CreateSession(r.Context(), model)
 	if err != nil {
 		s.handleStoreError(w, err, "终端会话不存在")
@@ -147,10 +145,7 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	warning := ""
 	if s.terminals != nil {
-		// Terminate already succeeds without contacting the host for a runtime
-		// that has exited. When it does fail the host is genuinely unreachable,
-		// and deletion is still the operator's explicit intent: drop the
-		// runtime and say plainly that a persistent backend may survive.
+		// An unreachable host still drops the runtime, with a warning.
 		if err := s.terminals.Terminate(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
 			s.logger.Warn("terminate session for deletion", "session", id, "error", err)
 			if err := s.terminals.Discard(r.Context(), id); err != nil && !errors.Is(err, terminal.ErrSessionNotFound) {
@@ -191,9 +186,7 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 		s.upstreamError(w, "结束待重启会话", "terminal_stop_failed", "暂时无法重启后台会话，请稍后重试", err)
 		return
 	}
-	// The row owns the execution number. Opening the next generation here means
-	// late callbacks from the execution just stopped can no longer overwrite
-	// the state of the one starting below.
+	// Opening the next generation makes callbacks from the stopped execution stale.
 	generation, err := s.store.BeginSessionRestart(r.Context(), id)
 	if err != nil {
 		s.handleStoreError(w, err, "终端会话不存在")
@@ -204,7 +197,7 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "准备重启配置", err)
 		return
 	}
-	spec.Generation = uint64(generation)
+	spec.Generation = generation
 	if _, err := s.terminals.Create(r.Context(), spec); err != nil {
 		message := "无法启动会话，请检查工作目录、命令或连接设置"
 		_ = s.store.UpdateSessionRuntime(r.Context(), id, generation, store.SessionStatusError, "", "", &message)
@@ -219,8 +212,7 @@ func (s *Server) restartSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, publicSession(restarted))
 }
 
-// reconnectSession retries one runtime's backend connection immediately instead
-// of waiting for its reconnect backoff or for a configuration fix to be noticed.
+// reconnectSession retries one runtime's backend connection immediately.
 func (s *Server) reconnectSession(w http.ResponseWriter, r *http.Request) {
 	if s.terminals == nil {
 		writeError(w, http.StatusServiceUnavailable, "terminal_unavailable", "终端服务不可用")

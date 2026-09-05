@@ -58,10 +58,7 @@ export function encodeTerminalTextFrames(value: string, maxFrameBytes = MAX_INPU
   return frames;
 }
 
-/**
- * Preserve xterm's onBinary payload as 8-bit bytes. TextEncoder must not be
- * used here: code units 0x80-0xff are already bytes, not Unicode text.
- */
+/** Preserve xterm's onBinary payload as 8-bit bytes rather than UTF-8 text. */
 export function encodeTerminalBinaryFrames(value: string, maxFrameBytes = MAX_INPUT_FRAME_BYTES): ArrayBuffer[] {
   assertUsableFrameSize(maxFrameBytes);
   if (!value) return [];
@@ -116,11 +113,7 @@ export function encodeCursorKey(
   return applicationCursorMode ? `\x1bO${final}` : `\x1b[${final}`;
 }
 
-/**
- * Holds terminal input closed until xterm has parsed every replay write.
- * `replay_end` alone is not sufficient because Terminal.write is queued and
- * historical device-status queries can emit replies from a later microtask.
- */
+/** Holds terminal input closed until xterm has parsed every replay write. */
 export class ReplayBarrier {
   private generation = 0;
   private pendingWrites = 0;

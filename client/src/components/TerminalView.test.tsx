@@ -424,7 +424,7 @@ describe('TerminalView transport boundaries', () => {
       '\x1b[1;3C',
     ]);
   });
-  it('holds input closed until the backend reports running and stores the generation', async () => {
+  it('holds input closed until the backend reports the session running', async () => {
     renderTerminal();
     await finishFontLoading();
     const terminal = xtermHarness.FakeTerminal.instances[0];
@@ -433,7 +433,7 @@ describe('TerminalView transport boundaries', () => {
 
     act(() => {
       socket.emitOpen();
-      socket.emitMessage('{"type":"hello","status":"connecting","writer":true,"generation":7}');
+      socket.emitMessage('{"type":"hello","status":"connecting","writer":true}');
       socket.emitMessage('{"type":"replay_end","sequence":0}');
     });
     await waitFor(() =>
@@ -443,13 +443,12 @@ describe('TerminalView transport boundaries', () => {
     act(() => terminal.emitData('too-early'));
     expect(socket.sent.filter((value) => value instanceof ArrayBuffer)).toHaveLength(0);
 
-    act(() => socket.emitMessage('{"type":"state","status":"running","generation":8}'));
+    act(() => socket.emitMessage('{"type":"state","status":"running"}'));
     act(() => terminal.emitData('ready'));
 
     const frames = socket.sent.filter((value): value is ArrayBuffer => value instanceof ArrayBuffer);
     expect(frames).toHaveLength(1);
     expect(new TextDecoder().decode(new Uint8Array(frames[0]!).subarray(1))).toBe('ready');
-    expect(screen.getByText('测试会话').closest('.terminal-view')?.getAttribute('data-generation')).toBe('8');
   });
 
   it('asks the server to retry the backend before reattaching after a remote restart', async () => {
@@ -465,7 +464,6 @@ describe('TerminalView transport boundaries', () => {
     });
     expect(screen.getByText('会话已在其他设备重启，正在重新连接')).toBeTruthy();
 
-    // The server closes with 1013 after announcing the restart.
     await act(async () => {
       socket.emitClose(1013);
       await Promise.resolve();
@@ -474,6 +472,30 @@ describe('TerminalView transport boundaries', () => {
     fireEvent.click(screen.getByRole('button', { name: '重试后台连接' }));
     await waitFor(() => expect(apiHarness.reconnectSession).toHaveBeenCalledWith('session-1'));
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+  });
+
+  it('reattaches after a restart disconnect that followed a stale exited state', async () => {
+    renderTerminal();
+    await finishFontLoading();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error('terminal transport was not initialized');
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        socket.emitOpen();
+        socket.emitMessage('{"type":"hello","status":"running","writer":true}');
+        socket.emitMessage('{"type":"state","status":"exited","writer":false}');
+        socket.emitMessage('{"type":"disconnect","status":"reconnecting","reason":"restarted"}');
+        socket.emitClose(1013);
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(apiHarness.status).toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 
   it('reports a failed backend retry without reattaching', async () => {

@@ -10,8 +10,7 @@ import (
 	"testing"
 )
 
-// tmuxStub records every argv it is invoked with. Setting WMUX_TMUX_MISSING
-// makes has-session fail, which is how a vanished remote session looks.
+// tmuxStub records every argv; WMUX_TMUX_MISSING makes has-session fail.
 const tmuxStub = `#!/bin/sh
 {
   for argument in "$@"; do
@@ -27,9 +26,8 @@ done
 exit 0
 `
 
-// TestRemoteScriptsRunUnderPOSIXAndFishLoginShells executes the exact command
-// strings wmux hands to ssh.Session.Start. sshd runs them through the account's
-// login shell, so they must survive a shell that is not POSIX-compatible.
+// sshd runs these command strings through the account's login shell, which is
+// not always POSIX-compatible.
 func TestRemoteScriptsRunUnderPOSIXAndFishLoginShells(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the remote scripts are POSIX shell")
@@ -53,7 +51,7 @@ func TestRemoteScriptsRunUnderPOSIXAndFishLoginShells(t *testing.T) {
 		Cwd:   "~/work/a'b",
 		Shell: "/bin/sh",
 		Args:  []string{"-lc", "make watch"},
-		Env:   map[string]string{"WMUX_SESSION_ID": "ses_script"},
+		Env:   map[string]string{"WMUX_SESSION_ID": "ses_script", "COLORTERM": "truecolor"},
 	}
 
 	for shellName, shellPath := range shells {
@@ -87,7 +85,6 @@ func TestRemoteScriptsRunUnderPOSIXAndFishLoginShells(t *testing.T) {
 				if readErr != nil && !os.IsNotExist(readErr) {
 					t.Fatal(readErr)
 				}
-				t.Logf("%s output=%q status=%d invocations=%q", shellName, output, status, contents)
 				return string(contents) + "\n---output---\n" + string(output), status
 			}
 

@@ -16,9 +16,7 @@ type Attachment struct {
 	LatestSequence uint64
 	Frames         <-chan OutputFrame
 	WriterChanges  <-chan bool
-	// States carries every runtime status change - state, client count and
-	// write lease - so adapters can forward it without polling. It has room
-	// for one status: a newer one replaces an unread older one.
+	// States carries runtime status changes and keeps only the newest one.
 	States <-chan SessionStatus
 	Closed <-chan AttachmentCloseReason
 
@@ -150,8 +148,7 @@ func (a *Attachment) Resize(cols, rows uint16) error {
 		s.mu.Unlock()
 		return ErrUnavailable
 	}
-	// Record the desired size first; applySize then pushes whatever the newest
-	// size is, so a slow older resize can never win over a newer one.
+	// Record the size first; applySize then pushes the newest one.
 	s.cols, s.rows = cols, rows
 	s.mu.Unlock()
 	return s.applySize()
