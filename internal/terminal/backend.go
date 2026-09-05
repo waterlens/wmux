@@ -84,7 +84,7 @@ func newExecLauncher(cfg Config) *execLauncher {
 	return &execLauncher{
 		tmuxPath:   cfg.tmuxPath,
 		screenPath: cfg.screenPath,
-		muxName:    SafeMuxName(cfg.MuxName, "wmux", maxMuxNameLen),
+		muxName:    safeMuxName(cfg.MuxName, "wmux", maxMuxNameLen),
 		runtimeDir: cfg.MuxRuntimeDir,
 	}
 }
@@ -170,9 +170,9 @@ func isTerminalEOF(err error) bool {
 
 var unsafeSessionName = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
 
-// SafeMuxName reduces value to the characters tmux and screen accept in a
+// safeMuxName reduces value to the characters tmux and screen accept in a
 // socket or session name, falling back to fallback when nothing is left.
-func SafeMuxName(value, fallback string, limit int) string {
+func safeMuxName(value, fallback string, limit int) string {
 	name := strings.Trim(unsafeSessionName.ReplaceAllString(value, "-"), "-")
 	if name == "" {
 		name = fallback
@@ -186,7 +186,7 @@ func SafeMuxName(value, fallback string, limit int) string {
 // MuxSessionName returns the deterministic tmux/screen name used for a session.
 func MuxSessionName(sessionID string) string {
 	hash := sha256.Sum256([]byte(sessionID))
-	return fmt.Sprintf("wmux-%s-%x", SafeMuxName(sessionID, "session", maxMuxSessionNameLen), hash[:4])
+	return fmt.Sprintf("wmux-%s-%x", safeMuxName(sessionID, "session", maxMuxSessionNameLen), hash[:4])
 }
 
 // reconnectDelay is minimum doubled per attempt, capped at maximum. NewManager
