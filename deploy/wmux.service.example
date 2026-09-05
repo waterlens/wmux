@@ -8,6 +8,7 @@ Type=simple
 Environment=WMUX_HOST=127.0.0.1
 Environment=WMUX_PORT=8787
 Environment=WMUX_DATA_DIR=%h/.local/share/wmux
+# Optional overrides; see deploy/wmux.env.example for a starting point.
 EnvironmentFile=-%h/.config/wmux/wmux.env
 ExecStart=%h/.local/bin/wmux
 Restart=on-failure

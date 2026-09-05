@@ -1,5 +1,2 @@
 allowBuilds:
-  cpu-features: false
   esbuild: true
-  node-pty: false
-  ssh2: false
