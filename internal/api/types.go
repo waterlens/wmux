@@ -1,10 +1,7 @@
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -191,12 +188,4 @@ func (v *sessionInput) normalize() error {
 
 func validSize(cols, rows int) bool {
 	return cols >= 20 && cols <= 1000 && rows >= 5 && rows <= 500
-}
-
-func newID(prefix string) (string, error) {
-	value := make([]byte, 16)
-	if _, err := rand.Read(value); err != nil {
-		return "", fmt.Errorf("generate ID: %w", err)
-	}
-	return prefix + "_" + hex.EncodeToString(value), nil
 }

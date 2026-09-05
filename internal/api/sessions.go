@@ -37,7 +37,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	// Naming and creation share one critical section so defaults stay distinct.
 	s.sessionNameMu.Lock()
 	defer s.sessionNameMu.Unlock()
-	id, err := newID("ses")
+	id, err := store.NewID("ses")
 	if err != nil {
 		s.internalError(w, "生成会话 ID", err)
 		return

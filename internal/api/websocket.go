@@ -16,9 +16,13 @@ import (
 )
 
 const (
+	// The binary frame layout below is the browser contract; keep in sync with
+	// client/src/terminalProtocol.ts.
 	clientInputFrame  = byte(0)
 	serverOutputFrame = byte(1)
-	maxSocketMessage  = 128 << 10
+	// outputFrameHeaderBytes is the frame type byte plus a big-endian sequence.
+	outputFrameHeaderBytes = 9
+	maxSocketMessage       = 128 << 10
 
 	// socketStatePeriod is the heartbeat that re-checks the login and state.
 	socketStatePeriod = 2 * time.Second
@@ -34,13 +38,10 @@ type socketControl struct {
 
 type socketEvent struct {
 	Type       string `json:"type"`
-	ClientID   string `json:"clientId,omitempty"`
 	Status     string `json:"status,omitempty"`
 	Backend    string `json:"backend,omitempty"`
 	Generation int    `json:"generation,omitempty"`
 	Writer     *bool  `json:"writer,omitempty"`
-	WriterID   string `json:"writerId,omitempty"`
-	Clients    int    `json:"clients,omitempty"`
 	Sequence   uint64 `json:"sequence,omitempty"`
 	Truncated  bool   `json:"truncated,omitempty"`
 	Reason     string `json:"reason,omitempty"`
@@ -72,7 +73,7 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		after = parsed
 	}
-	clientID, err := newID("client")
+	clientID, err := store.NewID("client")
 	if err != nil {
 		s.internalError(w, "生成终端客户端 ID", err)
 		return
@@ -113,13 +114,10 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 	delivered := attachment.OldestSequence
 	if err := writeSocketJSON(r.Context(), connection, socketEvent{
 		Type:       "hello",
-		ClientID:   clientID,
 		Status:     publicTerminalState(status.State),
 		Backend:    string(status.Persistence),
 		Generation: status.Generation,
 		Writer:     &writer,
-		WriterID:   status.WriterID,
-		Clients:    status.Clients,
 		Sequence:   delivered,
 		Truncated:  attachment.Truncated,
 		Message:    publicTerminalMessage(status),
@@ -323,8 +321,6 @@ func terminalStateEvent(status terminal.SessionStatus, writer bool, delivered ui
 		Backend:    string(status.Persistence),
 		Generation: status.Generation,
 		Writer:     &writer,
-		WriterID:   status.WriterID,
-		Clients:    status.Clients,
 		Sequence:   delivered,
 		Message:    publicTerminalMessage(status),
 	}
@@ -387,10 +383,10 @@ func (s *Server) closeTerminalSocket(ctx context.Context, connection *websocket.
 }
 
 func writeOutputFrame(ctx context.Context, connection *websocket.Conn, frame terminal.OutputFrame) error {
-	payload := make([]byte, 9+len(frame.Data))
+	payload := make([]byte, outputFrameHeaderBytes+len(frame.Data))
 	payload[0] = serverOutputFrame
-	binary.BigEndian.PutUint64(payload[1:9], frame.Sequence)
-	copy(payload[9:], frame.Data)
+	binary.BigEndian.PutUint64(payload[1:outputFrameHeaderBytes], frame.Sequence)
+	copy(payload[outputFrameHeaderBytes:], frame.Data)
 	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return connection.Write(writeCtx, websocket.MessageBinary, payload)

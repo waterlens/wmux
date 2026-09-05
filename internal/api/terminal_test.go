@@ -35,8 +35,8 @@ func TestLocalTerminalOverWebSocket(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read terminal output: %v; output=%q", err, output.String())
 		}
-		if messageType == websocket.MessageBinary && len(payload) >= 9 && payload[0] == serverOutputFrame {
-			output.Write(payload[9:])
+		if messageType == websocket.MessageBinary && len(payload) >= outputFrameHeaderBytes && payload[0] == serverOutputFrame {
+			output.Write(payload[outputFrameHeaderBytes:])
 		}
 	}
 }

@@ -80,10 +80,10 @@ func TestTerminalWebSocketReplayBoundarySeparatesHistoryFromLiveOutput(t *testin
 				replaying = false
 			}
 		case websocket.MessageBinary:
-			if len(payload) < 9 || payload[0] != serverOutputFrame {
+			if len(payload) < outputFrameHeaderBytes || payload[0] != serverOutputFrame {
 				t.Fatalf("invalid terminal output frame: %x", payload)
 			}
-			sequence := binary.BigEndian.Uint64(payload[1:9])
+			sequence := binary.BigEndian.Uint64(payload[1:outputFrameHeaderBytes])
 			if _, duplicate := seenSequences[sequence]; duplicate {
 				t.Fatalf("terminal sequence %d was delivered more than once", sequence)
 			}
@@ -93,12 +93,12 @@ func TestTerminalWebSocketReplayBoundarySeparatesHistoryFromLiveOutput(t *testin
 			seenSequences[sequence] = struct{}{}
 			nextSequence++
 			if replaying {
-				replayOutput.Write(payload[9:])
+				replayOutput.Write(payload[outputFrameHeaderBytes:])
 			} else {
 				if sequence <= boundary {
 					t.Fatalf("live sequence %d did not follow replay boundary %d", sequence, boundary)
 				}
-				liveOutput.Write(payload[9:])
+				liveOutput.Write(payload[outputFrameHeaderBytes:])
 			}
 		}
 	}
@@ -503,11 +503,11 @@ func readSocketToClose(t *testing.T, ctx context.Context, connection *websocket.
 		}
 		switch messageType {
 		case websocket.MessageBinary:
-			if len(payload) < 9 || payload[0] != serverOutputFrame {
+			if len(payload) < outputFrameHeaderBytes || payload[0] != serverOutputFrame {
 				t.Fatalf("invalid terminal output frame: %x", payload)
 			}
-			tail.lastSequence = binary.BigEndian.Uint64(payload[1:9])
-			output.Write(payload[9:])
+			tail.lastSequence = binary.BigEndian.Uint64(payload[1:outputFrameHeaderBytes])
+			output.Write(payload[outputFrameHeaderBytes:])
 		case websocket.MessageText:
 			var event socketEvent
 			if err := json.Unmarshal(payload, &event); err != nil {
@@ -556,11 +556,11 @@ func sendAndAwaitOutput(t *testing.T, ctx context.Context, connection *websocket
 		if err != nil {
 			t.Fatalf("read terminal output: %v", err)
 		}
-		if messageType != websocket.MessageBinary || len(message) < 9 || message[0] != serverOutputFrame {
+		if messageType != websocket.MessageBinary || len(message) < outputFrameHeaderBytes || message[0] != serverOutputFrame {
 			continue
 		}
-		sequence := binary.BigEndian.Uint64(message[1:9])
-		if sequence > after && bytes.Contains(message[9:], []byte(strings.TrimSpace(input))) {
+		sequence := binary.BigEndian.Uint64(message[1:outputFrameHeaderBytes])
+		if sequence > after && bytes.Contains(message[outputFrameHeaderBytes:], []byte(strings.TrimSpace(input))) {
 			return sequence
 		}
 	}
@@ -579,15 +579,15 @@ func sendAndCollectOutput(t *testing.T, ctx context.Context, connection *websock
 		if err != nil {
 			t.Fatalf("read terminal output: %v; output=%q", err, output.Bytes())
 		}
-		if messageType != websocket.MessageBinary || len(message) < 9 || message[0] != serverOutputFrame {
+		if messageType != websocket.MessageBinary || len(message) < outputFrameHeaderBytes || message[0] != serverOutputFrame {
 			continue
 		}
-		sequence := binary.BigEndian.Uint64(message[1:9])
+		sequence := binary.BigEndian.Uint64(message[1:outputFrameHeaderBytes])
 		if sequence <= after {
 			continue
 		}
 		lastSequence = sequence
-		output.Write(message[9:])
+		output.Write(message[outputFrameHeaderBytes:])
 		if bytes.Contains(output.Bytes(), []byte(marker)) {
 			return lastSequence, output.Bytes()
 		}

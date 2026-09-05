@@ -283,5 +283,10 @@ func (s *Server) handleStoreError(w http.ResponseWriter, err error, notFoundMess
 		writeError(w, http.StatusNotFound, "not_found", notFoundMessage)
 		return
 	}
+	if errors.Is(err, store.ErrInvalidInput) {
+		// The store rejected the value itself; that is the request's fault.
+		writeError(w, http.StatusBadRequest, "invalid_input", "请求的数据不符合要求")
+		return
+	}
 	s.internalError(w, "数据库操作失败", err)
 }
