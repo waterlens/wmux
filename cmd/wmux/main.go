@@ -45,21 +45,38 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		return err
 	}
 	defer dataLock.Close()
-	masterKey, err := security.LoadOrCreateMasterKey(cfg.MasterKeyPath)
+	runtime, err := openRuntime(cfg, logger)
 	if err != nil {
 		return err
+	}
+	defer runtime.close()
+	return runtime.serve(cfg, logger)
+}
+
+// runtime is the long-lived state one wmux process owns: the database, the
+// terminal manager and the HTTP handler built on top of them.
+type runtime struct {
+	database        *store.Store
+	terminals       *terminal.Manager
+	handler         http.Handler
+	stopMaintenance context.CancelFunc
+}
+
+// openRuntime opens the database, restores the terminal sessions that survived
+// the last stop and builds the HTTP handler. The caller owns the result and
+// must call close, whether or not serve succeeds.
+func openRuntime(cfg config.Config, logger *slog.Logger) (*runtime, error) {
+	masterKey, err := security.LoadOrCreateMasterKey(cfg.MasterKeyPath)
+	if err != nil {
+		return nil, err
 	}
 	database, err := store.Open(context.Background(), cfg.DatabasePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer database.Close()
 	if _, err := database.PurgeExpiredAuthSessions(context.Background()); err != nil {
 		logger.Warn("purge expired login sessions", "error", err)
 	}
-	maintenanceContext, stopMaintenance := context.WithCancel(context.Background())
-	defer stopMaintenance()
-	go purgeExpiredLogins(maintenanceContext, database, logger)
 	recordings, err := transcript.NewDirectory(transcript.DirectoryConfig{
 		Root: cfg.RecordingsDir,
 		Limits: transcript.Limits{
@@ -68,12 +85,13 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		},
 	})
 	if err != nil {
-		return err
+		database.Close()
+		return nil, err
 	}
-	runtimeRepository := &app.RuntimeRepository{Store: database, MasterKey: masterKey, Logger: logger}
-	terminalManager, err := terminal.NewManager(terminal.Config{
-		Repository:    runtimeRepository,
-		Callbacks:     runtimeRepository,
+	repository := &app.RuntimeRepository{Store: database, MasterKey: masterKey, Logger: logger}
+	terminals, err := terminal.NewManager(terminal.Config{
+		Repository:    repository,
+		Callbacks:     repository,
 		Transcripts:   recordings,
 		ClientBuffer:  512,
 		ReplayLimit:   8192,
@@ -83,17 +101,34 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		MuxRuntimeDir: filepath.Join(cfg.DataDir, "mux"),
 	})
 	if err != nil {
-		return err
+		database.Close()
+		return nil, err
 	}
-	defer terminalManager.Close()
-	if err := terminalManager.Restore(context.Background()); err != nil {
+	if err := terminals.Restore(context.Background()); err != nil {
 		logger.Warn("some terminal sessions could not be restored", "error", err)
 	}
+	maintenanceContext, stopMaintenance := context.WithCancel(context.Background())
+	go purgeExpiredLogins(maintenanceContext, database, logger)
+	return &runtime{
+		database:        database,
+		terminals:       terminals,
+		handler:         api.New(cfg, database, masterKey, terminals, recordings, repository, logger).Handler(),
+		stopMaintenance: stopMaintenance,
+	}, nil
+}
 
-	handler := api.New(cfg, database, masterKey, terminalManager, recordings, runtimeRepository, logger).Handler()
+func (rt *runtime) close() {
+	rt.terminals.Close()
+	rt.stopMaintenance()
+	rt.database.Close()
+}
+
+// serve accepts requests until a signal arrives, then stops the HTTP server
+// before detaching the terminal sessions so no request outlives its runtime.
+func (rt *runtime) serve(cfg config.Config, logger *slog.Logger) error {
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           handler,
+		Handler:           rt.handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    1 << 20,
@@ -120,7 +155,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	}
 
 	logger.Info("wmux is shutting down")
-	stopMaintenance()
+	rt.stopMaintenance()
 	var shutdownErrors []error
 	httpContext, cancelHTTP := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := httpServer.Shutdown(httpContext); err != nil {
@@ -128,7 +163,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	}
 	cancelHTTP()
 	terminalContext, cancelTerminals := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := terminalManager.CloseContext(terminalContext); err != nil {
+	if err := rt.terminals.CloseContext(terminalContext); err != nil {
 		shutdownErrors = append(shutdownErrors, fmt.Errorf("detach terminal sessions: %w", err))
 	}
 	cancelTerminals()

@@ -48,6 +48,8 @@ type socketEvent struct {
 	Message    string `json:"message,omitempty"`
 }
 
+// terminalSocket validates the request over plain HTTP, upgrades it, then
+// hands the stream to the replay and pump stages.
 func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 	// The heartbeat re-reads this login, so the stream cannot outlive it.
 	auth, ok := r.Context().Value(authContextKey{}).(store.AuthSession)
@@ -89,30 +91,43 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 	defer connection.CloseNow()
 	connection.SetReadLimit(maxSocketMessage)
 
-	attachment, err := s.terminals.Attach(r.Context(), id, clientID, after)
-	if err != nil {
-		s.logger.Warn("attach terminal WebSocket", "session", id, "error", err)
-		if errors.Is(err, terminal.ErrSessionNotFound) {
-			// A row without a runtime means a restart is in flight.
-			_ = writeSocketJSON(r.Context(), connection, socketEvent{Type: "disconnect", Status: "reconnecting", Reason: string(terminal.AttachmentRestarted)})
-			_ = connection.Close(websocket.StatusTryAgainLater, "session restarting")
-			return
-		}
-		_ = writeSocketJSON(r.Context(), connection, socketEvent{Type: "error", Message: "终端会话暂时不可用"})
-		_ = connection.Close(websocket.StatusPolicyViolation, "session unavailable")
+	attachment, delivered, ok := s.openTerminalStream(r.Context(), connection, id, clientID, after)
+	if !ok {
 		return
 	}
 	defer attachment.Close()
-	_ = s.store.TouchSession(r.Context(), id, time.Now())
+	s.pumpTerminalSocket(r.Context(), connection, auth, id, attachment, delivered)
+}
 
-	status, err := s.terminals.Status(id)
+// openTerminalStream attaches to the runtime, announces the session and
+// replays the transcript up to the live boundary. It returns the newest
+// sequence the browser has seen. A false result means the stream has already
+// been closed and reported, and the attachment released.
+func (s *Server) openTerminalStream(ctx context.Context, connection *websocket.Conn, sessionID, clientID string, after uint64) (*terminal.Attachment, uint64, bool) {
+	attachment, err := s.terminals.Attach(ctx, sessionID, clientID, after)
 	if err != nil {
+		s.logger.Warn("attach terminal WebSocket", "session", sessionID, "error", err)
+		if errors.Is(err, terminal.ErrSessionNotFound) {
+			// A row without a runtime means a restart is in flight.
+			_ = writeSocketJSON(ctx, connection, socketEvent{Type: "disconnect", Status: "reconnecting", Reason: string(terminal.AttachmentRestarted)})
+			_ = connection.Close(websocket.StatusTryAgainLater, "session restarting")
+			return nil, 0, false
+		}
+		_ = writeSocketJSON(ctx, connection, socketEvent{Type: "error", Message: "终端会话暂时不可用"})
+		_ = connection.Close(websocket.StatusPolicyViolation, "session unavailable")
+		return nil, 0, false
+	}
+	_ = s.store.TouchSession(ctx, sessionID, time.Now())
+
+	status, err := s.terminals.Status(sessionID)
+	if err != nil {
+		attachment.Close()
 		_ = connection.Close(websocket.StatusInternalError, "session status unavailable")
-		return
+		return nil, 0, false
 	}
 	writer := attachment.IsWriter()
 	delivered := attachment.OldestSequence
-	if err := writeSocketJSON(r.Context(), connection, socketEvent{
+	if err := writeSocketJSON(ctx, connection, socketEvent{
 		Type:       "hello",
 		Status:     publicTerminalState(status.State),
 		Backend:    string(status.Persistence),
@@ -122,31 +137,39 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 		Truncated:  attachment.Truncated,
 		Message:    publicTerminalMessage(status),
 	}); err != nil {
-		return
+		attachment.Close()
+		return nil, 0, false
 	}
 	for _, frame := range attachment.Initial {
-		if err := writeOutputFrame(r.Context(), connection, frame); err != nil {
-			return
+		if err := writeOutputFrame(ctx, connection, frame); err != nil {
+			attachment.Close()
+			return nil, 0, false
 		}
 		delivered = frame.Sequence
 	}
 	// Attach snapshots the transcript and subscribes under one lock, so this
 	// marker is an exact replay/live boundary.
 	delivered = attachment.LatestSequence
-	if err := writeSocketJSON(r.Context(), connection, socketEvent{
+	if err := writeSocketJSON(ctx, connection, socketEvent{
 		Type:     "replay_end",
 		Sequence: delivered,
 	}); err != nil {
-		return
+		attachment.Close()
+		return nil, 0, false
 	}
+	return attachment, delivered, true
+}
 
-	stopPings := pingSocket(r.Context(), connection)
+// pumpTerminalSocket forwards output, writer and state changes until the
+// browser, the runtime or the login goes away.
+func (s *Server) pumpTerminalSocket(ctx context.Context, connection *websocket.Conn, auth store.AuthSession, sessionID string, attachment *terminal.Attachment, delivered uint64) {
+	stopPings := pingSocket(ctx, connection)
 	defer stopPings()
 
 	readDone := make(chan error, 1)
 	controlOut := make(chan socketEvent, 16)
 	go func() {
-		readDone <- s.readTerminalSocket(r.Context(), connection, id, attachment, controlOut)
+		readDone <- s.readTerminalSocket(ctx, connection, sessionID, attachment, controlOut)
 	}()
 
 	ticker := time.NewTicker(socketStatePeriod)
@@ -157,12 +180,12 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 	closed := attachment.Closed
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
 		case <-readDone:
 			return
 		case event := <-controlOut:
-			if err := writeSocketJSON(r.Context(), connection, event); err != nil {
+			if err := writeSocketJSON(ctx, connection, event); err != nil {
 				return
 			}
 		case writer, ok := <-writerChanges:
@@ -170,7 +193,7 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 				writerChanges = nil
 				continue
 			}
-			if err := writeSocketJSON(r.Context(), connection, socketEvent{Type: "writer", Writer: &writer}); err != nil {
+			if err := writeSocketJSON(ctx, connection, socketEvent{Type: "writer", Writer: &writer}); err != nil {
 				return
 			}
 		case status, ok := <-states:
@@ -183,45 +206,51 @@ func (s *Server) terminalSocket(w http.ResponseWriter, r *http.Request) {
 			if publicTerminalState(status.State) == "exited" {
 				continue
 			}
-			if err := writeSocketJSON(r.Context(), connection, terminalStateEvent(status, attachment.IsWriter(), delivered)); err != nil {
+			if err := writeSocketJSON(ctx, connection, terminalStateEvent(status, attachment.IsWriter(), delivered)); err != nil {
 				return
 			}
 		case reason := <-closed:
-			s.closeTerminalSocket(r.Context(), connection, reason, frames, delivered)
+			s.closeTerminalSocket(ctx, connection, reason, frames, delivered)
 			return
 		case frame, ok := <-frames:
 			if !ok {
 				// Closed is closed before Frames, so the reason is already buffered.
 				reason := <-closed
-				s.closeTerminalSocket(r.Context(), connection, reason, frames, delivered)
+				s.closeTerminalSocket(ctx, connection, reason, frames, delivered)
 				return
 			}
-			if err := writeOutputFrame(r.Context(), connection, frame); err != nil {
+			if err := writeOutputFrame(ctx, connection, frame); err != nil {
 				return
 			}
 			delivered = frame.Sequence
 		case <-ticker.C:
-			if _, err := s.store.GetAuthSession(r.Context(), auth.TokenHash); err != nil {
-				_ = writeSocketJSON(r.Context(), connection, socketEvent{Type: "disconnect", Status: "exited", Reason: "unauthorized"})
-				_ = connection.Close(websocket.StatusPolicyViolation, "unauthorized")
-				return
-			}
-			status, err := s.terminals.Status(id)
-			if errors.Is(err, terminal.ErrSessionNotFound) {
-				_ = writeSocketJSON(r.Context(), connection, socketEvent{Type: "state", Status: "exited", Writer: boolPointer(false), Sequence: delivered})
-				return
-			}
-			if err != nil {
-				return
-			}
-			if publicTerminalState(status.State) == "exited" {
-				continue
-			}
-			if err := writeSocketJSON(r.Context(), connection, terminalStateEvent(status, attachment.IsWriter(), delivered)); err != nil {
+			if !s.beatTerminalSocket(ctx, connection, auth, sessionID, attachment, delivered) {
 				return
 			}
 		}
 	}
+}
+
+// beatTerminalSocket re-checks the login and the runtime state on every tick.
+// It reports whether the stream should keep running.
+func (s *Server) beatTerminalSocket(ctx context.Context, connection *websocket.Conn, auth store.AuthSession, sessionID string, attachment *terminal.Attachment, delivered uint64) bool {
+	if _, err := s.store.GetAuthSession(ctx, auth.TokenHash); err != nil {
+		_ = writeSocketJSON(ctx, connection, socketEvent{Type: "disconnect", Status: "exited", Reason: "unauthorized"})
+		_ = connection.Close(websocket.StatusPolicyViolation, "unauthorized")
+		return false
+	}
+	status, err := s.terminals.Status(sessionID)
+	if errors.Is(err, terminal.ErrSessionNotFound) {
+		_ = writeSocketJSON(ctx, connection, socketEvent{Type: "state", Status: "exited", Writer: boolPointer(false), Sequence: delivered})
+		return false
+	}
+	if err != nil {
+		return false
+	}
+	if publicTerminalState(status.State) == "exited" {
+		return true
+	}
+	return writeSocketJSON(ctx, connection, terminalStateEvent(status, attachment.IsWriter(), delivered)) == nil
 }
 
 func (s *Server) readTerminalSocket(ctx context.Context, connection *websocket.Conn, sessionID string, attachment *terminal.Attachment, controlOut chan<- socketEvent) error {
