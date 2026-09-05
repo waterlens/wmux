@@ -51,7 +51,7 @@ export function AuthScreen({ mode, version, onAuthenticated }: AuthScreenProps) 
   }
 
   return (
-    <main className="auth-shell auth-shell--plain">
+    <main className="auth-shell">
       <section className="auth-panel">
         <div className="auth-card">
           <div className="auth-card__brand brand">

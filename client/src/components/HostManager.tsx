@@ -154,7 +154,6 @@ export function HostManager({ hosts, onHostsChange, onStartSession, notify }: Ho
                   </p>
                 </div>
                 <ActionMenu
-                  className="host-menu"
                   open={openMenuId === host.id}
                   onOpenChange={(open) => setOpenMenuId(open ? host.id : null)}
                   label={`${host.name} 操作`}
