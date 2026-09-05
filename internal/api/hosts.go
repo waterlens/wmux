@@ -1,12 +1,12 @@
 package api
 
 import (
-	"crypto/subtle"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/waterlens/wmux/internal/app"
 	"github.com/waterlens/wmux/internal/security"
 	"github.com/waterlens/wmux/internal/sshx"
 	"github.com/waterlens/wmux/internal/store"
@@ -163,7 +163,7 @@ func (s *Server) probeHost(w http.ResponseWriter, r *http.Request) {
 	if probe == nil {
 		probe = sshx.Probe
 	}
-	fingerprint, algorithm, err := probe(r.Context(), sshAddress(host.Address, host.Port), host.Username)
+	fingerprint, algorithm, err := probe(r.Context(), app.SSHAddress(host), host.Username)
 	if err != nil {
 		s.upstreamError(w, "探测 SSH 主机指纹", "ssh_probe_failed", "无法读取 SSH 主机指纹，请检查地址和网络连接", err)
 		return
@@ -187,12 +187,14 @@ func (s *Server) trustHost(w http.ResponseWriter, r *http.Request) {
 	if probe == nil {
 		probe = sshx.Probe
 	}
-	actual, _, err := probe(r.Context(), sshAddress(host.Address, host.Port), host.Username)
+	actual, _, err := probe(r.Context(), app.SSHAddress(host), host.Username)
 	if err != nil {
 		s.upstreamError(w, "重新探测 SSH 主机指纹", "ssh_probe_failed", "无法再次读取 SSH 主机指纹，请检查地址和网络连接", err)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(actual), []byte(input.Fingerprint)) != 1 {
+	// The fingerprint is a public value the user just read off the screen, so a
+	// plain comparison is enough.
+	if actual != input.Fingerprint {
 		writeError(w, http.StatusConflict, "fingerprint_changed", "SSH 主机密钥在确认期间发生变化")
 		return
 	}
@@ -218,17 +220,17 @@ func (s *Server) testHost(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "解密 SSH 凭据", err)
 		return
 	}
+	credential, err := app.TerminalCredential(host.AuthType, credentials)
+	if err != nil {
+		s.internalError(w, "准备 SSH 凭据", err)
+		return
+	}
 	started := time.Now()
 	err = sshx.Test(r.Context(), sshx.Target{
-		Address:     sshAddress(host.Address, host.Port),
+		Address:     app.SSHAddress(host),
 		Username:    host.Username,
 		Fingerprint: host.Fingerprint,
-		Credentials: sshx.Credentials{
-			AuthType:   host.AuthType,
-			Password:   credentials.Password,
-			PrivateKey: credentials.PrivateKey,
-			Passphrase: credentials.Passphrase,
-		},
+		Credential:  credential,
 	})
 	if err != nil {
 		s.upstreamError(w, "测试 SSH 主机连接", "ssh_test_failed", "SSH 连接失败，请检查主机状态、指纹和认证信息", err)

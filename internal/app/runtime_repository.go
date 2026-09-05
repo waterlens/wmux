@@ -78,13 +78,13 @@ func (r *RuntimeRepository) LoadHost(ctx context.Context, id string) (terminal.H
 			return terminal.HostSpec{}, err
 		}
 	}
-	credential, err := terminalCredential(host.AuthType, credentials)
+	credential, err := TerminalCredential(host.AuthType, credentials)
 	if err != nil {
 		return terminal.HostSpec{}, err
 	}
 	return terminal.HostSpec{
 		ID:                host.ID,
-		Address:           net.JoinHostPort(strings.Trim(host.Address, "[]"), strconv.Itoa(host.Port)),
+		Address:           SSHAddress(host),
 		User:              host.Username,
 		Fingerprint:       host.Fingerprint,
 		Credential:        credential,
@@ -155,7 +155,14 @@ func sessionEnvironment(id string) map[string]string {
 	return map[string]string{"WMUX_SESSION_ID": id, "COLORTERM": "truecolor"}
 }
 
-func terminalCredential(authType string, credentials store.Credentials) (terminal.Credential, error) {
+// SSHAddress is the single place that turns a stored host into a dial address.
+func SSHAddress(host store.Host) string {
+	return net.JoinHostPort(strings.Trim(host.Address, "[]"), strconv.Itoa(host.Port))
+}
+
+// TerminalCredential maps a host's stored authentication type and decrypted
+// secrets onto the credential the SSH layers accept.
+func TerminalCredential(authType string, credentials store.Credentials) (terminal.Credential, error) {
 	switch authType {
 	case store.HostAuthPassword:
 		return terminal.PasswordCredential{Password: credentials.Password}, nil

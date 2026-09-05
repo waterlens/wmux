@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 )
@@ -179,8 +178,4 @@ func newID(prefix string) (string, error) {
 		return "", fmt.Errorf("generate ID: %w", err)
 	}
 	return prefix + "_" + hex.EncodeToString(value), nil
-}
-
-func sshAddress(address string, port int) string {
-	return net.JoinHostPort(strings.Trim(address, "[]"), fmt.Sprint(port))
 }

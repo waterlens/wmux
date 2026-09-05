@@ -3,7 +3,6 @@ package terminal
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -140,7 +139,7 @@ func dialSSH(ctx context.Context, host HostSpec) (*ssh.Client, []io.Closer, erro
 	if !strings.HasPrefix(fingerprint, "SHA256:") {
 		return nil, nil, permanentStartError(errors.New("terminal: an SHA256 host key fingerprint is required"))
 	}
-	auth, closers, err := sshAuthContext(ctx, host.Credential)
+	auth, closers, err := SSHAuthMethods(ctx, host.Credential)
 	if err != nil {
 		return nil, nil, permanentStartError(err)
 	}
@@ -153,7 +152,7 @@ func dialSSH(ctx context.Context, host HostSpec) (*ssh.Client, []io.Closer, erro
 	if timeout <= 0 {
 		timeout = defaultSSHConnectTimeout
 	}
-	hostKeyCallback, err := strictHostKeyCallback(fingerprint)
+	hostKeyCallback, err := StrictHostKeyCallback(fingerprint)
 	if err != nil {
 		return closeOnError(err)
 	}
@@ -163,7 +162,7 @@ func dialSSH(ctx context.Context, host HostSpec) (*ssh.Client, []io.Closer, erro
 		Timeout:         timeout,
 		HostKeyCallback: hostKeyCallback,
 	}
-	address := sshAddress(host.Address)
+	address := withDefaultPort(host.Address)
 	dialer := net.Dialer{Timeout: timeout, KeepAlive: keepAliveInterval(host)}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
@@ -193,21 +192,27 @@ func dialSSH(ctx context.Context, host HostSpec) (*ssh.Client, []io.Closer, erro
 	return ssh.NewClient(sshConn, chans, reqs), closers, nil
 }
 
-func strictHostKeyCallback(fingerprint string) (ssh.HostKeyCallback, error) {
+// StrictHostKeyCallback pins one SSH connection to a trusted SHA256 host key
+// fingerprint. Fingerprints are public values the user is shown before
+// trusting them, so a plain comparison is enough.
+func StrictHostKeyCallback(fingerprint string) (ssh.HostKeyCallback, error) {
 	fingerprint = strings.TrimSpace(fingerprint)
 	if !strings.HasPrefix(fingerprint, "SHA256:") {
 		return nil, errors.New("terminal: an SHA256 host key fingerprint is required")
 	}
 	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
 		actual := ssh.FingerprintSHA256(key)
-		if len(actual) != len(fingerprint) || subtle.ConstantTimeCompare([]byte(actual), []byte(fingerprint)) != 1 {
+		if actual != fingerprint {
 			return permanentStartError(fmt.Errorf("terminal: SSH host key mismatch: got %s", actual))
 		}
 		return nil
 	}, nil
 }
 
-func sshAuthContext(ctx context.Context, credential Credential) ([]ssh.AuthMethod, []io.Closer, error) {
+// SSHAuthMethods builds the authentication methods for one credential. The
+// returned closers own resources the methods keep open, such as an agent
+// connection, and the caller must close them once the connection is done.
+func SSHAuthMethods(ctx context.Context, credential Credential) ([]ssh.AuthMethod, []io.Closer, error) {
 	switch value := credential.(type) {
 	case PasswordCredential:
 		if value.Password == "" {
@@ -593,7 +598,9 @@ func keepAliveInterval(host HostSpec) time.Duration {
 	return host.KeepAliveInterval
 }
 
-func sshAddress(address string) string {
+// withDefaultPort appends SSH's port 22 to an address that carries none. It is
+// the inverse of app.SSHAddress, which joins a stored host and port.
+func withDefaultPort(address string) string {
 	if _, _, err := net.SplitHostPort(address); err == nil {
 		return address
 	}

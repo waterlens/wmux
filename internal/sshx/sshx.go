@@ -6,32 +6,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"os"
 	"time"
 
-	"github.com/waterlens/wmux/internal/store"
+	"github.com/waterlens/wmux/internal/terminal"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 )
 
 const defaultTimeout = 8 * time.Second
-
-// Credentials is the decrypted authentication material for one host.
-type Credentials struct {
-	AuthType   string
-	Password   string
-	PrivateKey string
-	Passphrase string
-}
 
 // Target contains only data needed for a short-lived SSH connection.
 type Target struct {
 	Address     string
 	Username    string
 	Fingerprint string
-	Credentials Credentials
+	Credential  terminal.Credential
 }
 
 // Probe returns the public key fingerprint without trusting or authenticating
@@ -76,27 +65,27 @@ func Test(ctx context.Context, target Target) error {
 		return errors.New("sshx: ssh host key is not trusted yet")
 	}
 
-	auth, cleanup, err := authMethod(target.Credentials)
+	// Interactive terminal sessions authenticate and pin host keys the same way,
+	// so both paths share one implementation in internal/terminal.
+	auth, closers, err := terminal.SSHAuthMethods(ctx, target.Credential)
 	if err != nil {
-		return err
+		return fmt.Errorf("sshx: prepare ssh authentication: %w", err)
 	}
-	if cleanup != nil {
-		defer cleanup.Close()
+	defer func() {
+		for _, closer := range closers {
+			_ = closer.Close()
+		}
+	}()
+	hostKeyCallback, err := terminal.StrictHostKeyCallback(target.Fingerprint)
+	if err != nil {
+		return fmt.Errorf("sshx: pin ssh host key: %w", err)
 	}
 
 	config := &ssh.ClientConfig{
-		User:    target.Username,
-		Auth:    []ssh.AuthMethod{auth},
-		Timeout: defaultTimeout,
-		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
-			// Fingerprints are public values shown to the user, so a plain
-			// comparison is enough.
-			actual := ssh.FingerprintSHA256(key)
-			if actual != target.Fingerprint {
-				return fmt.Errorf("sshx: ssh host key changed: want %s, got %s", target.Fingerprint, actual)
-			}
-			return nil
-		},
+		User:            target.Username,
+		Auth:            auth,
+		Timeout:         defaultTimeout,
+		HostKeyCallback: hostKeyCallback,
 	}
 
 	netConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", target.Address)
@@ -121,43 +110,6 @@ func Test(ctx context.Context, target Target) error {
 		return fmt.Errorf("sshx: ssh test command failed: %w", err)
 	}
 	return nil
-}
-
-// authMethod builds the SSH authentication method for one host. The returned
-// io.Closer is nil unless the method owns a resource, which only the agent
-// branch does.
-func authMethod(credentials Credentials) (ssh.AuthMethod, io.Closer, error) {
-	switch credentials.AuthType {
-	case store.HostAuthPassword:
-		if credentials.Password == "" {
-			return nil, nil, errors.New("sshx: ssh password is empty")
-		}
-		return ssh.Password(credentials.Password), nil, nil
-	case store.HostAuthKey:
-		var signer ssh.Signer
-		var err error
-		if credentials.Passphrase != "" {
-			signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(credentials.PrivateKey), []byte(credentials.Passphrase))
-		} else {
-			signer, err = ssh.ParsePrivateKey([]byte(credentials.PrivateKey))
-		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("sshx: parse ssh private key: %w", err)
-		}
-		return ssh.PublicKeys(signer), nil, nil
-	case store.HostAuthAgent:
-		socket := os.Getenv("SSH_AUTH_SOCK")
-		if socket == "" {
-			return nil, nil, errors.New("sshx: SSH_AUTH_SOCK is not set")
-		}
-		connection, err := net.DialTimeout("unix", socket, defaultTimeout)
-		if err != nil {
-			return nil, nil, fmt.Errorf("sshx: dial ssh agent: %w", err)
-		}
-		return ssh.PublicKeysCallback(agent.NewClient(connection).Signers), connection, nil
-	default:
-		return nil, nil, fmt.Errorf("sshx: unsupported ssh authentication type %q", credentials.AuthType)
-	}
 }
 
 func applyDeadline(ctx context.Context, connection net.Conn) {

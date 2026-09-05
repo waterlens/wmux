@@ -24,7 +24,7 @@ func TestStrictHostKeyFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	fingerprint := ssh.FingerprintSHA256(key)
-	callback, err := strictHostKeyCallback(fingerprint)
+	callback, err := StrictHostKeyCallback(fingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,14 +33,14 @@ func TestStrictHostKeyFingerprint(t *testing.T) {
 	}
 
 	wrong := fingerprint[:len(fingerprint)-1] + "x"
-	callback, err = strictHostKeyCallback(wrong)
+	callback, err = StrictHostKeyCallback(wrong)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := callback("ignored", nil, key); err == nil || !strings.Contains(err.Error(), "host key mismatch") {
 		t.Fatalf("mismatched fingerprint error = %v", err)
 	}
-	if _, err := strictHostKeyCallback(ssh.FingerprintLegacyMD5(key)); err == nil {
+	if _, err := StrictHostKeyCallback(ssh.FingerprintLegacyMD5(key)); err == nil {
 		t.Fatal("legacy MD5 fingerprint was accepted")
 	}
 }
@@ -55,30 +55,30 @@ func TestPrivateKeyCredentialWithPassphrase(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded := pem.EncodeToMemory(block)
-	methods, closers, err := sshAuthContext(t.Context(), PrivateKeyCredential{PEM: encoded, Passphrase: []byte("correct horse")})
+	methods, closers, err := SSHAuthMethods(t.Context(), PrivateKeyCredential{PEM: encoded, Passphrase: []byte("correct horse")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(methods) != 1 || len(closers) != 0 {
 		t.Fatalf("auth methods = %d, closers = %d", len(methods), len(closers))
 	}
-	if _, _, err := sshAuthContext(t.Context(), PrivateKeyCredential{PEM: encoded, Passphrase: []byte("wrong")}); err == nil {
+	if _, _, err := SSHAuthMethods(t.Context(), PrivateKeyCredential{PEM: encoded, Passphrase: []byte("wrong")}); err == nil {
 		t.Fatal("wrong private-key passphrase was accepted")
 	}
 }
 
 func TestPasswordAndAgentCredentialsValidate(t *testing.T) {
-	methods, closers, err := sshAuthContext(t.Context(), PasswordCredential{Password: "secret"})
+	methods, closers, err := SSHAuthMethods(t.Context(), PasswordCredential{Password: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(methods) != 1 || len(closers) != 0 {
 		t.Fatalf("auth methods = %d, closers = %d", len(methods), len(closers))
 	}
-	if _, _, err := sshAuthContext(t.Context(), PasswordCredential{}); err == nil {
+	if _, _, err := SSHAuthMethods(t.Context(), PasswordCredential{}); err == nil {
 		t.Fatal("empty password was accepted")
 	}
-	if _, _, err := sshAuthContext(t.Context(), AgentCredential{Socket: t.TempDir() + "/missing-agent.sock"}); err == nil {
+	if _, _, err := SSHAuthMethods(t.Context(), AgentCredential{Socket: t.TempDir() + "/missing-agent.sock"}); err == nil {
 		t.Fatal("missing SSH agent socket was accepted")
 	}
 }
