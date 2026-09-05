@@ -14,12 +14,36 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useId, useMemo, useState } from 'react';
+import { useId, useState } from 'react';
 import { persistenceLabel, sessionStatusLabel, sessionStatusTone } from '../sessionStatus';
 import type { Host, Session, User } from '../types';
-import { ActionMenu, Button } from './UI';
+import { ActionMenu, Button, UserAvatar } from './UI';
 
-const EMPTY_RESTARTING: ReadonlySet<string> = new Set();
+type SessionGroup = { id: string; label: string; icon: 'local' | 'ssh'; sessions: Session[] };
+
+function filterSessions(sessions: Session[], query: string): Session[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return sessions;
+  return sessions.filter((session) =>
+    `${session.name} ${session.hostName ?? ''} ${session.cwd}`.toLocaleLowerCase().includes(needle),
+  );
+}
+
+function groupSessions(sessions: Session[], hosts: Host[], query: string): SessionGroup[] {
+  const groups: SessionGroup[] = [];
+  const local = sessions.filter((session) => session.kind === 'local');
+  if (local.length || !query) groups.push({ id: 'local', label: '本机', icon: 'local', sessions: local });
+  for (const host of hosts) {
+    const hostSessions = sessions.filter((session) => session.hostId === host.id);
+    if (hostSessions.length || !query)
+      groups.push({ id: host.id, label: host.name, icon: 'ssh', sessions: hostSessions });
+  }
+  const missingHost = sessions.filter(
+    (session) => session.kind === 'ssh' && !hosts.some((host) => host.id === session.hostId),
+  );
+  if (missingHost.length) groups.push({ id: 'unknown', label: '其他 SSH', icon: 'ssh', sessions: missingHost });
+  return groups;
+}
 
 type SidebarProps = {
   sessions: Session[];
@@ -35,7 +59,7 @@ type SidebarProps = {
   onHosts: () => void;
   onRename: (session: Session) => void;
   onRestart: (session: Session) => void;
-  restartingIds?: ReadonlySet<string> | undefined;
+  restartingIds: ReadonlySet<string>;
   onDelete: (session: Session) => void;
   onSettings: () => void;
   onCollapse: () => void;
@@ -55,7 +79,7 @@ export function Sidebar({
   onHosts,
   onRename,
   onRestart,
-  restartingIds = EMPTY_RESTARTING,
+  restartingIds,
   onDelete,
   onSettings,
   onCollapse,
@@ -65,29 +89,8 @@ export function Sidebar({
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const groupItemsPrefix = useId();
 
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    if (!needle) return sessions;
-    return sessions.filter((session) =>
-      `${session.name} ${session.hostName ?? ''} ${session.cwd}`.toLocaleLowerCase().includes(needle),
-    );
-  }, [query, sessions]);
-
-  const groups = useMemo(() => {
-    const output: Array<{ id: string; label: string; icon: 'local' | 'ssh'; sessions: Session[] }> = [];
-    const local = filtered.filter((session) => session.kind === 'local');
-    if (local.length || !query) output.push({ id: 'local', label: '本机', icon: 'local', sessions: local });
-    for (const host of hosts) {
-      const hostSessions = filtered.filter((session) => session.hostId === host.id);
-      if (hostSessions.length || !query)
-        output.push({ id: host.id, label: host.name, icon: 'ssh', sessions: hostSessions });
-    }
-    const missingHost = filtered.filter(
-      (session) => session.kind === 'ssh' && !hosts.some((host) => host.id === session.hostId),
-    );
-    if (missingHost.length) output.push({ id: 'unknown', label: '其他 SSH', icon: 'ssh', sessions: missingHost });
-    return output;
-  }, [filtered, hosts, query]);
+  const filtered = filterSessions(sessions, query);
+  const groups = groupSessions(filtered, hosts, query);
 
   function toggleGroup(id: string) {
     setCollapsedGroups((current) => {
@@ -248,7 +251,7 @@ export function Sidebar({
         </div>
         <div className="sidebar-account">
           <button className="sidebar-nav sidebar-account__button" onClick={onSettings}>
-            <span className="user-avatar">{user.username.slice(0, 1).toUpperCase()}</span>
+            <UserAvatar username={user.username} />
             <span className="sidebar-nav__user">
               <strong>{user.username}</strong>
               <small>管理员</small>

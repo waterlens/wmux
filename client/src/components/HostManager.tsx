@@ -232,7 +232,6 @@ export function HostManager({ hosts, onHostsChange, onStartSession, notify }: Ho
 
       {editorOpen && (
         <HostEditor
-          open
           host={editingHost}
           onClose={() => setEditorOpen(false)}
           onSaved={(host) => {
@@ -297,13 +296,12 @@ export function HostManager({ hosts, onHostsChange, onStartSession, notify }: Ho
 }
 
 type HostEditorProps = {
-  open: boolean;
   host: Host | null;
   onClose: () => void;
   onSaved: (host: Host) => void;
 };
 
-function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
+function HostEditor({ host, onClose, onSaved }: HostEditorProps) {
   const authTypeLabelId = useId();
   const [name, setName] = useState(host?.name ?? '');
   const [address, setAddress] = useState(host?.address ?? '');
@@ -338,25 +336,19 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
       return;
     }
 
-    const base: HostInput = {
+    const input: HostInput = {
       name: name.trim(),
       address: address.trim(),
       port: numericPort,
       username: username.trim(),
       authType,
     };
-    const credentials =
-      authType === 'password'
-        ? password
-          ? { password }
-          : {}
-        : authType === 'privateKey'
-          ? {
-              ...(privateKey.trim() ? { privateKey: privateKey.trim() } : {}),
-              ...(privateKey.trim() ? { passphrase } : passphrase ? { passphrase } : {}),
-            }
-          : {};
-    const input = { ...base, ...credentials };
+    if (authType === 'password' && password) input.password = password;
+    if (authType === 'privateKey') {
+      const key = privateKey.trim();
+      if (key) input.privateKey = key;
+      if (key || passphrase) input.passphrase = passphrase;
+    }
 
     setBusy(true);
     try {
@@ -371,7 +363,7 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
 
   return (
     <Modal
-      open={open}
+      open
       title={host ? '编辑 SSH 主机' : '添加 SSH 主机'}
       closeDisabled={busy}
       onClose={onClose}
@@ -504,11 +496,11 @@ function HostEditor({ open, host, onClose, onSaved }: HostEditorProps) {
           </>
         )}
 
-        {error && (
+        {error ? (
           <div className="form-error" role="alert">
             {error}
           </div>
-        )}
+        ) : null}
       </form>
     </Modal>
   );

@@ -1,7 +1,7 @@
 import { ArrowRight, Clock3, Menu, PanelLeftOpen, Plus, Server, TerminalSquare, X } from 'lucide-react';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { api, errorMessage } from '../api';
-import { DEFAULT_PREFERENCES, isMobileLayout } from '../preferences';
+import { loadPreferences, savePreferences } from '../preferences';
 import { sessionStatusLabel, sessionStatusTone } from '../sessionStatus';
 import type { Host, Session, TerminalPreferences, Toast, User } from '../types';
 import { HostManager } from './HostManager';
@@ -24,22 +24,9 @@ type WorkspaceProps = {
   onLogout: () => Promise<void>;
 };
 
-function loadPreferences(): TerminalPreferences {
-  try {
-    const stored = JSON.parse(localStorage.getItem('wmux.terminalPreferences') ?? '{}') as Partial<TerminalPreferences>;
-    return {
-      fontSize:
-        typeof stored.fontSize === 'number'
-          ? Math.min(22, Math.max(11, stored.fontSize))
-          : DEFAULT_PREFERENCES.fontSize,
-      cursorStyle: stored.cursorStyle === 'bar' || stored.cursorStyle === 'underline' ? stored.cursorStyle : 'block',
-      cursorBlink: typeof stored.cursorBlink === 'boolean' ? stored.cursorBlink : DEFAULT_PREFERENCES.cursorBlink,
-      scrollback: typeof stored.scrollback === 'number' ? stored.scrollback : DEFAULT_PREFERENCES.scrollback,
-      theme: stored.theme === 'dark' || stored.theme === 'system' ? stored.theme : 'light',
-    };
-  } catch {
-    return DEFAULT_PREFERENCES;
-  }
+/** The breakpoint lives in styles.css and reaches JS through the --mobile-layout variable. */
+function isMobileLayout(): boolean {
+  return getComputedStyle(document.documentElement).getPropertyValue('--mobile-layout').trim() === '1';
 }
 
 function loadOpenSessionIds(sessions: Session[]): string[] {
@@ -83,28 +70,31 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
   const restartingRef = useRef<Set<string>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [preferences, setPreferences] = useState<TerminalPreferences>(loadPreferences);
-  const [generations, setGenerations] = useState<Record<string, number>>({});
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastIdRef = useRef(0);
+  // The 5s poll is started once on mount, so it reads the live tab list through this mirror.
+  const openIdsRef = useRef(openIds);
 
+  // Must stay stable: it sits in the dependency array of the TerminalView connection effect.
   const notify = useCallback((message: string, tone: Toast['tone'] = 'info') => {
     const id = ++toastIdRef.current;
     setToasts((current) => [...current.slice(-3), { id, message, tone }]);
     window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200);
   }, []);
 
-  const dismissToast = useCallback((id: number) => {
+  function dismissToast(id: number) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
-  }, []);
+  }
 
   useEffect(() => {
+    openIdsRef.current = openIds;
     localStorage.setItem('wmux.openSessions', JSON.stringify(openIds));
     if (activeId) localStorage.setItem('wmux.activeSession', activeId);
     else localStorage.removeItem('wmux.activeSession');
   }, [activeId, openIds]);
 
   useEffect(() => {
-    localStorage.setItem('wmux.terminalPreferences', JSON.stringify(preferences));
+    savePreferences(preferences);
   }, [preferences]);
 
   useEffect(() => {
@@ -148,12 +138,10 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
         setSessions(nextSessions);
         setHosts(nextHosts);
         const existing = new Set(nextSessions.map((session) => session.id));
-        setOpenIds((current) => {
-          const next = current.filter((id) => existing.has(id));
-          setActiveId((active) => (active && existing.has(active) ? active : (next.at(-1) ?? null)));
-          if (!next.length) setCurrentView((view) => (view === 'terminal' ? 'home' : view));
-          return next;
-        });
+        const next = openIdsRef.current.filter((id) => existing.has(id));
+        setOpenIds(next);
+        setActiveId((active) => (active && existing.has(active) ? active : (next.at(-1) ?? null)));
+        if (!next.length) setCurrentView((view) => (view === 'terminal' ? 'home' : view));
       } catch {
         // Transient polling failures keep the last known list.
       }
@@ -170,91 +158,73 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
     };
   }, []);
 
-  const openSessions = useMemo(
-    () =>
-      openIds
-        .map((id) => sessions.find((session) => session.id === id))
-        .filter((session): session is Session => Boolean(session)),
-    [openIds, sessions],
-  );
+  const openSessions = openIds
+    .map((id) => sessions.find((session) => session.id === id))
+    .filter((session): session is Session => Boolean(session));
 
-  const openSession = useCallback((session: Session) => {
+  function openSession(session: Session) {
     setOpenIds((current) => (current.includes(session.id) ? current : [...current, session.id]));
     setActiveId(session.id);
     setCurrentView('terminal');
     setMobileSidebar(false);
-  }, []);
+  }
 
-  const closeTab = useCallback((id: string) => {
-    setOpenIds((current) => {
-      const index = current.indexOf(id);
-      const next = current.filter((item) => item !== id);
-      setActiveId((active) => {
-        if (active !== id) return active;
-        const replacement = next[Math.min(index, next.length - 1)] ?? null;
-        if (!replacement) setCurrentView('home');
-        return replacement;
-      });
-      return next;
-    });
-  }, []);
+  function closeTab(id: string) {
+    const index = openIds.indexOf(id);
+    const next = openIds.filter((item) => item !== id);
+    setOpenIds(next);
+    if (activeId !== id) return;
+    const replacement = next[Math.min(index, next.length - 1)] ?? null;
+    setActiveId(replacement);
+    if (!replacement) setCurrentView('home');
+  }
 
-  const updateSession = useCallback((updated: Session) => {
+  function updateSession(updated: Session) {
     setSessions((current) => current.map((session) => (session.id === updated.id ? updated : session)));
-  }, []);
+  }
 
-  const createSession = useCallback((hostId?: string) => {
+  function createSession(hostId?: string) {
     setNewSessionHostId(hostId);
     setNewSessionOpen(true);
     setMobileSidebar(false);
-  }, []);
+  }
 
-  const handleCreated = useCallback(
-    (session: Session) => {
-      setSessions((current) => [...current.filter((item) => item.id !== session.id), session]);
-      openSession(session);
-      notify(`会话「${session.name}」已启动`, 'success');
-    },
-    [notify, openSession],
-  );
+  function handleCreated(session: Session) {
+    setSessions((current) => [...current.filter((item) => item.id !== session.id), session]);
+    openSession(session);
+    notify(`会话「${session.name}」已启动`, 'success');
+  }
 
   // The ref guards re-entrancy; the state only drives the UI.
-  const restartSession = useCallback(
-    async (session: Session) => {
-      if (restartingRef.current.has(session.id)) return;
-      restartingRef.current.add(session.id);
-      setRestartingIds((current) => new Set(current).add(session.id));
-      try {
-        const updated = await api.restartSession(session.id);
-        updateSession(updated);
-        setGenerations((current) => ({ ...current, [session.id]: (current[session.id] ?? 0) + 1 }));
-        openSession(updated);
-        notify(`正在重启「${updated.name}」`, 'success');
-      } catch (reason) {
-        notify(errorMessage(reason), 'error');
-      } finally {
-        restartingRef.current.delete(session.id);
-        setRestartingIds((current) => {
-          const next = new Set(current);
-          next.delete(session.id);
-          return next;
-        });
-      }
-    },
-    [notify, openSession, updateSession],
-  );
+  async function restartSession(session: Session) {
+    if (restartingRef.current.has(session.id)) return;
+    restartingRef.current.add(session.id);
+    setRestartingIds((current) => new Set(current).add(session.id));
+    try {
+      const updated = await api.restartSession(session.id);
+      updateSession(updated);
+      openSession(updated);
+      notify(`正在重启「${updated.name}」`, 'success');
+    } catch (reason) {
+      notify(errorMessage(reason), 'error');
+    } finally {
+      restartingRef.current.delete(session.id);
+      setRestartingIds((current) => {
+        const next = new Set(current);
+        next.delete(session.id);
+        return next;
+      });
+    }
+  }
 
-  const requestRestart = useCallback(
-    (session: Session) => {
-      if (restartingRef.current.has(session.id)) return;
-      if (session.status === 'connecting' || session.status === 'running' || session.status === 'reconnecting') {
-        setRestartTarget(session);
-        return;
-      }
-      void restartSession(session);
-    },
-    [restartSession],
-  );
+  function requestRestart(session: Session) {
+    if (restartingRef.current.has(session.id)) return;
+    if (session.status === 'connecting' || session.status === 'running' || session.status === 'reconnecting') {
+      setRestartTarget(session);
+      return;
+    }
+    void restartSession(session);
+  }
 
   async function confirmRestart() {
     if (!restartTarget) return;
@@ -381,7 +351,7 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
               >
                 {openSessions.map((session) => (
                   <TerminalView
-                    key={`${session.id}:${generations[session.id] ?? 0}`}
+                    key={`${session.id}:${session.generation ?? 0}`}
                     session={session}
                     active={activeId === session.id && currentView === 'terminal'}
                     preferences={preferences}
@@ -408,7 +378,6 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
 
       {newSessionOpen && (
         <SessionDialog
-          open
           hosts={hosts}
           sessions={sessions}
           initialHostId={newSessionHostId}
@@ -443,7 +412,6 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
       />
       {settingsOpen && (
         <SettingsDialog
-          open
           user={user}
           version={version}
           commit={commit}

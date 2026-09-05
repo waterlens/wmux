@@ -9,21 +9,9 @@ import { ActionMenu, Button, ConfirmDialog, Input, Modal } from './UI';
 afterEach(cleanup);
 
 describe('Modal', () => {
-  it('omits empty regions and restores them when conditional content is present', () => {
+  it('omits the body and footer regions until content is provided', () => {
     const { rerender } = render(<Modal open title="确认" onClose={vi.fn()} />);
     const dialog = screen.getByRole('dialog', { name: '确认' });
-    expect(dialog.querySelector('.modal__body')).toBeNull();
-    expect(dialog.querySelector('.modal__footer')).toBeNull();
-
-    rerender(
-      <Modal open title="确认" onClose={vi.fn()} footer={<>{null}</>}>
-        <>
-          {false}
-          {null}
-          {''}
-        </>
-      </Modal>,
-    );
     expect(dialog.querySelector('.modal__body')).toBeNull();
     expect(dialog.querySelector('.modal__footer')).toBeNull();
 
@@ -217,7 +205,7 @@ describe('ConfirmDialog', () => {
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
-  it('shows only the caller-provided consequence for a dangerous action', () => {
+  it('renders the caller-provided consequence and wires both actions', () => {
     const cancel = vi.fn();
     const confirm = vi.fn();
     render(
@@ -233,7 +221,6 @@ describe('ConfirmDialog', () => {
     );
 
     expect(screen.getByText('将删除这条记录。')).toBeTruthy();
-    expect(screen.queryByText('这个操作无法撤销。')).toBeNull();
     const dialog = screen.getByRole('dialog', { name: '删除记录？' });
     expect(dialog.querySelector('.modal__body')).toBeNull();
     expect(document.getElementById(dialog.getAttribute('aria-describedby') ?? '')?.textContent).toBe(

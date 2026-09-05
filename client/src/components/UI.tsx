@@ -6,7 +6,7 @@ import type {
   SelectHTMLAttributes,
   TextareaHTMLAttributes,
 } from 'react';
-import { Children, Fragment, isValidElement, useEffect, useId, useRef } from 'react';
+import { Children, useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import type { Toast } from '../types';
 
@@ -84,7 +84,7 @@ type ModalProps = {
   footer?: ReactNode | undefined;
 };
 
-const modalStack: { instance: symbol; layer: HTMLDivElement }[] = [];
+const modalStack: { layer: HTMLDivElement }[] = [];
 
 function updateModalLayers() {
   const top = modalStack.at(-1);
@@ -96,26 +96,23 @@ function updateModalLayers() {
   }
 }
 
-function hasContent(content: ReactNode): boolean {
-  return Children.toArray(content).some((child) => {
-    if (isValidElement<{ children?: ReactNode }>(child) && child.type === Fragment) {
-      return hasContent(child.props.children);
-    }
-    return child !== '';
-  });
-}
+const FORM_CONTROLS = 'input:not(:disabled), select:not(:disabled), textarea:not(:disabled)';
+const FOCUSABLE_SELECTOR = `a[href], button:not(:disabled), ${FORM_CONTROLS}, [tabindex]:not([tabindex="-1"])`;
+const AUTOFOCUS_SELECTOR = `[autofocus], ${FORM_CONTROLS}, button:not([data-modal-close]):not(:disabled)`;
 
 function focusableElements(container: HTMLElement): HTMLElement[] {
-  return Array.from(
-    container.querySelectorAll<HTMLElement>(
-      'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-    ),
-  ).filter(
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
     (element) =>
       !element.hidden && element.getAttribute('aria-hidden') !== 'true' && element.getClientRects().length > 0,
   );
 }
 
+/**
+ * Mounting convention across the app: form dialogs (new session, rename, host editor, settings) are
+ * mounted conditionally by the caller and pass a constant `open`, so closing them discards their form
+ * state. Confirmation dialogs stay mounted and are driven by `open`, which keeps the closing animation
+ * and the focus hand-back to the trigger.
+ */
 export function Modal({
   open,
   title,
@@ -131,7 +128,6 @@ export function Modal({
   const descriptionId = useId();
   const layerRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const instanceRef = useRef(Symbol('modal'));
   const onCloseRef = useRef(onClose);
 
   useEffect(() => {
@@ -142,9 +138,8 @@ export function Modal({
 
   useEffect(() => {
     if (!open || !layerRef.current) return undefined;
-    const instance = instanceRef.current;
     const previous = document.activeElement as HTMLElement | null;
-    const entry = { instance, layer: layerRef.current };
+    const entry = { layer: layerRef.current };
     modalStack.push(entry);
     updateModalLayers();
     const root = document.getElementById('root');
@@ -181,9 +176,7 @@ export function Modal({
     document.body.classList.add('modal-open');
     const focusTimer = window.setTimeout(() => {
       if (modalStack.at(-1) !== entry || !panelRef.current) return;
-      const preferred = panelRef.current.querySelector<HTMLElement>(
-        '[autofocus], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not([data-modal-close]):not(:disabled)',
-      );
+      const preferred = panelRef.current.querySelector<HTMLElement>(AUTOFOCUS_SELECTOR);
       (preferred ?? panelRef.current).focus();
     }, 20);
     return () => {
@@ -208,7 +201,7 @@ export function Modal({
       className={`modal-layer modal-layer--${variant}`}
       role="presentation"
       onMouseDown={(event) => {
-        if (event.currentTarget === event.target && modalStack.at(-1)?.instance === instanceRef.current) {
+        if (event.currentTarget === event.target && modalStack.at(-1)?.layer === layerRef.current) {
           onCloseRef.current();
         }
       }}
@@ -238,8 +231,8 @@ export function Modal({
             <X size={19} />
           </Button>
         </header>
-        {hasContent(children) && <div className="modal__body">{children}</div>}
-        {hasContent(footer) && <footer className="modal__footer">{footer}</footer>}
+        {Children.count(children) > 0 && <div className="modal__body">{children}</div>}
+        {Children.count(footer) > 0 && <footer className="modal__footer">{footer}</footer>}
       </div>
     </div>,
     document.body,
@@ -387,12 +380,21 @@ export function ConfirmDialog({
         </>
       }
     >
-      {error && (
+      {error ? (
         <div className="form-error" role="alert">
           {error}
         </div>
-      )}
+      ) : null}
     </Modal>
+  );
+}
+
+/** Decorative initial next to a username that is always spelled out in the same control. */
+export function UserAvatar({ username }: { username: string }) {
+  return (
+    <span className="user-avatar" aria-hidden="true">
+      {username.slice(0, 1).toUpperCase()}
+    </span>
   );
 }
 

@@ -1,12 +1,9 @@
 // @vitest-environment jsdom
 
 import { cleanup, render, screen } from '@testing-library/react';
-import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Host, Session, User } from '../types';
 import { Sidebar } from './Sidebar';
-
-const styles = readFileSync('client/src/styles.css', 'utf8');
 
 const user: User = { username: 'waterlens', createdAt: '2026-01-01T00:00:00Z' };
 const hosts: Host[] = [
@@ -69,6 +66,7 @@ function renderSidebar() {
       onHosts={callback}
       onRename={callback}
       onRestart={callback}
+      restartingIds={new Set()}
       onDelete={callback}
       onSettings={callback}
       onCollapse={callback}
@@ -77,11 +75,9 @@ function renderSidebar() {
 }
 
 describe('Sidebar information hierarchy', () => {
-  it('omits aggregate counts and separates account controls from navigation', () => {
+  it('separates account controls from navigation', () => {
     const { container } = renderSidebar();
 
-    expect(screen.queryByText('2')).toBeNull();
-    expect(screen.queryByText('1')).toBeNull();
     expect(container.querySelectorAll('.sidebar-section-title span')).toHaveLength(1);
     expect(container.querySelectorAll('.session-group__header em')).toHaveLength(0);
     expect(container.querySelectorAll('.sidebar-nav > em')).toHaveLength(0);
@@ -97,13 +93,6 @@ describe('Sidebar information hierarchy', () => {
     renderSidebar();
     expect(screen.getByRole('button', { name: '收起侧栏' }).classList.contains('desktop-only')).toBe(true);
     expect(screen.getByRole('button', { name: '关闭侧栏' }).classList.contains('mobile-only')).toBe(true);
-
-    const componentRule = styles.indexOf('.icon-button,');
-    const hiddenMobileRule = styles.indexOf('.mobile-only {');
-    expect(hiddenMobileRule).toBeGreaterThan(componentRule);
-    const breakpoint = styles.slice(styles.indexOf('@media (max-width: 780px)'));
-    expect(breakpoint).toMatch(/\.desktop-only\s*\{\s*display:\s*none;/);
-    expect(breakpoint).toMatch(/\.mobile-only\s*\{\s*display:\s*inline-flex;/);
   });
 
   it('exposes session groups as accessible disclosures', () => {

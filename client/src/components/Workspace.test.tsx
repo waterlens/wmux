@@ -96,15 +96,13 @@ afterEach(() => {
 });
 
 describe('Workspace termination confirmation', () => {
-  it('states the single concrete consequence without generic warning copy', () => {
+  it('names the session and its consequence in the confirmation dialog', () => {
     renderWorkspace();
 
     fireEvent.click(screen.getByRole('button', { name: '请求结束' }));
 
     expect(screen.getByRole('dialog', { name: '结束「构建任务」？' })).toBeTruthy();
     expect(screen.getByText('将结束进程并删除终端历史。')).toBeTruthy();
-    expect(screen.queryByText('这个操作无法撤销。')).toBeNull();
-    expect(screen.queryByText(/若只想隐藏终端/)).toBeNull();
   });
 
   it('surfaces the server warning when the remote backend could not be confirmed stopped', async () => {

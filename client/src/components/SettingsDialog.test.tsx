@@ -37,7 +37,6 @@ function renderSettings(onLogout: () => Promise<void> = vi.fn(async (): Promise<
     onPreferencesChange,
     ...render(
       <SettingsDialog
-        open
         user={user}
         version="1.0.0"
         commit="0123456789ab"

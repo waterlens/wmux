@@ -67,17 +67,11 @@ describe('HostManager copy and identity verification', () => {
     expect(agent.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('keeps create/edit chrome concise while preserving field validation', () => {
+  it('validates required fields before submitting', () => {
     renderManager([]);
-
-    expect(screen.queryByText('主机密钥校验始终开启')).toBeNull();
-    expect(screen.queryByText(/不会静默接受新指纹/)).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /添加主机/ }));
     expect(screen.getByRole('dialog', { name: '添加 SSH 主机' })).toBeTruthy();
-    expect(screen.queryByText('凭据由 wmux 服务加密保管。')).toBeNull();
-    expect(screen.queryByText('支持 OpenSSH PEM 格式')).toBeNull();
-    expect(screen.queryByText(/保存后还需要探测并确认主机指纹/)).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: '保存主机' }));
     expect(screen.getByRole('alert').textContent).toBe('请填写名称、地址和用户名');

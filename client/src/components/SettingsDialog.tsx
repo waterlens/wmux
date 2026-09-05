@@ -1,12 +1,11 @@
 import { Info, LogOut, Monitor, RotateCcw, ShieldCheck, TerminalSquare } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { api, ApiError, errorMessage } from '../api';
-import { DEFAULT_PREFERENCES } from '../preferences';
+import { DEFAULT_PREFERENCES, FONT_SIZE_RANGE, SCROLLBACK_OPTIONS } from '../preferences';
 import type { Host, Session, TerminalPreferences, User } from '../types';
-import { Button, ConfirmDialog, Field, Input, Modal, Select } from './UI';
+import { Button, ConfirmDialog, Field, Input, Modal, Select, UserAvatar } from './UI';
 
 type SettingsDialogProps = {
-  open: boolean;
   user: User;
   version: string;
   commit?: string | undefined;
@@ -19,7 +18,6 @@ type SettingsDialogProps = {
 };
 
 export function SettingsDialog({
-  open,
   user,
   version,
   commit,
@@ -91,7 +89,7 @@ export function SettingsDialog({
 
   return (
     <>
-      <Modal open={open} title="设置" size="lg" variant="settings" closeDisabled={passwordBusy} onClose={onClose}>
+      <Modal open title="设置" size="lg" variant="settings" closeDisabled={passwordBusy} onClose={onClose}>
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="设置类别">
             <button
@@ -137,8 +135,8 @@ export function SettingsDialog({
                   </div>
                   <input
                     type="range"
-                    min="11"
-                    max="22"
+                    min={FONT_SIZE_RANGE.min}
+                    max={FONT_SIZE_RANGE.max}
                     step="1"
                     value={preferences.fontSize}
                     onChange={(event) => onPreferencesChange({ ...preferences, fontSize: Number(event.target.value) })}
@@ -209,10 +207,11 @@ export function SettingsDialog({
                       onPreferencesChange({ ...preferences, scrollback: Number(event.target.value) })
                     }
                   >
-                    <option value="2000">2,000 行</option>
-                    <option value="10000">10,000 行</option>
-                    <option value="25000">25,000 行</option>
-                    <option value="50000">50,000 行</option>
+                    {SCROLLBACK_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
                   </Select>
                 </div>
 
@@ -231,9 +230,7 @@ export function SettingsDialog({
                 </div>
                 <div className="settings-account">
                   <div className="settings-account__identity">
-                    <span className="user-avatar" aria-hidden="true">
-                      {user.username.slice(0, 1).toUpperCase()}
-                    </span>
+                    <UserAvatar username={user.username} />
                     <strong>{user.username}</strong>
                   </div>
                   <Button
@@ -281,11 +278,11 @@ export function SettingsDialog({
                       />
                     </Field>
                   </div>
-                  {passwordError && (
+                  {passwordError ? (
                     <div className="form-error" role="alert">
                       {passwordError}
                     </div>
-                  )}
+                  ) : null}
                   {passwordSaved && (
                     <div className="success-callout" role="status">
                       <ShieldCheck size={16} />

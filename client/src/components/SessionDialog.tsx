@@ -1,11 +1,10 @@
 import { Command, Server, TerminalSquare } from 'lucide-react';
-import { type FormEvent, useId, useMemo, useState } from 'react';
+import { type FormEvent, useId, useState } from 'react';
 import { api, errorMessage } from '../api';
 import type { Host, PersistenceMode, Session, SessionInput, SessionKind } from '../types';
 import { Button, Field, Input, Modal, Select } from './UI';
 
 type SessionDialogProps = {
-  open: boolean;
   hosts: Host[];
   sessions: Session[];
   initialHostId?: string | undefined;
@@ -13,7 +12,7 @@ type SessionDialogProps = {
   onCreated: (session: Session) => void;
 };
 
-export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, onCreated }: SessionDialogProps) {
+export function SessionDialog({ hosts, sessions, initialHostId, onClose, onCreated }: SessionDialogProps) {
   const locationLabelId = useId();
   const [kind, setKind] = useState<SessionKind>(() => (initialHostId ? 'ssh' : 'local'));
   const [hostId, setHostId] = useState(initialHostId ?? '');
@@ -24,8 +23,8 @@ export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, o
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const selectedHost = useMemo(() => hosts.find((host) => host.id === hostId), [hostId, hosts]);
-  const trustedHosts = useMemo(() => hosts.filter((host) => Boolean(host.fingerprint)), [hosts]);
+  const selectedHost = hosts.find((host) => host.id === hostId);
+  const trustedHosts = hosts.filter((host) => Boolean(host.fingerprint));
 
   function availableDefaultName(): string {
     const base = kind === 'local' ? '本机终端' : (selectedHost?.name ?? 'SSH 会话');
@@ -66,7 +65,7 @@ export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, o
 
   return (
     <Modal
-      open={open}
+      open
       title="新建会话"
       closeDisabled={busy}
       onClose={onClose}
@@ -170,30 +169,30 @@ export function SessionDialog({ open, hosts, sessions, initialHostId, onClose, o
         </Field>
 
         {persistence === 'none' && <p className="persistence-note">不持久化会话会在服务连接终止时结束。</p>}
-        {error && (
+        {error ? (
           <div className="form-error" role="alert">
             {error}
           </div>
-        )}
+        ) : null}
       </form>
     </Modal>
   );
 }
 
 type RenameProps = {
-  session: Session | null;
+  session: Session;
   onClose: () => void;
   onSaved: (session: Session) => void;
 };
 
 export function RenameSessionDialog({ session, onClose, onSaved }: RenameProps) {
-  const [name, setName] = useState(session?.name ?? '');
+  const [name, setName] = useState(session.name);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!session || !name.trim()) return;
+    if (!name.trim()) return;
     setBusy(true);
     setError('');
     try {
@@ -208,7 +207,7 @@ export function RenameSessionDialog({ session, onClose, onSaved }: RenameProps) 
 
   return (
     <Modal
-      open={Boolean(session)}
+      open
       title="重命名会话"
       closeDisabled={busy}
       onClose={onClose}
@@ -228,11 +227,11 @@ export function RenameSessionDialog({ session, onClose, onSaved }: RenameProps) 
         <Field label="会话名称">
           <Input value={name} onChange={(event) => setName(event.target.value)} />
         </Field>
-        {error && (
+        {error ? (
           <div className="form-error" role="alert">
             {error}
           </div>
-        )}
+        ) : null}
       </form>
     </Modal>
   );
