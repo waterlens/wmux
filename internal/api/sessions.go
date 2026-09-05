@@ -33,17 +33,15 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeInvalidSession, err.Error())
 		return
 	}
-	autoNamed := input.Name == ""
-	// Naming and creation share one critical section so defaults stay distinct.
-	s.sessionNameMu.Lock()
-	defer s.sessionNameMu.Unlock()
 	id, err := store.NewID("ses")
 	if err != nil {
 		s.internalError(w, "generate session id", err)
 		return
 	}
+	autoNamed := input.Name == ""
 	model := store.Session{
 		ID:          id,
+		Name:        input.Name,
 		Kind:        input.Kind,
 		Cwd:         input.Cwd,
 		Command:     input.Command,
@@ -63,25 +61,17 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		model.HostID = &host.ID
-		if input.Name == "" {
-			input.Name = host.Name
+		if model.Name == "" {
+			model.Name = host.Name
 		}
 	}
-	if input.Name == "" {
-		input.Name = "本机终端"
+	if model.Name == "" {
+		model.Name = "本机终端"
 	}
-	if autoNamed {
-		input.Name, err = s.availableSessionName(r.Context(), input.Name)
-		if err != nil {
-			s.internalError(w, "generate default session name", err)
-			return
-		}
-	}
-	model.Name = input.Name
 	// The row owns the session id and generation, so it exists before the runtime.
-	created, err := s.store.CreateSession(r.Context(), model)
+	created, err := s.reserveSessionRow(r.Context(), model, autoNamed)
 	if err != nil {
-		s.handleStoreError(w, "create session", err, "终端会话不存在")
+		s.handleStoreError(w, "reserve session row", err, "终端会话不存在")
 		return
 	}
 	spec, err := s.runtime.SessionSpec(r.Context(), created)
@@ -223,6 +213,23 @@ func (s *Server) discardSessionRow(ctx context.Context, id string) {
 	if err := s.transcripts.Remove(id); err != nil {
 		s.logger.Warn("remove terminal transcript", "session", id, "error", err)
 	}
+}
+
+// reserveSessionRow resolves the generated default name and inserts the row in
+// one critical section, so two concurrent creates cannot pick the same name.
+// Building the spec, starting the runtime and writing the response all happen
+// unlocked.
+func (s *Server) reserveSessionRow(ctx context.Context, model store.Session, autoNamed bool) (store.Session, error) {
+	s.sessionNameMu.Lock()
+	defer s.sessionNameMu.Unlock()
+	if autoNamed {
+		name, err := s.availableSessionName(ctx, model.Name)
+		if err != nil {
+			return store.Session{}, err
+		}
+		model.Name = name
+	}
+	return s.store.CreateSession(ctx, model)
 }
 
 func (s *Server) availableSessionName(ctx context.Context, base string) (string, error) {
