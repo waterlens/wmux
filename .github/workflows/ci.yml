@@ -27,15 +27,22 @@ jobs:
       - name: Install terminal backends
         run: sudo apt-get update && sudo apt-get install -y tmux screen
       - run: pnpm install --frozen-lockfile
-      - run: pnpm format:check
-      - run: pnpm lint
-      - run: pnpm typecheck
-      - run: pnpm test:unit
-      - run: go test -race ./...
-      - run: go vet ./...
+      # Same pipeline as `pnpm test` locally: format, lint, typecheck, vitest, go.
+      - run: pnpm test
       - run: pnpm build
+      - name: Committed web assets are up to date
+        run: git diff --exit-code -- internal/webui/dist
       - name: Screen persistence integration
         run: WMUX_SCREEN_INTEGRATION=1 go test -timeout 30s ./internal/terminal -run '^TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt$' -count=1 -v
       - name: Tmux restore integration
         run: WMUX_TMUX_INTEGRATION=1 go test -timeout 60s ./internal/terminal -run '^(TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt|TestLocalTmuxGivesEachSessionItsOwnEnvironment|TestLocalTmuxAttachOnlyReportsMissingSession)$' -count=1 -v
+      - name: Install browser
+        run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-output
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
