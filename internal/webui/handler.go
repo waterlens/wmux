@@ -1,16 +1,23 @@
+// Package webui exposes the compiled browser application.
 package webui
 
 import (
+	"embed"
 	"io/fs"
 	"net/http"
 	"path"
 	"strings"
 )
 
+// assets contains the Vite production build.
+//
+//go:embed all:dist
+var assets embed.FS
+
 // Handler serves immutable Vite assets and falls back to index.html for
 // client-side routes.
 func Handler() http.Handler {
-	dist, err := fs.Sub(Assets, "dist")
+	dist, err := fs.Sub(assets, "dist")
 	if err != nil {
 		panic(err)
 	}
@@ -22,11 +29,12 @@ func Handler() http.Handler {
 			requestPath = "index.html"
 		}
 		if info, statErr := fs.Stat(dist, requestPath); statErr == nil && !info.IsDir() {
-			switch {
-			case strings.HasPrefix(requestPath, "assets/"):
+			// Vite fingerprints everything under assets/, so only those files can
+			// be cached forever. Everything else keeps a stable name and has to be
+			// revalidated, which is also what the SPA fallback below sends.
+			if strings.HasPrefix(requestPath, "assets/") {
 				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-			case requestPath == "index.html" || requestPath == "sw.js" || requestPath == "manifest.webmanifest" ||
-				strings.HasPrefix(requestPath, "icon-") || requestPath == "apple-touch-icon.png":
+			} else {
 				w.Header().Set("Cache-Control", "no-cache")
 			}
 			if requestPath == "manifest.webmanifest" {

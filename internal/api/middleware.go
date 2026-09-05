@@ -36,15 +36,54 @@ func recoverRequests(logger *slog.Logger, next http.Handler) http.Handler {
 	})
 }
 
+// requestLog records the outcome of every request. Health checks are polled by
+// the container runtime, so they are only reported when they fail.
 func requestLog(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		next.ServeHTTP(w, r)
-		if r.URL.Path != "/api/health" {
-			logger.Debug("request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(started))
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		level := slog.LevelDebug
+		switch {
+		case recorder.status >= http.StatusInternalServerError:
+			level = slog.LevelWarn
+		case recorder.status >= http.StatusBadRequest:
+			level = slog.LevelInfo
 		}
+		if r.URL.Path == healthPath && level == slog.LevelDebug {
+			return
+		}
+		logger.Log(r.Context(), level, "request",
+			"method", r.Method, "path", r.URL.Path, "status", recorder.status,
+			"bytes", recorder.written, "duration", time.Since(started))
 	})
 }
+
+// statusRecorder remembers what the handler chain actually sent. Unwrap keeps
+// http.ResponseController and the WebSocket hijack reaching the real writer.
+type statusRecorder struct {
+	http.ResponseWriter
+	status  int
+	written int64
+	wrote   bool
+}
+
+func (s *statusRecorder) WriteHeader(status int) {
+	if !s.wrote {
+		s.status = status
+		s.wrote = true
+	}
+	s.ResponseWriter.WriteHeader(status)
+}
+
+func (s *statusRecorder) Write(payload []byte) (int, error) {
+	s.wrote = true
+	count, err := s.ResponseWriter.Write(payload)
+	s.written += int64(count)
+	return count, err
+}
+
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 func originAllowed(r *http.Request, publicURL string, trustProxy bool) bool {
 	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {

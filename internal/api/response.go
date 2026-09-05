@@ -56,11 +56,9 @@ type apiError struct {
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(value); err != nil {
-		// Headers are already committed. The request logger will still record the
-		// disconnected response; there is no second valid HTTP response to send.
-		return
-	}
+	// The headers are already committed, so a failed encode has no second valid
+	// HTTP response to fall back to; the request log still reports the status.
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

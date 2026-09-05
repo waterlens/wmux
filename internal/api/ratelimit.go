@@ -44,7 +44,10 @@ func (f *failureWindow) fail(key string, now time.Time) {
 	defer f.mu.Unlock()
 	f.pruneLocked(now)
 	if _, exists := f.entries[key]; !exists && len(f.entries) >= f.maxKeys {
-		f.evictOldestLocked()
+		// The map is full of sources that failed inside the window. Dropping one
+		// of them would almost always drop a real user, since the flooder's own
+		// entry is the freshest, so the newcomer goes uncounted this round.
+		return
 	}
 	f.entries[key] = append(f.entries[key], now)
 }
@@ -69,23 +72,5 @@ func (f *failureWindow) pruneLocked(now time.Time) {
 		} else {
 			f.entries[key] = kept
 		}
-	}
-}
-
-func (f *failureWindow) evictOldestLocked() {
-	var oldestKey string
-	var oldest time.Time
-	for key, values := range f.entries {
-		if len(values) == 0 {
-			delete(f.entries, key)
-			continue
-		}
-		if oldestKey == "" || values[len(values)-1].Before(oldest) {
-			oldestKey = key
-			oldest = values[len(values)-1]
-		}
-	}
-	if oldestKey != "" {
-		delete(f.entries, oldestKey)
 	}
 }

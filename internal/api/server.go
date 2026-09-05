@@ -19,6 +19,9 @@ import (
 	"github.com/waterlens/wmux/internal/webui"
 )
 
+// healthPath is the unauthenticated liveness route the container probes.
+const healthPath = "/api/health"
+
 // Server owns the HTTP adapters around durable storage and terminal runtime.
 type Server struct {
 	config        config.Config
@@ -69,7 +72,7 @@ func New(cfg config.Config, database *store.Store, masterKey []byte, terminals *
 }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("GET /api/health", s.health)
+	s.mux.HandleFunc("GET "+healthPath, s.health)
 	s.mux.HandleFunc("GET /api/status", s.status)
 	s.mux.HandleFunc("POST /api/setup", s.sameOrigin(s.setup))
 	s.mux.HandleFunc("POST /api/login", s.sameOrigin(s.login))

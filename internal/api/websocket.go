@@ -28,6 +28,8 @@ const (
 	socketStatePeriod = 2 * time.Second
 	socketPingPeriod  = 30 * time.Second
 	socketPingTimeout = 10 * time.Second
+	// socketWriteTimeout bounds one frame write, not the stream.
+	socketWriteTimeout = 10 * time.Second
 )
 
 type socketControl struct {
@@ -268,7 +270,7 @@ func (s *Server) readTerminalSocket(ctx context.Context, connection *websocket.C
 			if len(payload) == 1 {
 				continue
 			}
-			writeCtx, cancelWrite := context.WithTimeout(ctx, 10*time.Second)
+			writeCtx, cancelWrite := context.WithTimeout(ctx, socketWriteTimeout)
 			_, writeErr := attachment.WriteContext(writeCtx, payload[1:])
 			cancelWrite()
 			if writeErr != nil {
@@ -416,7 +418,7 @@ func writeOutputFrame(ctx context.Context, connection *websocket.Conn, frame ter
 	payload[0] = serverOutputFrame
 	binary.BigEndian.PutUint64(payload[1:outputFrameHeaderBytes], frame.Sequence)
 	copy(payload[outputFrameHeaderBytes:], frame.Data)
-	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	writeCtx, cancel := context.WithTimeout(ctx, socketWriteTimeout)
 	defer cancel()
 	return connection.Write(writeCtx, websocket.MessageBinary, payload)
 }
@@ -426,7 +428,7 @@ func writeSocketJSON(ctx context.Context, connection *websocket.Conn, event sock
 	if err != nil {
 		return fmt.Errorf("encode WebSocket event: %w", err)
 	}
-	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	writeCtx, cancel := context.WithTimeout(ctx, socketWriteTimeout)
 	defer cancel()
 	return connection.Write(writeCtx, websocket.MessageText, payload)
 }

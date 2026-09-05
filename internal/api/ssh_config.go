@@ -42,7 +42,9 @@ func (s *Server) discoverSSHConfig(w http.ResponseWriter, r *http.Request) {
 		candidates = append(candidates, response)
 	}
 	writeJSON(w, http.StatusOK, sshConfigResponse{
-		Available:  result.Available,
+		Available: result.Available,
+		// Deliberately not result.Source: the resolved path would expose the
+		// service account's home directory. Report the configured value instead.
 		Source:     s.publicSSHConfigSource(),
 		Candidates: candidates,
 	})

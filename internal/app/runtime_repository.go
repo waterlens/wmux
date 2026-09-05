@@ -120,8 +120,8 @@ func (r *RuntimeRepository) OnSessionState(status terminal.SessionStatus) {
 		backend = string(status.Persistence)
 	}
 	if err := r.Store.UpdateSessionRuntime(ctx, status.ID, status.Generation, state, backend, sessionError); err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			r.logError("persist terminal runtime", err, "session", status.ID)
+		if !errors.Is(err, store.ErrNotFound) && r.Logger != nil {
+			r.Logger.Error("persist terminal runtime", "session", status.ID, "error", err)
 		}
 		return
 	}
@@ -171,14 +171,6 @@ func TerminalCredential(authType string, credentials store.Credentials) (termina
 	default:
 		return nil, errors.New("app: unsupported SSH authentication type")
 	}
-}
-
-func (r *RuntimeRepository) logError(message string, err error, args ...any) {
-	if r.Logger == nil {
-		return
-	}
-	args = append(args, "error", err)
-	r.Logger.Error(message, args...)
 }
 
 func (r *RuntimeRepository) logStateChange(status terminal.SessionStatus) {

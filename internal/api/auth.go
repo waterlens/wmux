@@ -53,7 +53,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "create administrator", err)
 		return
 	}
-	if err := s.issueLogin(w, r.Context()); err != nil {
+	if err := s.issueLogin(r.Context(), w); err != nil {
 		s.internalError(w, "create login session", err)
 		return
 	}
@@ -92,7 +92,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, codeInvalidCredentials, "用户名或密码错误")
 		return
 	}
-	if err := s.issueLogin(w, r.Context()); err != nil {
+	if err := s.issueLogin(r.Context(), w); err != nil {
 		s.internalError(w, "create login session", err)
 		return
 	}
@@ -155,7 +155,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "revoke login sessions", err)
 		return
 	}
-	if err := s.issueLogin(w, r.Context()); err != nil {
+	if err := s.issueLogin(r.Context(), w); err != nil {
 		s.internalError(w, "refresh login session", err)
 		return
 	}
@@ -185,7 +185,7 @@ func (s *Server) authenticate(r *http.Request) (store.AuthSession, bool) {
 	return auth, err == nil
 }
 
-func (s *Server) issueLogin(w http.ResponseWriter, ctx context.Context) error {
+func (s *Server) issueLogin(ctx context.Context, w http.ResponseWriter) error {
 	token, err := security.GenerateToken()
 	if err != nil {
 		return err
