@@ -119,7 +119,7 @@ func waitForOutput(ctx context.Context, t *testing.T, frames <-chan OutputFrame,
 
 func waitForFileContent(ctx context.Context, t *testing.T, path, want string) {
 	t.Helper()
-	ticker := time.NewTicker(20 * time.Millisecond)
+	ticker := time.NewTicker(muxPollInterval)
 	defer ticker.Stop()
 	for {
 		contents, err := os.ReadFile(path)

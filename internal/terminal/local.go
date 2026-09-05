@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -134,14 +135,8 @@ func (l *execLauncher) ensureLocalTmux(ctx context.Context, path, name string, s
 }
 
 func (l *execLauncher) configureLocalTmux(ctx context.Context, path string) error {
-	settings := [][]string{
-		{"set-option", "-g", "status", "off"},
-		{"set-option", "-g", "prefix", "None"},
-		{"set-option", "-g", "prefix2", "None"},
-		{"set-option", "-g", "mouse", "on"},
-	}
-	for _, setting := range settings {
-		if output, err := exec.CommandContext(ctx, path, l.tmuxArgs(setting...)...).CombinedOutput(); err != nil {
+	for _, option := range tmuxServerOptions {
+		if output, err := exec.CommandContext(ctx, path, l.tmuxArgs("set-option", "-g", option[0], option[1])...).CombinedOutput(); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -199,9 +194,9 @@ func (l *execLauncher) ensureLocalScreen(ctx context.Context, path, config strin
 		}
 		return permanentStartError(fmt.Errorf("terminal: create isolated screen session: %w", err))
 	}
-	deadline := time.NewTimer(2 * time.Second)
+	deadline := time.NewTimer(muxSettleTimeout)
 	defer deadline.Stop()
-	ticker := time.NewTicker(20 * time.Millisecond)
+	ticker := time.NewTicker(muxPollInterval)
 	defer ticker.Stop()
 	for {
 		if localScreenExists(ctx, path, config, env, name) {
@@ -226,26 +221,26 @@ func localScreenExists(ctx context.Context, path, config string, env []string, n
 
 func (l *execLauncher) terminateLocal(ctx context.Context, spec SessionSpec, resolved Persistence) error {
 	name := BackendName(spec.ID)
-	var path string
-	var args []string
-	var env []string
+	var path, config string
+	var args, env []string
 	switch resolved {
 	case PersistenceTmux:
-		_, path, _ = l.resolveLocal(PersistenceTmux)
-		args = l.tmuxArgs("kill-session", "-t", "="+name)
-	case PersistenceScreen:
-		_, path, _ = l.resolveLocal(PersistenceScreen)
-		config, screenEnv, err := l.screenRuntime(spec.Env)
-		if err != nil {
+		var err error
+		if _, path, err = l.resolveLocal(PersistenceTmux); err != nil {
 			return err
 		}
-		env = screenEnv
+		args = l.tmuxArgs("kill-session", "-t", "="+name)
+	case PersistenceScreen:
+		var err error
+		if _, path, err = l.resolveLocal(PersistenceScreen); err != nil {
+			return err
+		}
+		if config, env, err = l.screenRuntime(spec.Env); err != nil {
+			return err
+		}
 		args = []string{"-c", config, "-S", name, "-X", "quit"}
 	default:
 		return fmt.Errorf("terminal: invalid local persistence %q", resolved)
-	}
-	if path == "" {
-		return fmt.Errorf("terminal: %s is not installed", resolved)
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	if env != nil {
@@ -261,22 +256,15 @@ func (l *execLauncher) terminateLocal(ctx context.Context, spec SessionSpec, res
 		return fmt.Errorf("terminal: terminate %s session: %w: %s", resolved, err, strings.TrimSpace(string(output)))
 	}
 	if resolved == PersistenceScreen {
-		return waitLocalScreenAbsent(ctx, path, configPath(args), env, name)
+		return waitLocalScreenAbsent(ctx, path, config, env, name)
 	}
 	return nil
 }
 
-func configPath(args []string) string {
-	if len(args) >= 2 && args[0] == "-c" {
-		return args[1]
-	}
-	return ""
-}
-
 func waitLocalScreenAbsent(ctx context.Context, path, config string, env []string, name string) error {
-	timer := time.NewTimer(2 * time.Second)
+	timer := time.NewTimer(muxSettleTimeout)
 	defer timer.Stop()
-	ticker := time.NewTicker(20 * time.Millisecond)
+	ticker := time.NewTicker(muxPollInterval)
 	defer ticker.Stop()
 	for {
 		if err := ctx.Err(); err != nil {
@@ -334,27 +322,19 @@ func (l *execLauncher) screenRuntime(extra map[string]string) (string, []string,
 		return "", nil, fmt.Errorf("terminal: secure isolated screen directory: %w", err)
 	}
 	config := filepath.Join(dir, "screenrc")
-	contents := []byte("startup_message off\nhardstatus off\ncaption splitonly\nvbell off\nescape ^^^\n")
+	contents := []byte(strings.Join(screenConfigLines, "\n") + "\n")
 	if err := os.WriteFile(config, contents, 0o600); err != nil {
 		return "", nil, fmt.Errorf("terminal: write isolated screen config: %w", err)
 	}
 	if err := os.Chmod(config, 0o600); err != nil {
 		return "", nil, fmt.Errorf("terminal: secure isolated screen config: %w", err)
 	}
-	env := localEnvironment(extra)
-	env = setEnvironment(env, "SCREENDIR", dir)
-	return config, env, nil
-}
-
-func setEnvironment(env []string, key, value string) []string {
-	prefix := key + "="
-	for index, entry := range env {
-		if strings.HasPrefix(entry, prefix) {
-			env[index] = prefix + value
-			return env
-		}
+	values := maps.Clone(extra)
+	if values == nil {
+		values = map[string]string{}
 	}
-	return append(env, prefix+value)
+	values["SCREENDIR"] = dir
+	return config, localEnvironment(values), nil
 }
 
 func expandLocalHome(path string) (string, error) {
@@ -391,10 +371,10 @@ func localEnvironment(extra map[string]string) []string {
 func terminalSize(spec SessionSpec) (cols, rows uint16) {
 	cols, rows = spec.Cols, spec.Rows
 	if cols == 0 {
-		cols = 80
+		cols = defaultCols
 	}
 	if rows == 0 {
-		rows = 24
+		rows = defaultRows
 	}
 	return cols, rows
 }

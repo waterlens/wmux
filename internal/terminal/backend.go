@@ -53,6 +53,13 @@ const (
 	maxMuxNameLen     = 32
 	maxBackendNameLen = 40
 
+	// muxSettleTimeout and muxPollInterval bound the wait for a local or remote
+	// multiplexer session to appear or disappear.
+	muxSettleTimeout = 2 * time.Second
+	muxPollInterval  = 50 * time.Millisecond
+
+	defaultCols       = 80
+	defaultRows       = 24
 	backendReadBuffer = 32 << 10
 )
 
@@ -60,6 +67,17 @@ const (
 var tmuxBaseEnvironment = []string{
 	"DISPLAY", "KRB5CCNAME", "SSH_ASKPASS", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
 	"SSH_CONNECTION", "WINDOWID", "XAUTHORITY",
+}
+
+// screenConfigLines is the isolated screen session's fixed screenrc; local and
+// remote launches render the same lines through different mechanisms.
+var screenConfigLines = []string{
+	"startup_message off", "hardstatus off", "caption splitonly", "vbell off", "escape ^^^",
+}
+
+// tmuxServerOptions are the isolated tmux server's fixed settings.
+var tmuxServerOptions = [][2]string{
+	{"status", "off"}, {"prefix", "None"}, {"prefix2", "None"}, {"mouse", "on"},
 }
 
 func newExecLauncher(cfg Config) *execLauncher {

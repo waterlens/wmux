@@ -551,7 +551,7 @@ func TestConsumeBoundsLargeOutputFrames(t *testing.T) {
 	}
 	joined := make([]byte, 0, len(data))
 	for _, frame := range a.Initial {
-		if len(frame.Data) > 32<<10 {
+		if len(frame.Data) > backendReadBuffer {
 			t.Fatalf("output frame has %d bytes, want at most 32 KiB", len(frame.Data))
 		}
 		joined = append(joined, frame.Data...)

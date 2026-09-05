@@ -151,7 +151,7 @@ func dialSSH(ctx context.Context, host HostSpec) (*ssh.Client, []io.Closer, erro
 
 	timeout := host.ConnectTimeout
 	if timeout <= 0 {
-		timeout = 10 * time.Second
+		timeout = defaultSSHConnectTimeout
 	}
 	hostKeyCallback, err := strictHostKeyCallback(fingerprint)
 	if err != nil {
@@ -366,12 +366,11 @@ func (l *execLauncher) remoteAttachCommand(spec SessionSpec, resolved Persistenc
 			spawn = missing
 		}
 		parts := append([]string(nil), exports...)
+		parts = append(parts, "if ! "+tmux+" has-session -t "+target+" 2>/dev/null; then "+spawn+"; fi")
+		for _, option := range tmuxServerOptions {
+			parts = append(parts, tmux+" set-option -g "+option[0]+" "+option[1])
+		}
 		parts = append(parts,
-			"if ! "+tmux+" has-session -t "+target+" 2>/dev/null; then "+spawn+"; fi",
-			tmux+" set-option -g status off",
-			tmux+" set-option -g prefix None",
-			tmux+" set-option -g prefix2 None",
-			tmux+" set-option -g mouse on",
 			// Unknown terminal features on an older remote are non-fatal.
 			remoteTmuxAppend(tmux, "terminal-features", tmuxHyperlinkFeatures, "xterm*:hyperlinks"),
 			remoteTmuxAppend(tmux, "terminal-overrides", tmuxTrueColorOverride, "xterm*:Tc"),
@@ -433,15 +432,8 @@ func remotePath(path string) string {
 }
 
 func remoteScreenSetup(namespace string) []string {
-	configLines := []string{
-		"startup_message off",
-		"hardstatus off",
-		"caption splitonly",
-		"vbell off",
-		"escape ^^^",
-	}
-	quotedLines := make([]string, 0, len(configLines))
-	for _, line := range configLines {
+	quotedLines := make([]string, 0, len(screenConfigLines))
+	for _, line := range screenConfigLines {
 		quotedLines = append(quotedLines, shellQuote(line))
 	}
 	return []string{
@@ -487,11 +479,12 @@ func (l *execLauncher) remoteTerminateCommand(resolved Persistence, name string)
 	screen := `screen -c "$wmux_screen_rc"`
 	marker := shellQuote("[.]" + name + "[[:space:]]")
 	quit := screen + ` -S ` + shellQuote(name) + ` -X quit`
+	attempts := int(muxSettleTimeout / muxPollInterval)
 	parts = append(parts, "wmux_screen_attempt=0")
 	parts = append(parts, `while `+screen+` -ls | grep -q `+marker+`; do `+
 		quit+`; wmux_screen_attempt=$((wmux_screen_attempt + 1)); `+
-		`if [ "$wmux_screen_attempt" -ge 40 ]; then echo 'wmux: screen session did not stop' >&2; exit 1; fi; `+
-		`sleep 0.05; done`)
+		`if [ "$wmux_screen_attempt" -ge `+fmt.Sprint(attempts)+` ]; then echo 'wmux: screen session did not stop' >&2; exit 1; fi; `+
+		`sleep `+fmt.Sprintf("%g", muxPollInterval.Seconds())+`; done`)
 	return strings.Join(parts, "; ")
 }
 
@@ -585,12 +578,17 @@ func (b *sshBackend) runKeepalive(interval time.Duration) {
 	}
 }
 
+const (
+	defaultSSHConnectTimeout = 10 * time.Second
+	defaultSSHKeepAlive      = 15 * time.Second
+)
+
 func keepAliveInterval(host HostSpec) time.Duration {
 	if host.KeepAliveInterval < 0 {
 		return 0
 	}
 	if host.KeepAliveInterval == 0 {
-		return 15 * time.Second
+		return defaultSSHKeepAlive
 	}
 	return host.KeepAliveInterval
 }
