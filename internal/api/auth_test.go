@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -81,5 +83,47 @@ func TestRejectsCrossOriginMutation(t *testing.T) {
 	}, "", "https://attacker.example")
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("expected forbidden origin, got %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestLoginLocksAfterThreeFailuresButKeepsExistingSessions(t *testing.T) {
+	t.Parallel()
+	server := newAPIFixture(t, apiOptions{skipSetup: true}).api
+	setup := performJSON(t, server.Handler(), http.MethodPost, "/api/setup", map[string]any{
+		"username": "owner",
+		"password": "a-long-test-password",
+	}, "")
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("setup: %d %s", setup.Code, setup.Body.String())
+	}
+	existing := setup.Result().Cookies()[0].String()
+
+	attempt := func(password string) *httptest.ResponseRecorder {
+		return performJSON(t, server.Handler(), http.MethodPost, "/api/login", map[string]any{
+			"username": "owner",
+			"password": password,
+		}, "")
+	}
+	for i := 0; i < loginLockFailures; i++ {
+		if wrong := attempt("not-the-password"); wrong.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: %d %s", i+1, wrong.Code, wrong.Body.String())
+		}
+	}
+
+	locked := attempt("a-long-test-password")
+	if locked.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct password during the lock: %d %s", locked.Code, locked.Body.String())
+	}
+	if !bytes.Contains(locked.Body.Bytes(), []byte(codeRateLimited)) || !bytes.Contains(locked.Body.Bytes(), []byte("锁定")) {
+		t.Fatalf("lock response lacks its code or message: %s", locked.Body.String())
+	}
+	retry, err := strconv.Atoi(locked.Header().Get("Retry-After"))
+	if err != nil || retry < int(loginLockDuration.Seconds())-5 || retry > int(loginLockDuration.Seconds()) {
+		t.Fatalf("Retry-After = %q, want about %d", locked.Header().Get("Retry-After"), int(loginLockDuration.Seconds()))
+	}
+
+	// The lock only guards new logins; the browser that is already signed in keeps working.
+	if me := performJSON(t, server.Handler(), http.MethodGet, "/api/me", nil, existing); me.Code != http.StatusOK {
+		t.Fatalf("existing session rejected during the lock: %d %s", me.Code, me.Body.String())
 	}
 }

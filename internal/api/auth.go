@@ -3,7 +3,10 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,10 +69,10 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	key := clientIP(r, s.config.TrustProxy)
-	if !s.loginRate.allowed(key, time.Now()) {
-		w.Header().Set("Retry-After", "300")
-		writeError(w, http.StatusTooManyRequests, codeRateLimited, "登录尝试过多，请稍后再试")
+	if remaining := s.loginLock.remaining(time.Now()); remaining > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(remaining.Seconds()))))
+		minutes := int(math.Ceil(remaining.Minutes()))
+		writeError(w, http.StatusTooManyRequests, codeRateLimited, fmt.Sprintf("密码连续输错次数过多，登录已锁定，请 %d 分钟后再试", minutes))
 		return
 	}
 	var input loginInput
@@ -79,7 +82,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	input.Username = strings.TrimSpace(input.Username)
 	user, err := s.store.GetUserByUsername(r.Context(), input.Username)
 	if err != nil {
-		s.loginRate.fail(key, time.Now())
+		s.recordLoginFailure(r)
 		writeError(w, http.StatusUnauthorized, codeInvalidCredentials, "用户名或密码错误")
 		return
 	}
@@ -88,7 +91,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("stored password hash is invalid", "error", verifyErr)
 	}
 	if !valid {
-		s.loginRate.fail(key, time.Now())
+		s.recordLoginFailure(r)
 		writeError(w, http.StatusUnauthorized, codeInvalidCredentials, "用户名或密码错误")
 		return
 	}
@@ -96,8 +99,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "create login session", err)
 		return
 	}
-	s.loginRate.clear(key)
+	s.loginLock.clear()
 	writeJSON(w, http.StatusOK, publicUser(user))
+}
+
+// recordLoginFailure counts a wrong password and logs the moment the global
+// lock engages, with the client address for the operator's benefit.
+func (s *Server) recordLoginFailure(r *http.Request) {
+	if s.loginLock.fail(time.Now()) {
+		s.logger.Warn("login locked after repeated failures", "client", clientIP(r, s.config.TrustProxy), "for", loginLockDuration)
+	}
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {

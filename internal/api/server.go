@@ -23,6 +23,12 @@ import (
 const healthPath = "/api/health"
 
 // Server owns the HTTP adapters around durable storage and terminal runtime.
+// Three wrong passwords in a row lock /api/login for an hour; see loginLockout.
+const (
+	loginLockFailures = 3
+	loginLockDuration = time.Hour
+)
+
 type Server struct {
 	config        config.Config
 	store         *store.Store
@@ -30,7 +36,7 @@ type Server struct {
 	terminals     *terminal.Manager
 	transcripts   *transcript.Directory
 	logger        *slog.Logger
-	loginRate     *failureWindow
+	loginLock     *loginLockout
 	mux           *http.ServeMux
 	sessionNameMu sync.Mutex
 	hostImportMu  sync.Mutex
@@ -61,7 +67,7 @@ func New(cfg config.Config, database *store.Store, masterKey []byte, terminals *
 		terminals:   terminals,
 		transcripts: transcripts,
 		logger:      logger,
-		loginRate:   newFailureWindow(6, 5*time.Minute),
+		loginLock:   newLoginLockout(loginLockFailures, loginLockDuration),
 		mux:         http.NewServeMux(),
 		runtime:     runtime,
 		sshConfig:   sshconfig.New(cfg.SSHConfigPath),

@@ -5,72 +5,64 @@ import (
 	"time"
 )
 
-// failureWindow throttles repeated login failures per client address. It is not
-// an http.Handler: /api/login calls it directly so a successful password can
-// clear the caller's history.
-type failureWindow struct {
-	mu      sync.Mutex
-	entries map[string][]time.Time
-	limit   int
-	window  time.Duration
-	maxKeys int
+// loginLockout blocks /api/login for everyone after too many wrong passwords.
+//
+// wmux has a single account, so a per-address limit would only slow down an
+// attacker with many addresses; the trade-off of a global lock is that anyone
+// who fails `limit` times locks new logins for `duration`. Sessions that are
+// already signed in keep working because requests are validated by token, and
+// the state lives in memory, so restarting wmux lifts the lock.
+type loginLockout struct {
+	mu           sync.Mutex
+	limit        int
+	duration     time.Duration
+	failures     int
+	lastFailure  time.Time
+	blockedUntil time.Time
 }
 
-func newFailureWindow(limit int, window time.Duration) *failureWindow {
-	return &failureWindow{entries: make(map[string][]time.Time), limit: limit, window: window, maxKeys: 4096}
+func newLoginLockout(limit int, duration time.Duration) *loginLockout {
+	return &loginLockout{limit: limit, duration: duration}
 }
 
-func (f *failureWindow) allowed(key string, now time.Time) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cutoff := now.Add(-f.window)
-	values := f.entries[key]
-	kept := values[:0]
-	for _, value := range values {
-		if value.After(cutoff) {
-			kept = append(kept, value)
-		}
+// remaining reports how much longer logins stay blocked; zero means attempts
+// are allowed. An expired lock resets the failure count so the next round
+// starts from scratch.
+func (l *loginLockout) remaining(now time.Time) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if now.Before(l.blockedUntil) {
+		return l.blockedUntil.Sub(now)
 	}
-	if len(kept) == 0 {
-		delete(f.entries, key)
-	} else {
-		f.entries[key] = kept
+	if !l.blockedUntil.IsZero() {
+		l.blockedUntil = time.Time{}
+		l.failures = 0
 	}
-	return len(kept) < f.limit
+	return 0
 }
 
-func (f *failureWindow) fail(key string, now time.Time) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.pruneLocked(now)
-	if _, exists := f.entries[key]; !exists && len(f.entries) >= f.maxKeys {
-		// The map is full of sources that failed inside the window. Dropping one
-		// of them would almost always drop a real user, since the flooder's own
-		// entry is the freshest, so the newcomer goes uncounted this round.
-		return
+// fail records a wrong password. Failures older than `duration` are forgotten;
+// the failure that reaches the limit engages the lock and reports true.
+func (l *loginLockout) fail(now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.failures > 0 && now.Sub(l.lastFailure) > l.duration {
+		l.failures = 0
 	}
-	f.entries[key] = append(f.entries[key], now)
+	l.failures++
+	l.lastFailure = now
+	if l.failures < l.limit {
+		return false
+	}
+	l.failures = 0
+	l.blockedUntil = now.Add(l.duration)
+	return true
 }
 
-func (f *failureWindow) clear(key string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.entries, key)
-}
-
-func (f *failureWindow) pruneLocked(now time.Time) {
-	cutoff := now.Add(-f.window)
-	for key, values := range f.entries {
-		kept := values[:0]
-		for _, value := range values {
-			if value.After(cutoff) {
-				kept = append(kept, value)
-			}
-		}
-		if len(kept) == 0 {
-			delete(f.entries, key)
-		} else {
-			f.entries[key] = kept
-		}
-	}
+// clear forgets earlier failures after a successful login.
+func (l *loginLockout) clear() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.failures = 0
+	l.blockedUntil = time.Time{}
 }

@@ -50,26 +50,47 @@ func TestClientIPUsesTrustedRightEdge(t *testing.T) {
 	}
 }
 
-func TestFailureWindowPrunesAndCapsKeys(t *testing.T) {
+func TestLoginLockoutEngagesAfterLimitAndExpires(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0)
-	window := newFailureWindow(2, time.Minute)
-	window.maxKeys = 2
+	lock := newLoginLockout(3, time.Hour)
 
-	if !window.allowed("unseen", now) || len(window.entries) != 0 {
-		t.Fatal("allowed lookup should not allocate an entry")
+	if lock.remaining(now) != 0 {
+		t.Fatal("fresh lockout blocks logins")
 	}
-	window.fail("one", now.Add(-2*time.Minute))
-	window.fail("two", now)
-	window.fail("three", now)
-	if len(window.entries) > 2 {
-		t.Fatalf("entries grew beyond cap: %d", len(window.entries))
+	if lock.fail(now) || lock.fail(now.Add(time.Minute)) {
+		t.Fatal("lock engaged before the third failure")
 	}
-	if _, exists := window.entries["one"]; exists {
-		t.Fatal("expired entry was not pruned")
+	if lock.remaining(now.Add(2*time.Minute)) != 0 {
+		t.Fatal("two failures already block logins")
 	}
-	window.fail("two", now.Add(time.Second))
-	if window.allowed("two", now.Add(2*time.Second)) {
-		t.Fatal("rate limit did not count failures inside the window")
+	if !lock.fail(now.Add(2 * time.Minute)) {
+		t.Fatal("third failure did not engage the lock")
+	}
+	if got := lock.remaining(now.Add(3 * time.Minute)); got != 59*time.Minute {
+		t.Fatalf("remaining = %s, want 59m", got)
+	}
+	// Attempts during the lock are rejected before being counted, so a fresh
+	// round of three starts once it expires.
+	if lock.remaining(now.Add(63*time.Minute)) != 0 {
+		t.Fatal("lock did not expire after its duration")
+	}
+	if lock.fail(now.Add(64*time.Minute)) || lock.remaining(now.Add(65*time.Minute)) != 0 {
+		t.Fatal("expired lock kept counting the previous round")
+	}
+
+	stale := newLoginLockout(3, time.Hour)
+	stale.fail(now)
+	stale.fail(now.Add(time.Minute))
+	if stale.fail(now.Add(2 * time.Hour)) {
+		t.Fatal("failures older than the lock duration were still counted")
+	}
+
+	cleared := newLoginLockout(3, time.Hour)
+	cleared.fail(now)
+	cleared.fail(now)
+	cleared.clear()
+	if cleared.fail(now) {
+		t.Fatal("a successful login did not reset the failure count")
 	}
 }

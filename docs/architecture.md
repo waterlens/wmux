@@ -91,7 +91,7 @@ Container deployments should mount only the config text and required `Include` f
 - Mutating requests and WebSocket upgrades require the configured or inferred same origin.
 - Without a configured public URL, browser writes are accepted only through literal IP addresses or `localhost`, preventing an attacker-controlled rebinding hostname from authorizing first-time setup.
 - Authentication cookies are HTTP-only, SameSite Strict and Secure when configured for HTTPS.
-- Login failures are rate-limited by client address.
+- Three wrong passwords in a row lock `/api/login` for everyone for an hour. The lock is global because there is a single account, it lives in memory (a restart clears it), and it never touches sessions that are already signed in, which are validated by token.
 - Responses disable framing, MIME sniffing and unnecessary browser permissions.
 - Every request produces one `request` log line with method, path, status, bytes and duration; 4xx logs at Info and 5xx at Warn, and `/api/health` is silent unless it fails.
 - The API error codes the browser matches on are enumerated in `internal/api/response.go`.
