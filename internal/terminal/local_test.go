@@ -117,6 +117,8 @@ func TestConfigureLocalTmuxEnablesMouseAndSafelyProbesHyperlinks(t *testing.T) {
 		"-L isolated -f /dev/null set-option -g status off",
 		"-L isolated -f /dev/null set-option -g prefix None",
 		"-L isolated -f /dev/null set-option -g mouse on",
+		"-L isolated -f /dev/null set-option -g escape-time 10",
+		"-L isolated -f /dev/null set-option -g focus-events on",
 		"-L isolated -f /dev/null show-options -gqv terminal-features",
 		"-L isolated -f /dev/null set-option -as terminal-features " + tmuxHyperlinkFeatures,
 		"-L isolated -f /dev/null show-options -gqv terminal-overrides",

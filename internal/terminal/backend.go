@@ -79,9 +79,13 @@ var screenConfigLines = []string{
 	"startup_message off", "hardstatus off", "caption splitonly", "vbell off", "escape ^^^",
 }
 
-// tmuxServerOptions are the isolated tmux server's fixed settings.
+// tmuxServerOptions are the isolated tmux server's fixed settings. escape-time
+// and focus-events follow neovim's :checkhealth advice: tmux's 500 ms default
+// turns "Esc then a key" into a Meta sequence, which is what makes leaving
+// insert mode feel broken, and focus events let editors notice tab switches.
 var tmuxServerOptions = [][2]string{
 	{"status", "off"}, {"prefix", "None"}, {"prefix2", "None"}, {"mouse", "on"},
+	{"escape-time", "10"}, {"focus-events", "on"},
 }
 
 func newExecLauncher(cfg Config) *execLauncher {

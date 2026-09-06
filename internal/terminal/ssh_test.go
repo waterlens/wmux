@@ -96,7 +96,7 @@ func TestRemoteAttachCommandQuotesValues(t *testing.T) {
 		"tmux -L 'wmux' -f /dev/null set-option -g update-environment",
 		"';' new-session -d",
 		"/tmp/a", "/bin/zsh", "argument with spaces",
-		"status off", "prefix None", "mouse on",
+		"status off", "prefix None", "mouse on", "escape-time 10", "focus-events on",
 		"terminal-features", "xterm*:hyperlinks",
 		"terminal-overrides", "xterm*:Tc",
 	} {

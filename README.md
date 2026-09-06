@@ -124,6 +124,7 @@ Docker 部署时只以只读方式挂载 config 及其引用的片段（见 `com
 ## 限制
 
 - OSC 52 剪贴板写入、终端文件传输、桌面通知、SIXEL / Kitty 图形、Kitty 键盘协议和 tmux passthrough 目前关闭。
+- 浏览器会先于页面处理一些按键：Vimium、Surfingkeys 之类的扩展会把 Esc 和 Ctrl+[ 用来退出输入框，需要把 wmux 的地址加入扩展的排除列表；浏览器全屏模式下 Esc 默认用于退出全屏，wmux 在支持 Keyboard Lock 的浏览器（Chrome）里会申请保留 Esc，此时长按 Esc 才退出全屏。可以在终端里运行 `cat -v` 后按键，看到 `^[` 说明按键已送达。
 - 内嵌字体与组件的许可见 [`client/public/third-party-notices.txt`](client/public/third-party-notices.txt)，“设置 → 关于”中也可打开。
 
 ## 开发

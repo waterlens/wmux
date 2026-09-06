@@ -410,7 +410,7 @@ func assertIsolatedTmuxInteractionOptions(t *testing.T, path string, l *execLaun
 		output, err := exec.Command(path, l.tmuxArgs("show-options", "-gv", option)...).CombinedOutput()
 		return strings.TrimSpace(string(output)), err
 	}
-	for option, want := range map[string]string{"mouse": "on", "status": "off", "prefix": "None"} {
+	for option, want := range map[string]string{"mouse": "on", "status": "off", "prefix": "None", "escape-time": "10", "focus-events": "on"} {
 		got, err := global(option)
 		if err != nil || got != want {
 			t.Fatalf("isolated tmux option %s = %q, %v; want %q", option, got, err, want)

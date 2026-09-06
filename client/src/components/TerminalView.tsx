@@ -102,6 +102,13 @@ function alignScreen(terminal: Terminal, mount: HTMLElement, fixedWidth: boolean
   mount.classList.toggle('is-overflowing', fixedWidth && slack < -1);
 }
 
+type KeyboardLock = { lock(keys?: string[]): Promise<void>; unlock(): void };
+
+/** The Keyboard Lock API, which TypeScript's DOM library does not declare yet. */
+function keyboardLock(): KeyboardLock | undefined {
+  return (navigator as Navigator & { keyboard?: KeyboardLock }).keyboard;
+}
+
 /** Height of one terminal row in CSS pixels, from the rendered screen when available. */
 function rowHeight(terminal: Terminal): number {
   const screen = terminal.element?.querySelector<HTMLElement>('.xterm-screen');
@@ -438,6 +445,26 @@ export function TerminalView({
     terminalRef.current?.focus();
   }
 
+  /**
+   * Browsers reserve Esc to leave fullscreen, which strands editors that need
+   * it. Where the Keyboard Lock API exists (Chrome) the terminal keeps Esc
+   * while fullscreen and the user holds Esc to leave instead.
+   */
+  async function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      keyboardLock()?.unlock();
+      await document.exitFullscreen().catch(() => undefined);
+      return;
+    }
+    const view = mountRef.current?.closest('.terminal-view');
+    if (!view) return;
+    await view.requestFullscreen().catch(() => undefined);
+    await keyboardLock()
+      ?.lock(['Escape'])
+      .catch(() => undefined);
+    terminalRef.current?.focus();
+  }
+
   function sendCursor(direction: CursorDirection) {
     const terminal = terminalRef.current;
     const value = encodeCursorKey(
@@ -577,14 +604,7 @@ export function TerminalView({
           >
             <Eraser size={16} />
           </button>
-          <button
-            className="tool-button desktop-only"
-            onClick={() => {
-              if (document.fullscreenElement) void document.exitFullscreen();
-              else void mountRef.current?.closest('.terminal-view')?.requestFullscreen();
-            }}
-            title="全屏"
-          >
+          <button className="tool-button desktop-only" onClick={() => void toggleFullscreen()} title="全屏">
             <Maximize2 size={16} />
           </button>
           <button
