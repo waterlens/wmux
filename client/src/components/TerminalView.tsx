@@ -12,12 +12,12 @@ import {
   Maximize2,
   Menu,
   RefreshCw,
-  Server,
   Square,
-  TerminalSquare,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { api, ApiError, errorMessage } from '../api';
+import { useMobileLayout } from '../layout';
 import { AUTO_COLUMNS } from '../preferences';
 import { liveStatusLabel } from '../sessionStatus';
 import { TerminalConnection } from '../terminalConnection';
@@ -43,6 +43,8 @@ type TerminalViewProps = {
   onTerminate: (session: Session) => void;
   /** Phone layout only: the toolbar hosts the sidebar button because the tab bar is hidden there. */
   onOpenSidebar?: (() => void) | undefined;
+  /** Desktop layout: the active terminal renders its actions into this tab-bar element instead of a toolbar. */
+  toolbarSlot?: HTMLElement | null | undefined;
   notify: Notify;
 };
 
@@ -136,8 +138,10 @@ export function TerminalView({
   onRestart,
   onTerminate,
   onOpenSidebar,
+  toolbarSlot,
   notify,
 }: TerminalViewProps) {
+  const mobileLayout = useMobileLayout();
   const mountRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -149,7 +153,6 @@ export function TerminalView({
   const appliedFontRef = useRef<TerminalFontId | null>(null);
   const fontRequestRef = useRef(0);
   const columnFitRef = useRef<{ key: string; fontSize: number } | null>(null);
-  const [dimensions, setDimensions] = useState('');
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const [writer, setWriter] = useState<boolean | null>(null);
   const [ctrl, setCtrl] = useState(false);
@@ -191,10 +194,7 @@ export function TerminalView({
         columnFitRef.current = { key, fontSize: fitColumns(terminal, addon, columns, fontSize, known) };
       }
       alignScreen(terminal, mount, columns !== AUTO_COLUMNS);
-      if (terminal.cols > 0 && terminal.rows > 0) {
-        setDimensions(`${terminal.cols}×${terminal.rows}`);
-        connectionRef.current?.resize(terminal.cols, terminal.rows);
-      }
+      if (terminal.cols > 0 && terminal.rows > 0) connectionRef.current?.resize(terminal.cols, terminal.rows);
     } catch {
       // A transient zero-sized container can make fit fail during mobile rotation.
     }
@@ -552,6 +552,36 @@ export function TerminalView({
         ? 'is-error'
         : 'is-pending';
 
+  const actions = (
+    <div className="terminal-toolbar__actions">
+      <span className={`live-status ${statusClass}`} role="status" aria-live="polite" aria-atomic="true">
+        {(liveStatus === 'connecting' || liveStatus === 'reconnecting') && <LoaderCircle className="spin" size={13} />}
+        {liveStatusLabel(liveStatus)}
+      </span>
+      <button className="tool-button" onClick={() => void copySelection()} title="复制选中内容">
+        <Copy size={16} />
+      </button>
+      <button className="tool-button mobile-only" onClick={() => void pasteClipboard()} aria-label="粘贴" title="粘贴">
+        <Clipboard size={16} />
+      </button>
+      <button className="tool-button desktop-only" onClick={() => terminalRef.current?.clear()} title="清空可见内容">
+        <Eraser size={16} />
+      </button>
+      <button className="tool-button desktop-only" onClick={() => void toggleFullscreen()} title="全屏">
+        <Maximize2 size={16} />
+      </button>
+      <button
+        type="button"
+        className="tool-button terminate-session-button"
+        onClick={() => onTerminate(session)}
+        title="结束会话"
+        aria-label={`结束会话 ${session.name}`}
+      >
+        <Square size={16} />
+      </button>
+    </div>
+  );
+
   return (
     <div
       className={`terminal-view ${active ? 'is-active' : ''}`}
@@ -559,65 +589,24 @@ export function TerminalView({
       data-terminal-ready={terminalReady}
       data-replay-complete={replayComplete}
     >
-      <header className="terminal-toolbar">
-        {onOpenSidebar && (
-          <button className="tool-button mobile-only" onClick={onOpenSidebar} aria-label="打开侧栏" title="打开侧栏">
-            <Menu size={19} />
-          </button>
-        )}
-        <div className="terminal-identity">
-          <span className={`connection-dot ${statusClass}`} />
-          <div>
+      {toolbarSlot && !mobileLayout ? (
+        // Desktop: the tab already names the session, so only the tools go to the tab bar.
+        active && createPortal(actions, toolbarSlot)
+      ) : (
+        // Phone (or no slot): a compact header carries the sidebar button, name and tools.
+        <header className="terminal-toolbar">
+          {onOpenSidebar && (
+            <button className="tool-button mobile-only" onClick={onOpenSidebar} aria-label="打开侧栏" title="打开侧栏">
+              <Menu size={19} />
+            </button>
+          )}
+          <div className="terminal-identity">
+            <span className={`connection-dot ${statusClass}`} />
             <strong>{session.name}</strong>
-            <span>
-              {session.kind === 'local' ? <TerminalSquare size={13} /> : <Server size={13} />}
-              {session.kind === 'local' ? '本机' : (session.hostName ?? 'SSH')}
-              <i>·</i>
-              {session.cwd || '~'}
-              {dimensions && <i>·</i>}
-              {dimensions}
-            </span>
           </div>
-        </div>
-        <div className="terminal-toolbar__actions">
-          <span className={`live-status ${statusClass}`} role="status" aria-live="polite" aria-atomic="true">
-            {(liveStatus === 'connecting' || liveStatus === 'reconnecting') && (
-              <LoaderCircle className="spin" size={13} />
-            )}
-            {liveStatusLabel(liveStatus)}
-          </span>
-          <button className="tool-button" onClick={() => void copySelection()} title="复制选中内容">
-            <Copy size={16} />
-          </button>
-          <button
-            className="tool-button mobile-only"
-            onClick={() => void pasteClipboard()}
-            aria-label="粘贴"
-            title="粘贴"
-          >
-            <Clipboard size={16} />
-          </button>
-          <button
-            className="tool-button desktop-only"
-            onClick={() => terminalRef.current?.clear()}
-            title="清空可见内容"
-          >
-            <Eraser size={16} />
-          </button>
-          <button className="tool-button desktop-only" onClick={() => void toggleFullscreen()} title="全屏">
-            <Maximize2 size={16} />
-          </button>
-          <button
-            type="button"
-            className="tool-button terminate-session-button"
-            onClick={() => onTerminate(session)}
-            title="结束会话"
-            aria-label={`结束会话 ${session.name}`}
-          >
-            <Square size={16} />
-          </button>
-        </div>
-      </header>
+          {actions}
+        </header>
+      )}
 
       <div className="terminal-canvas-wrap">
         <div ref={mountRef} className="terminal-canvas" onClick={() => terminalRef.current?.focus()} />

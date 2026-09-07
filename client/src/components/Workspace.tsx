@@ -1,6 +1,7 @@
 import { ArrowRight, Clock3, Menu, PanelLeftOpen, Plus, Server, TerminalSquare, X } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { api, errorMessage } from '../api';
+import { isMobileLayout } from '../layout';
 import { loadPreferences, savePreferences } from '../preferences';
 import { sessionStatusLabel, sessionStatusTone } from '../sessionStatus';
 import type { Host, Session, TerminalPreferences, Toast, User } from '../types';
@@ -23,11 +24,6 @@ type WorkspaceProps = {
   commit?: string | undefined;
   onLogout: () => Promise<void>;
 };
-
-/** The breakpoint lives in styles.css and reaches JS through the --mobile-layout variable. */
-function isMobileLayout(): boolean {
-  return getComputedStyle(document.documentElement).getPropertyValue('--mobile-layout').trim() === '1';
-}
 
 function loadOpenSessionIds(sessions: Session[]): string[] {
   try {
@@ -60,6 +56,8 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebar, setMobileSidebar] = useState(false);
+  // On desktop the active terminal renders its actions into the tab bar instead of a toolbar of its own.
+  const [tabbarActions, setTabbarActions] = useState<HTMLElement | null>(null);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [newSessionHostId, setNewSessionHostId] = useState<string | undefined>();
   const [renameTarget, setRenameTarget] = useState<Session | null>(null);
@@ -328,6 +326,7 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
               <Plus size={17} />
             </button>
           </div>
+          <div className="tabbar__actions" ref={setTabbarActions} />
         </header>
 
         <div className={`terminal-area ${currentView === 'hosts' ? 'is-hidden' : ''}`}>
@@ -360,6 +359,7 @@ export function Workspace({ initialHosts, initialSessions, user, version, commit
                     onRestart={requestRestart}
                     onTerminate={setDeleteTarget}
                     onOpenSidebar={() => setMobileSidebar(true)}
+                    toolbarSlot={tabbarActions}
                     notify={notify}
                   />
                 ))}

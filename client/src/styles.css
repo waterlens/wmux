@@ -1044,6 +1044,17 @@ code {
   padding: 0 var(--space-2);
   border-right: 1px solid var(--border);
 }
+/* The active terminal's status and tools, portalled here from TerminalView on desktop. */
+.tabbar__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+}
+.tabbar__actions:empty {
+  display: none;
+}
 .tabs {
   display: flex;
   min-width: 0;
@@ -1317,7 +1328,8 @@ code {
   display: none;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr);
+  /* Toolbar (phone only), canvas, keypad (phone only): rows are fixed so a missing bar leaves no gap. */
+  grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--terminal-bg);
 }
 .terminal-view.is-active {
@@ -1325,6 +1337,7 @@ code {
 }
 .terminal-toolbar {
   display: flex;
+  grid-row: 1;
   min-height: 2.5rem;
   align-items: center;
   justify-content: space-between;
@@ -1341,34 +1354,11 @@ code {
   align-items: center;
   gap: var(--space-3);
 }
-/* Name and metadata share one line so the toolbar stays as short as the tab bar. */
-.terminal-identity > div {
-  display: flex;
-  min-width: 0;
-  align-items: baseline;
-  gap: var(--space-3);
-}
-.terminal-identity > div > * {
-  min-width: 0;
-}
-.terminal-identity strong,
-.terminal-identity span {
+.terminal-identity strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.terminal-identity strong {
   font-size: var(--text-sm);
-}
-.terminal-identity div > span {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
-.terminal-identity i {
-  font-style: normal;
 }
 .terminal-toolbar__actions {
   display: flex;
@@ -1396,6 +1386,7 @@ code {
 }
 .terminal-canvas-wrap {
   position: relative;
+  grid-row: 2;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -2331,9 +2322,6 @@ code {
     flex: 1 1 auto;
   }
 
-  .terminal-view {
-    grid-template-rows: auto minmax(0, 1fr) auto;
-  }
   /* The tab bar gives way to the terminal toolbar, which carries the sidebar button instead. */
   .tabbar.is-terminal {
     display: none;
@@ -2342,9 +2330,6 @@ code {
     min-height: 2.75rem;
     gap: var(--space-2);
     padding: 0 var(--space-2) 0 var(--space-1);
-  }
-  .terminal-identity div > span {
-    display: none;
   }
   .terminal-toolbar__actions {
     gap: 0;
@@ -2375,6 +2360,7 @@ code {
   }
   .special-keys {
     display: grid;
+    grid-row: 3;
     grid-template-columns: repeat(7, minmax(0, 1fr));
     gap: var(--space-1);
     padding: var(--space-1) var(--space-2) calc(var(--space-1) + env(safe-area-inset-bottom));

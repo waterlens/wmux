@@ -509,7 +509,6 @@ describe('TerminalView width preferences', () => {
       expect(terminal.options.fontSize).toBe(10);
       expect(terminal.resize).toHaveBeenLastCalledWith(120, 30);
       expect(addon.fit).not.toHaveBeenCalled();
-      expect(screen.getByText('测试会话').closest('.terminal-view')?.textContent).toContain('120×30');
     } finally {
       restore();
     }
@@ -579,5 +578,52 @@ describe('TerminalView touch scrolling', () => {
     mount.dispatchEvent(drag);
     expect(drag.defaultPrevented).toBe(false);
     expect(wheels).toHaveLength(0);
+  });
+});
+
+describe('TerminalView desktop tool placement', () => {
+  it('renders its tools into the tab-bar slot only while active', async () => {
+    const slot = document.createElement('div');
+    document.body.appendChild(slot);
+    try {
+      const { container, rerender } = render(
+        <TerminalView
+          session={session}
+          active
+          preferences={preferences}
+          onRestart={() => undefined}
+          onTerminate={() => undefined}
+          toolbarSlot={slot}
+          notify={vi.fn()}
+        />,
+      );
+      // Without a toolbar the session name is not in the view, so wait on the ready flag directly.
+      await act(async () => {
+        releaseFonts([]);
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(container.querySelector('.terminal-view')?.getAttribute('data-terminal-ready')).toBe('true'),
+      );
+      expect(container.querySelector('.terminal-toolbar')).toBeNull();
+      expect(slot.querySelector('.terminal-toolbar__actions')).not.toBeNull();
+      expect(slot.textContent).toContain('启动中');
+      expect(slot.querySelector('button[aria-label="结束会话 测试会话"]')).not.toBeNull();
+
+      rerender(
+        <TerminalView
+          session={session}
+          active={false}
+          preferences={preferences}
+          onRestart={() => undefined}
+          onTerminate={() => undefined}
+          toolbarSlot={slot}
+          notify={vi.fn()}
+        />,
+      );
+      expect(slot.querySelector('.terminal-toolbar__actions')).toBeNull();
+    } finally {
+      slot.remove();
+    }
   });
 });
