@@ -25,6 +25,8 @@ type sshBackend struct {
 	stdoutWriter *io.PipeWriter
 	done         chan error
 	kind         Persistence
+	// redrawCommand repaints the multiplexer client; empty for a direct shell.
+	redrawCommand string
 
 	authClosers []io.Closer
 	keepalive   chan struct{}
@@ -94,7 +96,8 @@ func (l *execLauncher) startSSH(ctx context.Context, spec SessionSpec, requested
 	sess.Stdout = writer
 	sess.Stderr = writer
 
-	if command := l.remoteAttachCommand(spec, resolved, MuxSessionName(spec.ID), create); command == "" {
+	name := MuxSessionName(spec.ID)
+	if command := l.remoteAttachCommand(spec, resolved, name, create); command == "" {
 		err = sess.Shell()
 	} else {
 		err = sess.Start(posixScript(command))
@@ -104,16 +107,17 @@ func (l *execLauncher) startSSH(ctx context.Context, spec SessionSpec, requested
 	}
 
 	remote := &sshBackend{
-		client:       client,
-		session:      sess,
-		stdin:        stdin,
-		stdout:       reader,
-		stdoutWriter: writer,
-		done:         make(chan error, 1),
-		kind:         resolved,
-		authClosers:  closers,
-		keepalive:    make(chan struct{}),
-		input:        make(chan struct{}, 1),
+		client:        client,
+		session:       sess,
+		stdin:         stdin,
+		stdout:        reader,
+		stdoutWriter:  writer,
+		done:          make(chan error, 1),
+		kind:          resolved,
+		redrawCommand: l.remoteRedrawCommand(resolved, name),
+		authClosers:   closers,
+		keepalive:     make(chan struct{}),
+		input:         make(chan struct{}, 1),
 	}
 	go func() {
 		waitErr := sess.Wait()
@@ -494,6 +498,24 @@ func (l *execLauncher) remoteTerminateCommand(resolved Persistence, name string)
 	return strings.Join(parts, "; ")
 }
 
+// remoteRedrawCommand repaints wmux's multiplexer client. A SIGWINCH makes tmux
+// invalidate and repaint the client, terminal modes included, without changing
+// its size; screen has an explicit command.
+func (l *execLauncher) remoteRedrawCommand(resolved Persistence, name string) string {
+	switch resolved {
+	case PersistenceTmux:
+		tmux := "tmux -L " + shellQuote(l.muxName) + " -f /dev/null"
+		return "for wmux_pid in $(" + tmux + " list-clients -t " + shellQuote("="+name) + " -F '#{client_pid}'); do " +
+			`kill -WINCH "$wmux_pid"; done`
+	case PersistenceScreen:
+		parts := remoteScreenSetup(l.muxName)
+		parts = append(parts, `screen -c "$wmux_screen_rc" -S `+shellQuote(name)+" -X redisplay")
+		return strings.Join(parts, "; ")
+	default:
+		return ""
+	}
+}
+
 func runSSHOutput(ctx context.Context, session *ssh.Session, command string) ([]byte, error) {
 	var output bytes.Buffer
 	session.Stdout = &output
@@ -519,6 +541,23 @@ func (b *sshBackend) WriteContext(ctx context.Context, p []byte) (int, error) {
 
 func (b *sshBackend) Resize(cols, rows uint16) error {
 	return b.session.WindowChange(int(rows), int(cols))
+}
+
+// Redraw runs the repaint command over a second channel of the live connection,
+// so it needs neither a new dial nor authentication.
+func (b *sshBackend) Redraw(ctx context.Context) error {
+	if b.redrawCommand == "" {
+		return errRedrawUnsupported
+	}
+	sess, err := b.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("terminal: open SSH repaint session: %w", err)
+	}
+	defer sess.Close()
+	if output, err := runSSHOutput(ctx, sess, posixScript(b.redrawCommand)); err != nil {
+		return fmt.Errorf("terminal: repaint remote %s: %w: %s", b.kind, err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func (b *sshBackend) Wait(ctx context.Context) error {

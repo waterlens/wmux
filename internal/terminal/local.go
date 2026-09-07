@@ -12,9 +12,11 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 type localBackend struct {
@@ -22,6 +24,8 @@ type localBackend struct {
 	cmd  *exec.Cmd
 	done chan error
 	kind Persistence
+	// redraw repaints the multiplexer client; nil for a direct PTY.
+	redraw func(context.Context) error
 
 	closeOnce sync.Once
 	closeErr  error
@@ -45,12 +49,17 @@ func (l *execLauncher) startLocal(ctx context.Context, spec SessionSpec, request
 	cols, rows := terminalSize(spec)
 	name := MuxSessionName(spec.ID)
 	var cmd *exec.Cmd
+	var redraw func(context.Context) error
 	switch resolved {
 	case PersistenceTmux:
 		if err := l.ensureLocalTmux(ctx, tool, name, spec, cols, rows, create); err != nil {
 			return nil, "", err
 		}
 		cmd = exec.CommandContext(ctx, tool, l.tmuxArgs("attach-session", "-t", "="+name)...)
+		// tmux treats SIGWINCH as a full invalidation even when the size is
+		// unchanged: it repaints and re-sends its terminal modes, which
+		// refresh-client alone does not.
+		redraw = func(context.Context) error { return cmd.Process.Signal(syscall.SIGWINCH) }
 	case PersistenceScreen:
 		screenConfig, screenEnv, err := l.screenRuntime(spec.Env)
 		if err != nil {
@@ -61,6 +70,9 @@ func (l *execLauncher) startLocal(ctx context.Context, spec SessionSpec, request
 		}
 		cmd = exec.CommandContext(ctx, tool, "-c", screenConfig, "-x", name)
 		cmd.Env = screenEnv
+		redraw = func(ctx context.Context) error {
+			return localScreenCommand(ctx, tool, screenConfig, screenEnv, name, "redisplay")
+		}
 	case PersistenceNone:
 		// A plain PTY has nothing to reattach to.
 		if !create {
@@ -91,12 +103,17 @@ func (l *execLauncher) startLocal(ctx context.Context, spec SessionSpec, request
 		}
 		return nil, "", permanentStartError(fmt.Errorf("terminal: start local %s: %w", resolved, err))
 	}
+	// Fd switches the PTY to blocking I/O. Left in the runtime poller, macOS
+	// reports write readiness for a PTY master unreliably and large pastes
+	// stall between chunks; pty.Setsize used to do this as a side effect.
+	_ = ptmx.Fd()
 	b := &localBackend{
-		pty:   ptmx,
-		cmd:   cmd,
-		done:  make(chan error, 1),
-		kind:  resolved,
-		input: make(chan struct{}, 1),
+		pty:    ptmx,
+		cmd:    cmd,
+		done:   make(chan error, 1),
+		kind:   resolved,
+		redraw: redraw,
+		input:  make(chan struct{}, 1),
 	}
 	go func() {
 		b.done <- cmd.Wait()
@@ -211,6 +228,19 @@ func (l *execLauncher) ensureLocalScreen(ctx context.Context, path, config strin
 		case <-ticker.C:
 		}
 	}
+}
+
+// localScreenCommand sends one command to a running screen session.
+func localScreenCommand(ctx context.Context, path, config string, env []string, name, command string) error {
+	cmd := exec.CommandContext(ctx, path, "-c", config, "-S", name, "-X", command)
+	cmd.Env = env
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("terminal: screen %s: %w: %s", command, err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func localScreenExists(ctx context.Context, path, config string, env []string, name string) bool {
@@ -416,8 +446,27 @@ func (b *localBackend) WriteContext(ctx context.Context, p []byte) (int, error) 
 	return b.pty.Write(p)
 }
 
+// Resize issues the ioctl through the file's own lock, so it cannot race the
+// run loop closing the PTY the way pty.Setsize's bare Fd() would.
 func (b *localBackend) Resize(cols, rows uint16) error {
-	return pty.Setsize(b.pty, &pty.Winsize{Cols: cols, Rows: rows})
+	conn, err := b.pty.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var ioctlErr error
+	if err := conn.Control(func(fd uintptr) {
+		ioctlErr = unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ, &unix.Winsize{Col: cols, Row: rows})
+	}); err != nil {
+		return err
+	}
+	return ioctlErr
+}
+
+func (b *localBackend) Redraw(ctx context.Context) error {
+	if b.redraw == nil {
+		return errRedrawUnsupported
+	}
+	return b.redraw(ctx)
 }
 
 func (b *localBackend) Wait(ctx context.Context) error {

@@ -7,6 +7,7 @@ wmux 是一个自托管的 Web 终端：在浏览器里使用本机 shell 和多
 - 本机 PTY 与多台 SSH 主机统一管理，支持密码、私钥和 `SSH_AUTH_SOCK` 认证
 - 基于 `tmux` / `screen` 的持久化 session，可跨浏览器断线和 wmux 重启重新 attach
 - 同一 session 可在多个设备打开并显式接管输入权，断线后补发缺失的输出
+- 打开或刷新 tmux / screen 会话时由多路复用器直接重绘屏幕，不重放历史，秒开
 - SSH host key 指纹探测与人工信任，可从 OpenSSH config 导入主机
 - 密码登录与会话过期；连续输错三次密码后锁定登录一小时（重启服务解除），凭据用主密钥加密后存入 SQLite
 - 桌面、平板和手机响应式界面，可安装为 PWA

@@ -42,6 +42,9 @@ type runtimeSession struct {
 	joinCounter uint64
 	cols        uint16
 	rows        uint16
+	// prelude is the first output of the current backend connection: the
+	// multiplexer's terminal setup, which a repaint does not repeat.
+	prelude []byte
 	// hasRunLoop reports that run() will close done, so teardown must wait for it.
 	hasRunLoop  bool
 	terminating bool
@@ -180,6 +183,7 @@ func (s *runtimeSession) activateBackend(b backend, resolved Persistence) error 
 	}
 	s.resolved = resolved
 	s.backend = b
+	s.prelude = nil
 	s.lastErr = ""
 	s.mu.Unlock()
 	if err := s.applySize(); err != nil {
@@ -212,6 +216,71 @@ func (s *runtimeSession) applySize() error {
 		return fmt.Errorf("terminal: apply current size %dx%d: %w", cols, rows, err)
 	}
 	return nil
+}
+
+const (
+	// redrawTimeout bounds one repaint request: a signal is immediate and a
+	// remote command is one round trip on the existing connection.
+	redrawTimeout = 5 * time.Second
+	// nudgeSettle separates the two size changes of a nudge; back to back they
+	// would collapse into a single SIGWINCH.
+	nudgeSettle = 50 * time.Millisecond
+)
+
+// redraw repaints the screen for a client that joined without replaying the
+// transcript. It runs off the attach path so that a remote round trip never
+// delays hello. A backend that is still connecting paints the screen itself
+// once it attaches, so there is nothing to do without one.
+func (s *runtimeSession) redraw() {
+	s.mu.Lock()
+	b := s.backend
+	unavailable := s.closed || s.terminating
+	s.mu.Unlock()
+	if b == nil || unavailable {
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, redrawTimeout)
+	defer cancel()
+	if err := b.Redraw(ctx); err != nil {
+		// A direct PTY has no multiplexer to ask, and a failed multiplexer
+		// command ends up here too: a window-size change makes full-screen
+		// programs repaint, while shells ignore it.
+		_ = s.nudgeSize(b)
+	}
+}
+
+// nudgeSize shrinks the terminal by one row and restores it. sizeMu keeps a
+// concurrent Resize from landing between the two steps, and the restore reads
+// the size again so that a browser resize which arrived meanwhile wins.
+func (s *runtimeSession) nudgeSize(b backend) error {
+	s.sizeMu.Lock()
+	defer s.sizeMu.Unlock()
+	cols, rows, err := s.liveSize(b)
+	if err != nil {
+		return err
+	}
+	nudged := rows - 1
+	if rows <= 1 {
+		nudged = rows + 1
+	}
+	if err := b.Resize(cols, nudged); err != nil {
+		return err
+	}
+	time.Sleep(nudgeSettle)
+	if cols, rows, err = s.liveSize(b); err != nil {
+		return err
+	}
+	return b.Resize(cols, rows)
+}
+
+// liveSize returns the requested size while b is still the live backend.
+func (s *runtimeSession) liveSize(b backend) (cols, rows uint16, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.backend != b || s.closed || s.terminating {
+		return 0, 0, ErrUnavailable
+	}
+	return s.cols, s.rows, nil
 }
 
 // retryAfterStartError reports whether the run loop should try to start again,

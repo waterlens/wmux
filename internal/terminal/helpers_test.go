@@ -100,10 +100,19 @@ func waitCondition(ctx context.Context, t *testing.T, satisfied func() bool) {
 	}
 }
 
-func waitForOutput(ctx context.Context, t *testing.T, frames <-chan OutputFrame, needle string) {
+// waitForOutput reads frames until every needle has appeared in the output.
+func waitForOutput(ctx context.Context, t *testing.T, frames <-chan OutputFrame, needles ...string) {
 	t.Helper()
 	var output []byte
-	for !bytes.Contains(output, []byte(needle)) {
+	missing := func() string {
+		for _, needle := range needles {
+			if !bytes.Contains(output, []byte(needle)) {
+				return needle
+			}
+		}
+		return ""
+	}
+	for needle := missing(); needle != ""; needle = missing() {
 		select {
 		case frame, ok := <-frames:
 			if !ok {

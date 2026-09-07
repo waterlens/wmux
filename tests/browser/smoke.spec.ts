@@ -240,7 +240,8 @@ finally:
 
 test('replayed history never answers terminal queries back into the PTY', async ({ page }) => {
   await signIn(page);
-  const input = await startSession(page, '重放隔离');
+  // Only a direct PTY replays its transcript; tmux sessions are repainted instead.
+  const input = await startSession(page, '重放隔离', 'none');
   await input.focus();
   await page.keyboard.insertText(
     pythonCommand(String.raw`
@@ -273,6 +274,34 @@ finally:
   await expect(rows.filter({ hasText: /REPLAY_(?:SAFE|LEAK)/ })).toContainText('REPLAY_SAFE', { timeout: 30_000 });
 
   await terminateSession(page, '重放隔离');
+});
+
+test('a reloaded tmux session is repainted instead of replayed', async ({ page }) => {
+  await signIn(page);
+  const input = await startSession(page, '重绘恢复');
+  await input.focus();
+  await page.keyboard.type(pythonCommand(`print('\\n'.join('LINE %03d' % n for n in range(1, 401)))`), {
+    delay: 1,
+  });
+  await page.keyboard.press('Enter');
+  const rows = page.locator('.terminal-view.is-active .xterm-rows > div');
+  await expect(rows.filter({ hasText: 'LINE 400' })).toBeVisible();
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.locator('.terminal-view.is-active[data-replay-complete="true"]')).toBeVisible({ timeout: 30_000 });
+  // tmux paints the current screen for the new xterm ...
+  await expect(rows.filter({ hasText: 'LINE 400' })).toBeVisible({ timeout: 10_000 });
+  // ... and nothing older was replayed into xterm's own scrollback.
+  const viewport = page.locator('.terminal-view.is-active .xterm-viewport');
+  await expect
+    .poll(() => viewport.evaluate((element) => element.scrollHeight - element.clientHeight))
+    .toBeLessThanOrEqual(1);
+  // The repainted session still takes input.
+  await page.keyboard.type('echo REPAINT_$((20+3))');
+  await page.keyboard.press('Enter');
+  await expect(rows.filter({ hasText: 'REPAINT_23' })).toBeVisible();
+
+  await terminateSession(page, '重绘恢复');
 });
 
 test('dialogs stay usable on desktop and phone viewports', async ({ page }) => {
@@ -376,6 +405,14 @@ test.describe('touch input', () => {
     };
     const before = await firstLine();
     expect(before).toBeGreaterThan(300);
+
+    // A reload gets its screen from a tmux repaint; the repaint has to
+    // re-enable mouse tracking for the new xterm or the drag below goes nowhere.
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.locator('.terminal-view.is-active[data-replay-complete="true"]')).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(rows.filter({ hasText: 'LINE 400' })).toBeVisible({ timeout: 10_000 });
 
     // Drag a finger downwards over the terminal: older lines should scroll into view.
     await page.locator('.terminal-view.is-active .terminal-canvas').evaluate(async (canvas) => {

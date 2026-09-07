@@ -1,5 +1,10 @@
 package terminal
 
+// preludeBytes bounds the attach-time output kept for clients that skip the
+// transcript. tmux's terminal setup is a few hundred bytes ahead of its first
+// screen paint; the rest of the window is slack for a remote host's noise.
+const preludeBytes = 4 << 10
+
 // subscriber is one attached client's set of delivery channels; each one maps to
 // a message type of the WebSocket protocol.
 type subscriber struct {
@@ -26,6 +31,9 @@ func (s *runtimeSession) publish(data []byte) {
 		return
 	}
 	frame := OutputFrame{Sequence: sequence, Data: copyOfData}
+	if len(s.prelude) < preludeBytes {
+		s.prelude = append(s.prelude, copyOfData[:min(len(copyOfData), preludeBytes-len(s.prelude))]...)
+	}
 	writerDropped := false
 	for id, client := range s.clients {
 		select {

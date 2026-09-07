@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -56,10 +59,14 @@ type backendStub struct {
 	reconnect    bool
 	writeStarted chan struct{}
 	blockWrite   bool
+	// redrawErr makes Redraw fail; redraws and sizes record what was asked.
+	redrawErr error
+	redraws   chan struct{}
+	sizes     chan [2]uint16
 }
 
 func newBackendStub() *backendStub {
-	return &backendStub{closed: make(chan struct{})}
+	return &backendStub{closed: make(chan struct{}), redraws: make(chan struct{}, 8), sizes: make(chan [2]uint16, 8)}
 }
 
 func (b *backendStub) Read([]byte) (int, error) {
@@ -89,7 +96,21 @@ func (b *backendStub) WriteContext(ctx context.Context, p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (b *backendStub) Resize(uint16, uint16) error { return nil }
+func (b *backendStub) Resize(cols, rows uint16) error {
+	select {
+	case b.sizes <- [2]uint16{cols, rows}:
+	default:
+	}
+	return nil
+}
+
+func (b *backendStub) Redraw(context.Context) error {
+	select {
+	case b.redraws <- struct{}{}:
+	default:
+	}
+	return b.redrawErr
+}
 
 func (b *backendStub) Wait(ctx context.Context) error {
 	select {
@@ -973,27 +994,263 @@ func TestCloseContextReturnsAtDeadlineWhenLauncherIgnoresCancellation(t *testing
 	close(release)
 }
 
-func TestAttachmentExposesReplayBoundsAndSinceZeroTruncation(t *testing.T) {
+func TestDirectAttachReplaysTranscriptAndNudgesWhenTruncated(t *testing.T) {
 	log := &fixedLog{oldest: 5, newest: 7}
+	b := newBackendStub()
+	// A direct PTY backend has no multiplexer command to offer.
+	b.redrawErr = errRedrawUnsupported
 	manager, err := NewManager(Config{
 		Transcripts: fixedFactory{log: log},
-		launcher:    staticLauncher(newBackendStub(), PersistenceTmux),
+		launcher:    staticLauncher(b, PersistenceNone),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := manager.Create(SessionSpec{ID: "replay-bounds", Persistence: PersistenceTmux}); err != nil {
+	if err := manager.Create(SessionSpec{ID: "replay-bounds", Persistence: PersistenceNone, Cols: 80, Rows: 24}); err != nil {
 		t.Fatal(err)
 	}
+	waitState(ctx, t, manager, "replay-bounds", StateRunning)
+	drainSizes(b)
+
 	a, err := manager.Attach(ctx, "replay-bounds", "browser", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !a.Truncated || a.OldestSequence != 5 || a.LatestSequence != 7 {
-		t.Fatalf("attachment replay metadata = truncated:%v oldest:%d latest:%d", a.Truncated, a.OldestSequence, a.LatestSequence)
+	if !a.Truncated || a.OldestSequence != 5 || a.LatestSequence != 7 || replaySequences(a) != "5,6,7" {
+		t.Fatalf("attachment replay = truncated:%v oldest:%d latest:%d frames:%s", a.Truncated, a.OldestSequence, a.LatestSequence, replaySequences(a))
+	}
+	// The cut-short replay is followed by a one-row nudge that makes
+	// full-screen programs repaint.
+	if got := awaitSizes(ctx, t, b, 2); !slices.Equal(got, [][2]uint16{{80, 23}, {80, 24}}) {
+		t.Fatalf("nudge sizes = %v, want 80x23 then 80x24", got)
+	}
+
+	// A client that is caught up replays exactly the gap and is left alone.
+	caughtUp, err := manager.Attach(ctx, "replay-bounds", "browser-2", 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if caughtUp.Truncated || replaySequences(caughtUp) != "7" {
+		t.Fatalf("gap replay = truncated:%v frames:%s, want frame 7 only", caughtUp.Truncated, replaySequences(caughtUp))
+	}
+	expectNoSizeChange(t, b)
+}
+
+func TestMultiplexerAttachSkipsTranscriptAndRepaints(t *testing.T) {
+	log := &fixedLog{oldest: 1, newest: 7}
+	b := newBackendStub()
+	manager, err := NewManager(Config{
+		Transcripts: fixedFactory{log: log},
+		launcher:    staticLauncher(b, PersistenceTmux),
+		// Frames 6 and 7 are two bytes; a one-byte cap forces the repaint path.
+		ReplayGapBytes: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.Create(SessionSpec{ID: "mux-replay", Persistence: PersistenceTmux, Cols: 80, Rows: 24}); err != nil {
+		t.Fatal(err)
+	}
+	waitState(ctx, t, manager, "mux-replay", StateRunning)
+	drainSizes(b)
+
+	// From scratch: nothing to replay, the multiplexer paints the screen.
+	fresh, err := manager.Attach(ctx, "mux-replay", "fresh", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh.Initial) != 0 || fresh.Truncated || fresh.LatestSequence != 7 {
+		t.Fatalf("fresh multiplexer attach = %d frame(s), truncated:%v latest:%d; want no frames", len(fresh.Initial), fresh.Truncated, fresh.LatestSequence)
+	}
+	awaitRedraw(ctx, t, b)
+
+	// A short gap is cheaper to replay than to repaint.
+	gap, err := manager.Attach(ctx, "mux-replay", "gap", 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaySequences(gap) != "7" || gap.Truncated {
+		t.Fatalf("one-frame gap replay = %s, truncated:%v; want frame 7", replaySequences(gap), gap.Truncated)
+	}
+	expectNoRedraw(t, b)
+
+	// A gap over the byte cap is skipped in favour of a repaint.
+	wide, err := manager.Attach(ctx, "mux-replay", "wide", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wide.Initial) != 0 || wide.Truncated {
+		t.Fatalf("over-cap gap replayed %d frame(s), truncated:%v; want a repaint instead", len(wide.Initial), wide.Truncated)
+	}
+	awaitRedraw(ctx, t, b)
+
+	// A client that is already current needs neither.
+	current, err := manager.Attach(ctx, "mux-replay", "current", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Initial) != 0 {
+		t.Fatalf("current client replayed %d frame(s)", len(current.Initial))
+	}
+	expectNoRedraw(t, b)
+	expectNoSizeChange(t, b)
+}
+
+// burstBackend prints a start-up burst once and then stays silent until closed,
+// like a multiplexer client that has painted the screen.
+type burstBackend struct {
+	*backendStub
+	burst []byte
+}
+
+func (b *burstBackend) Read(p []byte) (int, error) {
+	if len(b.burst) != 0 {
+		n := copy(p, b.burst)
+		b.burst = b.burst[n:]
+		return n, nil
+	}
+	return b.backendStub.Read(p)
+}
+
+func TestMultiplexerFreshAttachGetsAttachPreludeOnly(t *testing.T) {
+	setup := []byte("\x1b[?1049h\x1b[?1h\x1b=\x1b[?2004h\x1b[H\x1b[2Jprompt$ ")
+	b := &burstBackend{backendStub: newBackendStub(), burst: append([]byte(nil), setup...)}
+	// The backend starts only once the first client is subscribed, so that
+	// client sees the burst live rather than as a prelude.
+	release := make(chan struct{})
+	launcher := &launcherStub{startFunc: func(ctx context.Context, _ SessionSpec, _ Persistence, _ bool) (backend, Persistence, error) {
+		select {
+		case <-release:
+			return b, PersistenceTmux, nil
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+	}}
+	manager := managerWithLauncher(t, launcher)
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.Create(SessionSpec{ID: "prelude", Persistence: PersistenceTmux}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := manager.Attach(ctx, "prelude", "live", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	waitState(ctx, t, manager, "prelude", StateRunning)
+	waitForOutput(ctx, t, live.Frames, "prompt$ ")
+
+	fresh, err := manager.Attach(ctx, "prelude", "fresh", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(fresh.Prelude, setup) || len(fresh.Initial) != 0 {
+		t.Fatalf("fresh attach prelude = %q with %d transcript frame(s), want the start-up burst alone", fresh.Prelude, len(fresh.Initial))
+	}
+	// A reconnecting browser still has its terminal state; only the gap matters.
+	back, err := manager.Attach(ctx, "prelude", "back", fresh.LatestSequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Prelude) != 0 || len(back.Initial) != 0 {
+		t.Fatalf("caught-up reconnect got prelude %q and %d frame(s)", back.Prelude, len(back.Initial))
+	}
+}
+
+func TestMultiplexerRepaintFallsBackToSizeNudge(t *testing.T) {
+	log := &fixedLog{oldest: 1, newest: 3}
+	b := newBackendStub()
+	b.redrawErr = errors.New("tmux client is gone")
+	manager, err := NewManager(Config{
+		Transcripts: fixedFactory{log: log},
+		launcher:    staticLauncher(b, PersistenceScreen),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.Create(SessionSpec{ID: "mux-nudge", Persistence: PersistenceScreen, Cols: 120, Rows: 1}); err != nil {
+		t.Fatal(err)
+	}
+	waitState(ctx, t, manager, "mux-nudge", StateRunning)
+	drainSizes(b)
+	if _, err := manager.Attach(ctx, "mux-nudge", "browser", 0); err != nil {
+		t.Fatal(err)
+	}
+	awaitRedraw(ctx, t, b)
+	// A one-row terminal cannot shrink, so the nudge grows it instead.
+	if got := awaitSizes(ctx, t, b, 2); !slices.Equal(got, [][2]uint16{{120, 2}, {120, 1}}) {
+		t.Fatalf("fallback nudge sizes = %v, want 120x2 then 120x1", got)
+	}
+}
+
+func replaySequences(a *Attachment) string {
+	parts := make([]string, 0, len(a.Initial))
+	for _, frame := range a.Initial {
+		parts = append(parts, fmt.Sprint(frame.Sequence))
+	}
+	return strings.Join(parts, ",")
+}
+
+func drainSizes(b *backendStub) {
+	for {
+		select {
+		case <-b.sizes:
+		default:
+			return
+		}
+	}
+}
+
+func awaitSizes(ctx context.Context, t *testing.T, b *backendStub, count int) [][2]uint16 {
+	t.Helper()
+	var sizes [][2]uint16
+	for len(sizes) < count {
+		select {
+		case size := <-b.sizes:
+			sizes = append(sizes, size)
+		case <-ctx.Done():
+			t.Fatalf("saw %d of %d size changes: %v", len(sizes), count, sizes)
+		}
+	}
+	return sizes
+}
+
+func awaitRedraw(ctx context.Context, t *testing.T, b *backendStub) {
+	t.Helper()
+	select {
+	case <-b.redraws:
+	case <-ctx.Done():
+		t.Fatal("backend was not asked to repaint")
+	}
+}
+
+// expectNoRedraw and expectNoSizeChange wait long enough for the attach
+// goroutine to have run; the repaint is asynchronous by design.
+func expectNoRedraw(t *testing.T, b *backendStub) {
+	t.Helper()
+	select {
+	case <-b.redraws:
+		t.Fatal("backend was asked to repaint")
+	case <-time.After(3 * nudgeSettle):
+	}
+}
+
+func expectNoSizeChange(t *testing.T, b *backendStub) {
+	t.Helper()
+	select {
+	case size := <-b.sizes:
+		t.Fatalf("backend was resized to %v", size)
+	case <-time.After(3 * nudgeSettle):
 	}
 }
 

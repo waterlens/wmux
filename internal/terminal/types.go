@@ -151,8 +151,12 @@ type Config struct {
 	Callbacks   Callbacks
 	Transcripts transcript.Factory
 
-	ClientBuffer    int
+	ClientBuffer int
+	// ReplayLimit caps the frames one attachment replays. ReplayGapBytes caps
+	// the bytes a reconnecting tmux or screen client catches up on before the
+	// multiplexer repaints the screen instead.
 	ReplayLimit     int
+	ReplayGapBytes  int
 	ReconnectMin    time.Duration
 	ReconnectMax    time.Duration
 	ShutdownTimeout time.Duration

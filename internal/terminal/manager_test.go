@@ -310,6 +310,139 @@ func TestScreenSessionSurvivesManagerCloseAndTerminateKillsIt(t *testing.T) {
 	}
 }
 
+// A browser that starts from scratch gets the screen from tmux itself: no
+// transcript frames, and a repaint that re-establishes the terminal modes.
+func TestTmuxFreshAttachRepaintsScreen(t *testing.T) {
+	if os.Getenv("WMUX_TMUX_INTEGRATION") != "1" {
+		t.Skip("set WMUX_TMUX_INTEGRATION=1 to exercise the host tmux binary")
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is not installed")
+	}
+	id := fmt.Sprintf("tmux-repaint-%d-%d", os.Getpid(), time.Now().UnixNano())
+	tmuxName := fmt.Sprintf("wmux-test-%d-%d", os.Getpid(), time.Now().UnixNano())
+	cleanupLauncher := newExecLauncher(Config{tmuxPath: tmuxPath, MuxName: tmuxName})
+	defer func() {
+		_ = exec.Command(tmuxPath, cleanupLauncher.tmuxArgs("kill-server")...).Run()
+	}()
+	directory, err := transcript.NewDirectory(transcript.DirectoryConfig{Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(Config{
+		Transcripts: directory,
+		tmuxPath:    tmuxPath,
+		screenPath:  filepath.Join(t.TempDir(), "missing-screen"),
+		MuxName:     tmuxName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	spec := SessionSpec{ID: id, Persistence: PersistenceTmux, Shell: "/bin/sh", Args: []string{"-i"}, Cols: 100, Rows: 30}
+	if err := manager.Create(spec); err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.Attach(ctx, id, "first-browser", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(ctx, t, manager, id, StateRunning)
+	// The client that was there from the start sees tmux's terminal setup live.
+	waitForOutput(ctx, t, first.Frames, "\x1b[?1049h")
+	if _, err := first.WriteContext(ctx, []byte("printf 'WMUX_REPAINT_MARK\\n'\n")); err != nil {
+		t.Fatal(err)
+	}
+	waitForOutput(ctx, t, first.Frames, "WMUX_REPAINT_MARK")
+
+	second, err := manager.Attach(ctx, id, "second-browser", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Initial) != 0 || second.Truncated {
+		t.Fatalf("fresh tmux attach replayed %d frame(s), truncated:%v", len(second.Initial), second.Truncated)
+	}
+	// tmux switches its terminal to the alternate screen once, when wmux
+	// attaches; a browser starting from scratch has to see that setup.
+	if !bytes.Contains(second.Prelude, []byte("\x1b[?1049h")) {
+		t.Fatalf("attach prelude %q lacks tmux's alternate-screen switch", second.Prelude)
+	}
+	// The repaint carries the visible screen and, because the isolated server
+	// runs with mouse on, the mouse-tracking mode a new xterm has to learn.
+	waitForOutput(ctx, t, second.Frames, "WMUX_REPAINT_MARK", "\x1b[?1000h")
+	if err := manager.Terminate(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScreenFreshAttachRepaintsScreen(t *testing.T) {
+	if os.Getenv("WMUX_SCREEN_INTEGRATION") != "1" {
+		t.Skip("set WMUX_SCREEN_INTEGRATION=1 to exercise the host screen binary")
+	}
+	screenPath, err := exec.LookPath("screen")
+	if err != nil {
+		t.Skip("screen is not installed")
+	}
+	id := fmt.Sprintf("screen-repaint-%d-%d", os.Getpid(), time.Now().UnixNano())
+	name := MuxSessionName(id)
+	runtimeDir := shortTempDir(t)
+	screenConfig, screenEnv, err := newExecLauncher(Config{MuxRuntimeDir: runtimeDir}).screenRuntime(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cmd := exec.Command(screenPath, "-c", screenConfig, "-S", name, "-X", "quit")
+		cmd.Env = screenEnv
+		_ = cmd.Run()
+	}()
+	directory, err := transcript.NewDirectory(transcript.DirectoryConfig{Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(Config{
+		Transcripts:   directory,
+		tmuxPath:      filepath.Join(t.TempDir(), "missing-tmux"),
+		screenPath:    screenPath,
+		MuxRuntimeDir: runtimeDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	spec := SessionSpec{ID: id, Persistence: PersistenceScreen, Shell: "/bin/sh", Args: []string{"-i"}, Cols: 100, Rows: 30}
+	if err := manager.Create(spec); err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.Attach(ctx, id, "first-browser", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(ctx, t, manager, id, StateRunning)
+	if _, err := first.WriteContext(ctx, []byte("printf 'WMUX_REPAINT_MARK\\n'\n")); err != nil {
+		t.Fatal(err)
+	}
+	waitForOutput(ctx, t, first.Frames, "WMUX_REPAINT_MARK")
+
+	second, err := manager.Attach(ctx, id, "second-browser", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Initial) != 0 || second.Truncated {
+		t.Fatalf("fresh screen attach replayed %d frame(s), truncated:%v", len(second.Initial), second.Truncated)
+	}
+	waitForOutput(ctx, t, second.Frames, "WMUX_REPAINT_MARK")
+	if err := manager.Terminate(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTmuxSessionSurvivesManagerRestoreAndTerminateKillsIt(t *testing.T) {
 	if os.Getenv("WMUX_TMUX_INTEGRATION") != "1" {
 		t.Skip("set WMUX_TMUX_INTEGRATION=1 to exercise the host tmux binary")

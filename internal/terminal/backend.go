@@ -20,11 +20,16 @@ type backend interface {
 	io.Reader
 	WriteContext(context.Context, []byte) (int, error)
 	Resize(cols, rows uint16) error
+	// Redraw asks the multiplexer to repaint wmux's client, terminal modes
+	// included; a direct PTY reports errRedrawUnsupported.
+	Redraw(context.Context) error
 	Wait(context.Context) error
 	Close() error
 	Terminate(context.Context) error
 	Reconnectable(error) bool
 }
+
+var errRedrawUnsupported = errors.New("terminal: backend has no repaint command")
 
 // launcher creates or attaches a backend connection; create is set only for a
 // session's first launch.

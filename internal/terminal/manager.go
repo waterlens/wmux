@@ -31,6 +31,9 @@ func NewManager(cfg Config) (*Manager, error) {
 	if cfg.ReplayLimit <= 0 {
 		cfg.ReplayLimit = 4096
 	}
+	if cfg.ReplayGapBytes <= 0 {
+		cfg.ReplayGapBytes = 256 << 10
+	}
 	if cfg.ReconnectMin <= 0 {
 		cfg.ReconnectMin = 250 * time.Millisecond
 	}

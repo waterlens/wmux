@@ -142,6 +142,14 @@ func (s *Server) openTerminalStream(ctx context.Context, connection *websocket.C
 		attachment.Close()
 		return nil, 0, false
 	}
+	if len(attachment.Prelude) != 0 {
+		// Sequence 0 keeps the browser's resume point untouched; the replay
+		// barrier still swallows the terminal queries the setup contains.
+		if err := writeOutputFrame(ctx, connection, terminal.OutputFrame{Data: attachment.Prelude}); err != nil {
+			attachment.Close()
+			return nil, 0, false
+		}
+	}
 	for _, frame := range attachment.Initial {
 		if err := writeOutputFrame(ctx, connection, frame); err != nil {
 			attachment.Close()
